@@ -1,0 +1,67 @@
+warning: unused import: `error`
+ --> src/common/connections/quic.rs:9:34
+  |
+9 | use tracing::{debug, info, warn, error};
+  |                                  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `ConnectionRole`
+  --> src/common/connections/quic.rs:16:52
+   |
+16 |         types::{ConnectionState, ConnectionConfig, ConnectionRole},
+   |                                                    ^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+ --> src/common/connections/websocket.rs:9:34
+  |
+9 | use tracing::{debug, info, warn, error};
+  |                                  ^^^^^
+
+warning: unused import: `ConnectionRole`
+  --> src/common/connections/websocket.rs:16:52
+   |
+16 |         types::{ConnectionState, ConnectionConfig, ConnectionRole},
+   |                                                    ^^^^^^^^^^^^^^
+
+warning: method `start_receive_task` is never used
+   --> src/common/connections/quic.rs:350:14
+    |
+50  | impl QuicConnection {
+    | ------------------- method in this implementation
+...
+350 |     async fn start_receive_task(&mut self) -> Result<()> {
+    |              ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `start_receive_task` is never used
+   --> src/common/connections/websocket.rs:379:14
+    |
+50  | impl WebSocketConnection {
+    | ------------------------ method in this implementation
+...
+379 |     async fn start_receive_task(&mut self) -> Result<()> {
+    |              ^^^^^^^^^^^^^^^^^^
+
+warning: fields `config` and `created_at` are never read
+  --> src/common/connections/manager.rs:56:5
+   |
+52 | struct ConnectionInfo {
+   |        -------------- fields in this struct
+...
+56 |     config: ConnectionConfig,
+   |     ^^^^^^
+57 |     /// 创建时间
+58 |     created_at: Instant,
+   |     ^^^^^^^^^^
+
+warning: `flare-core` (lib) generated 7 warnings (run `cargo fix --lib -p flare-core` to apply 4 suggestions)
+   Compiling flare-core v0.1.0 (/Users/hg/workspace/rust/flare-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running `target/debug/examples/websocket_connection_demo server`
+[2m2025-08-31T16:00:34.547060Z[0m [32m INFO[0m [2mwebsocket_connection_demo[0m[2m:[0m 启动 WebSocket 服务端
+[2m2025-08-31T16:00:34.547145Z[0m [32m INFO[0m [2mwebsocket_connection_demo[0m[2m:[0m === WebSocket 服务端启动 ===
+[2m2025-08-31T16:00:34.547215Z[0m [32m INFO[0m [2mwebsocket_connection_demo[0m[2m:[0m 服务端监听地址: 127.0.0.1:8080
+[2m2025-08-31T16:00:34.547224Z[0m [32m INFO[0m [2mwebsocket_connection_demo[0m[2m:[0m 等待客户端连接...
+[2m2025-08-31T16:00:34.547229Z[0m [32m INFO[0m [2mwebsocket_connection_demo[0m[2m:[0m 按 Ctrl+C 停止服务端

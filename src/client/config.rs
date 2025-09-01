@@ -1,497 +1,351 @@
-//! 客户端配置模块
-//!
-//! 定义客户端配置结构和相关功能
+//! 客户端配置 - 专注于长连接可靠性和协议竞速
 
-use crate::common::TransportProtocol;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use crate::common::protocol::ProtocolSelection;
 
-/// 协议选择模式
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ProtocolSelectionMode {
-    /// 自动协议竞速模式（默认）
-    AutoRacing,
-    /// 指定协议模式
-    Specific(TransportProtocol),
-    /// 手动协议选择模式
-    Manual,
-}
-
-/// 服务器地址配置
+/// 客户端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerAddresses {
-    /// QUIC 服务器地址
-    pub quic_url: Option<String>,
-    /// WebSocket 服务器地址（普通TCP）
-    pub websocket_url: Option<String>,
-    /// WebSocket 服务器地址（TLS）
-    pub websocket_tls_url: Option<String>,
+pub struct ClientConfig {
+    /// 服务器地址
+    pub server_url: String,
+    /// 协议选择模式
+    pub protocol_selection: ProtocolSelection,
+    /// 连接配置
+    pub connection: ConnectionConfig,
+    /// 协议竞速配置
+    pub protocol_racing: ProtocolRacingConfig,
+    /// 可靠性配置
+    pub reliability: ReliabilityConfig,
 }
 
-impl ServerAddresses {
-    /// 创建新的服务器地址配置
-    pub fn new() -> Self {
+impl Default for ClientConfig {
+    fn default() -> Self {
         Self {
-            quic_url: None,
-            websocket_url: None,
-            websocket_tls_url: None,
+            server_url: "ws://localhost:8080".to_string(),
+            protocol_selection: ProtocolSelection::Auto,
+            connection: ConnectionConfig::default(),
+            protocol_racing: ProtocolRacingConfig::default(),
+            reliability: ReliabilityConfig::default(),
         }
     }
+}
 
-    /// 设置 QUIC 地址
-    pub fn with_quic_url(mut self, url: String) -> Self {
-        self.quic_url = Some(url);
-        self
+/// 连接配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionConfig {
+    /// 远程服务器地址
+    pub remote_addr: String,
+    /// 连接超时（毫秒）
+    pub connection_timeout_ms: u32,
+    /// 心跳间隔（毫秒）
+    pub heartbeat_interval_ms: u32,
+    /// 心跳超时（毫秒）
+    pub heartbeat_timeout_ms: u32,
+    /// 最大心跳丢失次数
+    pub max_missed_heartbeats: u32,
+    /// 自动重连
+    pub auto_reconnect: bool,
+    /// 最大重连次数
+    pub max_reconnect_attempts: u32,
+    /// 重连延迟（毫秒）
+    pub reconnect_delay_ms: u32,
+    /// 启用TLS
+    pub enable_tls: bool,
+    /// 启用压缩
+    pub enable_compression: bool,
+    /// 自定义CA证书路径
+    pub custom_ca_cert: Option<String>,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            remote_addr: "127.0.0.1:8080".to_string(),
+            connection_timeout_ms: 10000,
+            heartbeat_interval_ms: 30000,
+            heartbeat_timeout_ms: 10000,
+            max_missed_heartbeats: 3,
+            auto_reconnect: true,
+            max_reconnect_attempts: 5,
+            reconnect_delay_ms: 1000,
+            enable_tls: true,
+            enable_compression: true,
+            custom_ca_cert: None,
+        }
+    }
+}
+
+impl ConnectionConfig {
+    /// 检查是否真正启用了TLS（启用TLS且有证书）
+    pub fn is_tls_enabled(&self) -> bool {
+        self.enable_tls && self.custom_ca_cert.is_some()
     }
 
-    /// 设置 WebSocket 地址
-    pub fn with_websocket_url(mut self, url: String) -> Self {
-        self.websocket_url = Some(url);
-        self
-    }
-
-    /// 设置 WebSocket TLS 地址
-    pub fn with_websocket_tls_url(mut self, url: String) -> Self {
-        self.websocket_tls_url = Some(url);
-        self
-    }
-
-    /// 获取指定协议的地址
-    pub fn get_protocol_url(&self, protocol: TransportProtocol) -> Option<&String> {
-        match protocol {
-            TransportProtocol::QUIC => self.quic_url.as_ref(),
-            TransportProtocol::WebSocket => self.websocket_url.as_ref(),
-            TransportProtocol::Auto => {
-                // 自动选择：优先QUIC，回退WebSocket
-                self.quic_url.as_ref().or_else(|| self.websocket_url.as_ref())
+    /// 验证TLS配置
+    pub fn validate_tls_config(&self) -> Result<(), String> {
+        if self.enable_tls {
+            if self.custom_ca_cert.is_none() {
+                return Err("启用TLS时必须指定CA证书路径".to_string());
+            }
+            
+            let ca_cert_path = self.custom_ca_cert.as_ref().unwrap();
+            if !std::path::Path::new(ca_cert_path).exists() {
+                return Err(format!("CA证书文件不存在: {}", ca_cert_path));
             }
         }
-    }
-
-    /// 验证配置
-    pub fn validate(&self) -> Result<(), String> {
-        if self.quic_url.is_none() && self.websocket_url.is_none() && self.websocket_tls_url.is_none() {
-            return Err("至少需要配置一个服务器地址".to_string());
-        }
         Ok(())
-    }
-}
-
-impl Default for ServerAddresses {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 /// 协议竞速配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolRacingConfig {
-    /// 是否启用协议竞速
+    /// 启用协议竞速
     pub enabled: bool,
-    /// 竞速超时时间（毫秒）
-    pub timeout_ms: u64,
-    /// 测试消息数量
-    pub test_message_count: u32,
-    /// 协议权重配置
-    pub protocol_weights: ProtocolWeights,
-    /// 是否启用自动降级
-    pub auto_fallback: bool,
-    /// 竞速间隔（毫秒）
-    pub racing_interval_ms: u64,
-}
-
-/// 协议权重配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProtocolWeights {
-    /// QUIC 权重
-    pub quic_weight: f64,
-    /// WebSocket 权重
-    pub websocket_weight: f64,
-}
-
-impl ProtocolWeights {
-    /// 创建默认权重配置
-    pub fn new() -> Self {
-        Self {
-            quic_weight: 0.7,      // QUIC 默认权重更高
-            websocket_weight: 0.3,
-        }
-    }
-
-    /// 设置 QUIC 权重
-    pub fn with_quic_weight(mut self, weight: f64) -> Self {
-        self.quic_weight = weight.max(0.0).min(1.0);
-        self
-    }
-
-    /// 设置 WebSocket 权重
-    pub fn with_websocket_weight(mut self, weight: f64) -> Self {
-        self.websocket_weight = weight.max(0.0).min(1.0);
-        self
-    }
-
-    /// 获取协议权重
-    pub fn get_weight(&self, protocol: TransportProtocol) -> f64 {
-        match protocol {
-            TransportProtocol::QUIC => self.quic_weight,
-            TransportProtocol::WebSocket => self.websocket_weight,
-            TransportProtocol::Auto => {
-                // 自动选择：使用QUIC权重
-                self.quic_weight
-            }
-        }
-    }
-}
-
-impl Default for ProtocolWeights {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// 竞速测试间隔（毫秒）
+    pub test_interval_ms: u32,
+    /// 竞速测试超时（毫秒）
+    pub test_timeout_ms: u32,
+    /// 质量评估权重
+    pub quality_weights: QualityWeights,
+    /// 协议切换阈值
+    pub switch_threshold: f32,
 }
 
 impl Default for ProtocolRacingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            timeout_ms: 5000,
-            test_message_count: 10,
-            protocol_weights: ProtocolWeights::default(),
-            auto_fallback: true,
-            racing_interval_ms: 30000, // 30秒
+            test_interval_ms: 60000, // 1分钟
+            test_timeout_ms: 5000,   // 5秒
+            quality_weights: QualityWeights::default(),
+            switch_threshold: 0.1,   // 10%的性能差异
         }
     }
 }
 
-
-
-/// 客户端配置
+/// 质量评估权重
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientConfig {
-    /// 用户ID
-    pub user_id: String,
-    /// 服务器地址配置
-    pub server_addresses: ServerAddresses,
-    /// 协议选择模式
-    pub protocol_selection_mode: ProtocolSelectionMode,
-    /// 协议竞速配置
-    pub protocol_racing: ProtocolRacingConfig,
-    /// 连接超时时间（毫秒）
-    pub connection_timeout_ms: u64,
-    /// 心跳间隔（毫秒）
-    pub heartbeat_interval_ms: u64,
-    /// 最大重连次数
-    pub max_reconnect_attempts: u32,
-    /// 重连延迟（毫秒）
-    pub reconnect_delay_ms: u64,
-    /// 是否启用自动重连
-    pub auto_reconnect_enabled: bool,
-    /// 消息重试次数
-    pub message_retry_count: u32,
-    /// 消息重试延迟（毫秒）
-    pub message_retry_delay_ms: u64,
-    /// 缓冲区大小
-    pub buffer_size: usize,
-    /// 是否启用压缩
-    pub compression_enabled: bool,
-    /// 是否启用加密
-    pub encryption_enabled: bool,
-    /// 客户端证书路径（可选）
-    pub client_cert: Option<String>,
+pub struct QualityWeights {
+    /// 延迟权重
+    pub latency_weight: f32,
+    /// 稳定性权重
+    pub stability_weight: f32,
+    /// 连接时间权重
+    pub connection_time_weight: f32,
 }
 
-impl Default for ClientConfig {
+impl Default for QualityWeights {
     fn default() -> Self {
         Self {
-            user_id: String::new(),
-            server_addresses: ServerAddresses::default(),
-            protocol_selection_mode: ProtocolSelectionMode::AutoRacing,
-            protocol_racing: ProtocolRacingConfig::default(),
-            connection_timeout_ms: 5000,
-            heartbeat_interval_ms: 30000,
-            max_reconnect_attempts: 5,
-            reconnect_delay_ms: 1000,
-            auto_reconnect_enabled: true,
-            message_retry_count: 3,
-            message_retry_delay_ms: 1000,
-            buffer_size: 8192,
-            compression_enabled: false,
-            encryption_enabled: false,
-            client_cert: None,
+            latency_weight: 0.4,
+            stability_weight: 0.4,
+            connection_time_weight: 0.2,
         }
     }
 }
 
-impl ClientConfig {
-    /// 创建新的配置
-    pub fn new(user_id: String) -> Self {
-        let mut config = Self::default();
-        config.user_id = user_id;
-        config
-    }
+/// 可靠性配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReliabilityConfig {
+    /// 启用消息确认
+    pub enable_message_ack: bool,
+    /// 消息确认超时（毫秒）
+    pub message_ack_timeout_ms: u32,
+    /// 启用消息重传
+    pub enable_retransmission: bool,
+    /// 最大重传次数
+    pub max_retransmission_attempts: u32,
+    /// 重传延迟（毫秒）
+    pub retransmission_delay_ms: u32,
+    /// 启用消息排序
+    pub enable_message_ordering: bool,
+}
 
-    /// 设置服务器地址
-    pub fn with_server_addresses(mut self, addresses: ServerAddresses) -> Self {
-        self.server_addresses = addresses;
-        self
-    }
-
-    /// 设置协议选择模式
-    pub fn with_protocol_selection_mode(mut self, mode: ProtocolSelectionMode) -> Self {
-        self.protocol_selection_mode = mode;
-        self
-    }
-
-    /// 设置协议竞速配置
-    pub fn with_protocol_racing(mut self, racing: ProtocolRacingConfig) -> Self {
-        self.protocol_racing = racing;
-        self
-    }
-
-    /// 设置连接超时
-    pub fn with_connection_timeout(mut self, timeout_ms: u64) -> Self {
-        self.connection_timeout_ms = timeout_ms;
-        self
-    }
-
-    /// 设置心跳间隔
-    pub fn with_heartbeat_interval(mut self, interval_ms: u64) -> Self {
-        self.heartbeat_interval_ms = interval_ms;
-        self
-    }
-
-    /// 设置最大重连次数
-    pub fn with_max_reconnect_attempts(mut self, attempts: u32) -> Self {
-        self.max_reconnect_attempts = attempts;
-        self
-    }
-
-    /// 设置重连延迟
-    pub fn with_reconnect_delay(mut self, delay_ms: u64) -> Self {
-        self.reconnect_delay_ms = delay_ms;
-        self
-    }
-
-    /// 启用/禁用自动重连
-    pub fn with_auto_reconnect(mut self, enabled: bool) -> Self {
-        self.auto_reconnect_enabled = enabled;
-        self
-    }
-
-    /// 设置消息重试配置
-    pub fn with_message_retry(mut self, retry_count: u32, retry_delay_ms: u64) -> Self {
-        self.message_retry_count = retry_count;
-        self.message_retry_delay_ms = retry_delay_ms;
-        self
-    }
-
-    /// 设置缓冲区大小
-    pub fn with_buffer_size(mut self, size: usize) -> Self {
-        self.buffer_size = size;
-        self
-    }
-
-    /// 启用/禁用压缩
-    pub fn with_compression(mut self, enabled: bool) -> Self {
-        self.compression_enabled = enabled;
-        self
-    }
-
-    /// 启用/禁用加密
-    pub fn with_encryption(mut self, enabled: bool) -> Self {
-        self.encryption_enabled = enabled;
-        self
-    }
-
-    /// 设置客户端证书路径
-    pub fn with_client_cert(mut self, cert_path: String) -> Self {
-        self.client_cert = Some(cert_path);
-        self
-    }
-
-    /// 启用 TLS（使用默认配置）
-    pub fn with_tls(mut self, enabled: bool) -> Self {
-        if enabled {
-            // 如果启用TLS但没有指定证书，使用默认证书
-            self.client_cert = Some("certs/server.crt".to_string());
+impl Default for ReliabilityConfig {
+    fn default() -> Self {
+        Self {
+            enable_message_ack: true,
+            message_ack_timeout_ms: 5000,
+            enable_retransmission: true,
+            max_retransmission_attempts: 3,
+            retransmission_delay_ms: 1000,
+            enable_message_ordering: false,
         }
-        self
-    }
-
-    /// 获取指定协议的服务器地址
-    pub fn get_protocol_url(&self, protocol: TransportProtocol) -> Option<&String> {
-        self.server_addresses.get_protocol_url(protocol)
-    }
-
-    /// 检查是否支持指定协议
-    pub fn supports_protocol(&self, protocol: TransportProtocol) -> bool {
-        self.server_addresses.get_protocol_url(protocol).is_some()
-    }
-
-    /// 获取支持的协议列表
-    pub fn get_supported_protocols(&self) -> Vec<TransportProtocol> {
-        let mut protocols = Vec::new();
-        if self.server_addresses.quic_url.is_some() {
-            protocols.push(TransportProtocol::QUIC);
-        }
-        if self.server_addresses.websocket_url.is_some() {
-            protocols.push(TransportProtocol::WebSocket);
-        }
-        protocols
-    }
-
-    /// 验证配置
-    pub fn validate(&self) -> Result<(), String> {
-        if self.user_id.is_empty() {
-            return Err("用户ID不能为空".to_string());
-        }
-
-        // 验证服务器地址配置
-        self.server_addresses.validate()?;
-
-        // 验证协议选择模式
-        match &self.protocol_selection_mode {
-            ProtocolSelectionMode::Specific(protocol) => {
-                if !self.supports_protocol(*protocol) {
-                    return Err(format!("指定的协议 {:?} 没有对应的服务器地址", protocol));
-                }
-            }
-            ProtocolSelectionMode::AutoRacing => {
-                if self.get_supported_protocols().is_empty() {
-                    return Err("协议竞速模式需要至少配置一个协议地址".to_string());
-                }
-            }
-            ProtocolSelectionMode::Manual => {
-                // 手动模式不需要特殊验证
-            }
-        }
-
-        if self.connection_timeout_ms == 0 {
-            return Err("连接超时时间必须大于0".to_string());
-        }
-
-        if self.heartbeat_interval_ms == 0 {
-            return Err("心跳间隔必须大于0".to_string());
-        }
-
-        if self.buffer_size == 0 {
-            return Err("缓冲区大小必须大于0".to_string());
-        }
-
-        Ok(())
     }
 }
 
-/// 客户端构建器
+/// 协议选择模式扩展
+impl ProtocolSelection {
+    /// 是否启用QUIC
+    pub fn is_quic_enabled(&self) -> bool {
+        matches!(self, ProtocolSelection::QuicOnly | ProtocolSelection::Auto)
+    }
+
+    /// 是否启用WebSocket
+    pub fn is_websocket_enabled(&self) -> bool {
+        matches!(self, ProtocolSelection::WebSocketOnly | ProtocolSelection::Auto)
+    }
+
+    /// 获取协议名称
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProtocolSelection::QuicOnly => "QUIC",
+            ProtocolSelection::WebSocketOnly => "WebSocket",
+            ProtocolSelection::Auto => "Auto",
+        }
+    }
+}
+
+/// 配置构建器
 pub struct ClientConfigBuilder {
     config: ClientConfig,
 }
 
 impl ClientConfigBuilder {
-    /// 创建新的构建器
-    pub fn new(user_id: String) -> Self {
+    /// 创建新的配置构建器
+    pub fn new() -> Self {
         Self {
-            config: ClientConfig::new(user_id),
+            config: ClientConfig::default(),
         }
     }
 
-    /// 设置服务器地址
-    pub fn server_addresses(mut self, addresses: ServerAddresses) -> Self {
-        self.config.server_addresses = addresses;
+    /// 设置服务器URL
+    pub fn server_url(mut self, url: String) -> Self {
+        self.config.server_url = url.clone();
+        self.config.connection.remote_addr = url;
         self
     }
 
     /// 设置协议选择模式
-    pub fn protocol_selection_mode(mut self, mode: ProtocolSelectionMode) -> Self {
-        self.config.protocol_selection_mode = mode;
-        self
-    }
-
-    /// 设置协议竞速配置
-    pub fn protocol_racing(mut self, racing: ProtocolRacingConfig) -> Self {
-        self.config.protocol_racing = racing;
+    pub fn protocol_selection(mut self, selection: ProtocolSelection) -> Self {
+        self.config.protocol_selection = selection;
         self
     }
 
     /// 设置连接超时
-    pub fn connection_timeout(mut self, timeout_ms: u64) -> Self {
-        self.config.connection_timeout_ms = timeout_ms;
+    pub fn connection_timeout(mut self, timeout_ms: u32) -> Self {
+        self.config.connection.connection_timeout_ms = timeout_ms;
         self
     }
 
     /// 设置心跳间隔
-    pub fn heartbeat_interval(mut self, interval_ms: u64) -> Self {
-        self.config.heartbeat_interval_ms = interval_ms;
-        self
-    }
-
-    /// 设置最大重连次数
-    pub fn max_reconnect_attempts(mut self, attempts: u32) -> Self {
-        self.config.max_reconnect_attempts = attempts;
-        self
-    }
-
-    /// 设置重连延迟
-    pub fn reconnect_delay(mut self, delay_ms: u64) -> Self {
-        self.config.reconnect_delay_ms = delay_ms;
+    pub fn heartbeat_interval(mut self, interval_ms: u32) -> Self {
+        self.config.connection.heartbeat_interval_ms = interval_ms;
         self
     }
 
     /// 启用/禁用自动重连
     pub fn auto_reconnect(mut self, enabled: bool) -> Self {
-        self.config.auto_reconnect_enabled = enabled;
+        self.config.connection.auto_reconnect = enabled;
         self
     }
 
-    /// 设置消息重试配置
-    pub fn message_retry(mut self, retry_count: u32, retry_delay_ms: u64) -> Self {
-        self.config.message_retry_count = retry_count;
-        self.config.message_retry_delay_ms = retry_delay_ms;
+    /// 设置最大重连次数
+    pub fn max_reconnect_attempts(mut self, attempts: u32) -> Self {
+        self.config.connection.max_reconnect_attempts = attempts;
         self
     }
 
-    /// 设置缓冲区大小
-    pub fn buffer_size(mut self, size: usize) -> Self {
-        self.config.buffer_size = size;
+    /// 启用/禁用协议竞速
+    pub fn protocol_racing(mut self, enabled: bool) -> Self {
+        self.config.protocol_racing.enabled = enabled;
+        self
+    }
+
+    /// 设置竞速测试间隔
+    pub fn racing_test_interval(mut self, interval_ms: u32) -> Self {
+        self.config.protocol_racing.test_interval_ms = interval_ms;
+        self
+    }
+
+    /// 启用/禁用TLS
+    pub fn tls(mut self, enabled: bool) -> Self {
+        self.config.connection.enable_tls = enabled;
         self
     }
 
     /// 启用/禁用压缩
     pub fn compression(mut self, enabled: bool) -> Self {
-        self.config.compression_enabled = enabled;
-        self
-    }
-
-    /// 启用/禁用加密
-    pub fn encryption(mut self, enabled: bool) -> Self {
-        self.config.encryption_enabled = enabled;
-        self
-    }
-
-    /// 设置客户端证书路径
-    pub fn client_cert(mut self, cert_path: String) -> Self {
-        self.config.client_cert = Some(cert_path);
-        self
-    }
-
-    /// 启用 TLS（使用默认配置）
-    pub fn tls(mut self, enabled: bool) -> Self {
-        if enabled {
-            // 如果启用TLS但没有指定证书，使用默认证书
-            self.config.client_cert = Some("certs/server.crt".to_string());
-        }
+        self.config.connection.enable_compression = enabled;
         self
     }
 
     /// 构建配置
-    pub fn build(self) -> Result<ClientConfig, String> {
-        self.config.validate()?;
-        Ok(self.config)
+    pub fn build(self) -> ClientConfig {
+        self.config
     }
 }
 
 impl Default for ClientConfigBuilder {
     fn default() -> Self {
-        Self {
-            config: ClientConfig::default(),
+        Self::new()
+    }
+}
+
+/// 配置验证
+impl ClientConfig {
+    /// 验证配置的有效性
+    pub fn validate(&self) -> Result<(), String> {
+        if self.server_url.is_empty() {
+            return Err("服务器URL不能为空".to_string());
         }
+
+        if self.connection.connection_timeout_ms == 0 {
+            return Err("连接超时必须大于0".to_string());
+        }
+
+        if self.connection.heartbeat_interval_ms == 0 {
+            return Err("心跳间隔必须大于0".to_string());
+        }
+
+        if self.connection.heartbeat_timeout_ms == 0 {
+            return Err("心跳超时必须大于0".to_string());
+        }
+
+        if self.connection.heartbeat_timeout_ms >= self.connection.heartbeat_interval_ms {
+            return Err("心跳超时必须小于心跳间隔".to_string());
+        }
+
+        if self.protocol_racing.enabled && self.protocol_racing.test_interval_ms == 0 {
+            return Err("协议竞速测试间隔必须大于0".to_string());
+        }
+
+        if self.reliability.message_ack_timeout_ms == 0 {
+            return Err("消息确认超时必须大于0".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// 获取连接超时Duration
+    pub fn connection_timeout_duration(&self) -> Duration {
+        Duration::from_millis(self.connection.connection_timeout_ms as u64)
+    }
+
+    /// 获取心跳间隔Duration
+    pub fn heartbeat_interval_duration(&self) -> Duration {
+        Duration::from_millis(self.connection.heartbeat_interval_ms as u64)
+    }
+
+    /// 获取心跳超时Duration
+    pub fn heartbeat_timeout_duration(&self) -> Duration {
+        Duration::from_millis(self.connection.heartbeat_timeout_ms as u64)
+    }
+
+    /// 获取重连延迟Duration
+    pub fn reconnect_delay_duration(&self) -> Duration {
+        Duration::from_millis(self.connection.reconnect_delay_ms as u64)
+    }
+
+    /// 获取消息确认超时Duration
+    pub fn message_ack_timeout_duration(&self) -> Duration {
+        Duration::from_millis(self.reliability.message_ack_timeout_ms as u64)
+    }
+
+    /// 获取重传延迟Duration
+    pub fn retransmission_delay_duration(&self) -> Duration {
+        Duration::from_millis(self.reliability.retransmission_delay_ms as u64)
     }
 }

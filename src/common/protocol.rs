@@ -1,629 +1,465 @@
-//! Flare IM 协议模块
-//!
-//! 定义二进制消息协议格式
+//! 核心协议定义 - 专注于长连接可靠性
 
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use uuid;
+use std::fmt;
 
-/// 二进制协议消息
-///
-/// 使用二进制格式，最大化传输效率
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnifiedProtocolMessage {
-    /// 消息类型
-    pub t: MessageType,
-    /// 消息内容（二进制数据）
-    pub c: Vec<u8>,
-    /// 发送者ID（可选）
-    pub s: Option<String>,
-    /// 目标ID（可选）
-    pub d: Option<String>,
-    /// 时间戳（可选）
-    pub ts: Option<DateTime<Utc>>,
-    /// 请求ID（用于请求-响应模式，可选）
-    pub req_id: Option<String>,
-}
-
-/// 消息类型枚举
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// 消息类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageType {
-    /// 文本消息
-    #[serde(rename = "t")]
-    Text,
-    /// 二进制消息
-    #[serde(rename = "b")]
-    Binary,
-    /// 连接事件
-    #[serde(rename = "c")]
-    Connect,
-    /// 断开连接事件
-    #[serde(rename = "d")]
-    Disconnect,
-    /// 心跳
-    #[serde(rename = "h")]
-    Heartbeat,
-    /// 心跳确认
-    #[serde(rename = "ha")]
-    HeartbeatAck,
-    /// 通知
-    #[serde(rename = "n")]
-    Notification,
-    /// 错误
-    #[serde(rename = "e")]
-    Error,
-    /// 自定义事件
-    #[serde(rename = "ce")]
-    CustomEvent(String),
-    /// 自定义消息
-    #[serde(rename = "cm")]
-    CustomMessage(String),
-    /// REST 请求（带ID）
-    #[serde(rename = "rq")]
-    RestRequest,
-    /// REST 响应（带ID）
-    #[serde(rename = "rs")]
-    RestResponse,
+    // 核心消息类型
+    Heartbeat = 1,
+    HeartbeatAck = 2,
+    Connect = 3,
+    ConnectAck = 4,
+    Disconnect = 5,
+    DisconnectAck = 6,
+    
+    // 数据传输
+    Data = 7,
+    DataAck = 8,
+    Retransmit = 9,
+    
+    // 协议控制
+    ProtocolSwitch = 10,
+    ProtocolTest = 11,
+    
+    // 错误处理
+    Error = 12,
+    Notification = 13,
+    
+    // 扩展类型
+    CustomEvent = 17,
+    CustomMessage = 18,
 }
 
 impl MessageType {
-    /// 转换为简短字符串表示（用于序列化）
-    pub fn to_string(&self) -> &str {
-        match self {
-            MessageType::Text => "t".as_ref(),
-            MessageType::Binary => "b".as_ref(),
-            MessageType::Connect => "c".as_ref(),
-            MessageType::Disconnect => "d".as_ref(),
-            MessageType::Heartbeat => "h".as_ref(),
-            MessageType::HeartbeatAck => "ha".as_ref(),
-            MessageType::Notification => "n".as_ref(),
-            MessageType::Error => "e".as_ref(),
-            MessageType::CustomEvent(_) => "ce".as_ref(),
-            MessageType::CustomMessage(_) => "cm".as_ref(),
-            MessageType::RestRequest => "rq".as_ref(),
-            MessageType::RestResponse => "rs".as_ref(),
-        }
-    }
-    
-    /// 从简短字符串创建 MessageType
-    pub fn from_string(s: &str) -> Option<Self> {
-        match s {
-            "t" => Some(MessageType::Text),
-            "b" => Some(MessageType::Binary),
-            "c" => Some(MessageType::Connect),
-            "d" => Some(MessageType::Disconnect),
-            "h" => Some(MessageType::Heartbeat),
-            "ha" => Some(MessageType::HeartbeatAck),
-            "n" => Some(MessageType::Notification),
-            "e" => Some(MessageType::Error),
-            "rq" => Some(MessageType::RestRequest),
-            "rs" => Some(MessageType::RestResponse),
-            "ce" => Some(MessageType::CustomEvent("".to_string())),
-            "cm" => Some(MessageType::CustomMessage("".to_string())),
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(MessageType::Heartbeat),
+            2 => Some(MessageType::HeartbeatAck),
+            3 => Some(MessageType::Connect),
+            4 => Some(MessageType::ConnectAck),
+            5 => Some(MessageType::Disconnect),
+            6 => Some(MessageType::DisconnectAck),
+            7 => Some(MessageType::Data),
+            8 => Some(MessageType::DataAck),
+            9 => Some(MessageType::Retransmit),
+            10 => Some(MessageType::ProtocolSwitch),
+            11 => Some(MessageType::ProtocolTest),
+            12 => Some(MessageType::Error),
+            13 => Some(MessageType::Notification),
+            17 => Some(MessageType::CustomEvent),
+            18 => Some(MessageType::CustomMessage),
             _ => None,
         }
     }
-    
-    /// 获取消息类型的描述
-    pub fn description(&self) -> &'static str {
+
+    pub fn to_u8(&self) -> u8 {
         match self {
-            MessageType::Text => "文本消息",
-            MessageType::Binary => "二进制消息",
-            MessageType::Connect => "连接事件",
-            MessageType::Disconnect => "断开连接事件",
-            MessageType::Heartbeat => "心跳",
-            MessageType::HeartbeatAck => "心跳确认",
-            MessageType::Notification => "通知",
-            MessageType::Error => "错误",
-            MessageType::CustomEvent(_) => "自定义事件",
-            MessageType::CustomMessage(_) => "自定义消息",
-            MessageType::RestRequest => "REST 请求",
-            MessageType::RestResponse => "REST 响应",
+            MessageType::Heartbeat => 1,
+            MessageType::HeartbeatAck => 2,
+            MessageType::Connect => 3,
+            MessageType::ConnectAck => 4,
+            MessageType::Disconnect => 5,
+            MessageType::DisconnectAck => 6,
+            MessageType::Data => 7,
+            MessageType::DataAck => 8,
+            MessageType::Retransmit => 9,
+            MessageType::ProtocolSwitch => 10,
+            MessageType::ProtocolTest => 11,
+            MessageType::Error => 12,
+            MessageType::Notification => 13,
+            MessageType::CustomEvent => 17,
+            MessageType::CustomMessage => 18,
         }
-    }
-    
-    /// 检查是否为系统消息类型
-    pub fn is_system_message(&self) -> bool {
-        matches!(self, 
-            MessageType::Connect | 
-            MessageType::Disconnect | 
-            MessageType::Heartbeat | 
-            MessageType::HeartbeatAck
-        )
-    }
-    
-    /// 检查是否为用户消息类型
-    pub fn is_user_message(&self) -> bool {
-        matches!(self, 
-            MessageType::Text | 
-            MessageType::Binary | 
-            MessageType::CustomMessage(_) |
-            MessageType::RestRequest |
-            MessageType::RestResponse
-        )
-    }
-    
-    /// 检查是否为事件类型
-    pub fn is_event(&self) -> bool {
-        matches!(self, 
-            MessageType::Connect | 
-            MessageType::Disconnect | 
-            MessageType::Heartbeat | 
-            MessageType::HeartbeatAck |
-            MessageType::CustomEvent(_)
-        )
-    }
-}
-
-impl UnifiedProtocolMessage {
-    /// 创建新消息
-    pub fn new(message_type: MessageType, content: Vec<u8>) -> Self {
-        Self {
-            t: message_type,
-            c: content,
-            s: None,
-            d: None,
-            ts: None,
-            req_id: None,
-        }
-    }
-
-    /// 设置发送者
-    pub fn sender(mut self, sender: String) -> Self {
-        self.s = Some(sender);
-        self
-    }
-
-    /// 设置目标
-    pub fn target(mut self, target: String) -> Self {
-        self.d = Some(target);
-        self
-    }
-
-    /// 设置时间戳
-    pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
-        self.ts = Some(timestamp);
-        self
-    }
-
-    /// 设置请求ID
-    pub fn with_request_id(mut self, request_id: String) -> Self {
-        self.req_id = Some(request_id);
-        self
-    }
-
-    /// 设置请求ID（生成新的UUID）
-    pub fn with_new_request_id(mut self) -> Self {
-        self.req_id = Some(uuid::Uuid::new_v4().to_string());
-        self
-    }
-
-    // 便利构造方法
-    /// 创建文本消息（UTF-8编码）
-    pub fn text(text: String) -> Self {
-        Self::new(MessageType::Text, text.into_bytes())
-    }
-
-    /// 创建二进制消息
-    pub fn binary(data: Vec<u8>) -> Self {
-        Self::new(MessageType::Binary, data)
-    }
-
-    /// 创建连接事件
-    pub fn connect(user_id: String, session_id: String) -> Self {
-        let user_id_clone = user_id.clone();
-        let mut content = user_id.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(session_id.as_bytes());
-        Self::new(MessageType::Connect, content)
-            .sender(user_id_clone)
-    }
-
-    /// 创建带元数据的连接事件
-    pub fn connect_with_metadata(user_id: String, session_id: String, metadata: Vec<u8>) -> Self {
-        let user_id_clone = user_id.clone();
-        let mut content = user_id.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(session_id.as_bytes());
-        content.push(0); // 分隔符
-        content.extend_from_slice(&metadata);
-        Self::new(MessageType::Connect, content)
-            .sender(user_id_clone)
-    }
-
-    /// 创建带JSON元数据的连接事件
-    pub fn connect_with_json_metadata(user_id: String, session_id: String, metadata: serde_json::Value) -> Self {
-        let metadata_bytes = serde_json::to_vec(&metadata).unwrap_or_default();
-        Self::connect_with_metadata(user_id, session_id, metadata_bytes)
-    }
-
-    /// 创建带文本元数据的连接事件
-    pub fn connect_with_text_metadata(user_id: String, session_id: String, metadata: String) -> Self {
-        Self::connect_with_metadata(user_id, session_id, metadata.into_bytes())
-    }
-
-    /// 创建断开连接事件
-    pub fn disconnect(user_id: String, session_id: String, reason: String) -> Self {
-        let user_id_clone = user_id.clone();
-        let mut content = user_id.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(session_id.as_bytes());
-        content.push(0); // 分隔符
-        content.extend_from_slice(reason.as_bytes());
-        Self::new(MessageType::Disconnect, content)
-            .sender(user_id_clone)
-    }
-
-    /// 创建心跳（空内容）
-    pub fn heartbeat() -> Self {
-        Self::new(MessageType::Heartbeat, vec![])
-    }
-
-    /// 创建心跳确认（空内容）
-    pub fn heartbeat_ack() -> Self {
-        Self::new(MessageType::HeartbeatAck, vec![])
-    }
-
-    /// 创建系统通知（二进制格式）
-    pub fn notification(title: String, content: Vec<u8>) -> Self {
-        let mut data = title.into_bytes();
-        data.push(0); // 分隔符
-        data.extend_from_slice(&content);
-        Self::new(MessageType::Notification, data)
-    }
-
-    /// 创建文本通知（便利方法）
-    pub fn notification_text(title: String, content: String) -> Self {
-        Self::notification(title, content.into_bytes())
-    }
-
-    /// 创建错误（二进制格式）
-    pub fn error(code: String, message: String) -> Self {
-        let mut data = code.into_bytes();
-        data.push(0); // 分隔符
-        data.extend_from_slice(message.as_bytes());
-        Self::new(MessageType::Error, data)
-    }
-
-    /// 创建自定义事件
-    pub fn custom_event(event_name: String, data: Vec<u8>) -> Self {
-        let event_name_clone = event_name.clone();
-        let mut content = event_name.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(&data);
-        Self::new(MessageType::CustomEvent(event_name_clone), content)
-    }
-
-    /// 创建自定义消息
-    pub fn custom_message(message_type: String, data: Vec<u8>) -> Self {
-        let message_type_clone = message_type.clone();
-        let mut content = message_type.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(&data);
-        Self::new(MessageType::CustomMessage(message_type_clone), content)
-    }
-
-    /// 创建 REST 请求（带ID）
-    pub fn rest_request(id: String, method: String, path: String, body: Vec<u8>) -> Self {
-        let mut content = id.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(method.as_bytes());
-        content.push(0); // 分隔符
-        content.extend_from_slice(path.as_bytes());
-        content.push(0); // 分隔符
-        content.extend_from_slice(&body);
-        Self::new(MessageType::RestRequest, content)
-    }
-    
-    /// 创建 REST 响应（带ID）
-    pub fn rest_response(id: String, status_code: u16, body: Vec<u8>) -> Self {
-        let mut content = id.into_bytes();
-        content.push(0); // 分隔符
-        content.extend_from_slice(status_code.to_string().as_bytes());
-        content.push(0); // 分隔符
-        content.extend_from_slice(&body);
-        Self::new(MessageType::RestResponse, content)
-    }
-    /// 创建 JSON REST 请求（带ID）
-    pub fn rest_request_json(id: String, method: String, path: String, json_body: serde_json::Value) -> Self {
-        let body = serde_json::to_vec(&json_body).unwrap_or_default();
-        Self::rest_request(id, method, path, body)
-    }
-
-    /// 创建 JSON REST 响应（带ID）
-    pub fn rest_response_json(id: String, status_code: u16, json_body: serde_json::Value) -> Self {
-        let body = serde_json::to_vec(&json_body).unwrap_or_default();
-        Self::rest_response(id, status_code, body)
-    }
-    // 检查方法
-    pub fn is_text(&self) -> bool {
-        matches!(self.t, MessageType::Text)
-    }
-
-    pub fn is_binary(&self) -> bool {
-        matches!(self.t, MessageType::Binary)
-    }
-
-    pub fn is_connect(&self) -> bool {
-        matches!(self.t, MessageType::Connect)
-    }
-
-    pub fn is_disconnect(&self) -> bool {
-        matches!(self.t, MessageType::Disconnect)
     }
 
     pub fn is_heartbeat(&self) -> bool {
-        matches!(self.t, MessageType::Heartbeat)
+        matches!(self, MessageType::Heartbeat | MessageType::HeartbeatAck)
     }
 
-    pub fn is_heartbeat_ack(&self) -> bool {
-        matches!(self.t, MessageType::HeartbeatAck)
+    pub fn is_control(&self) -> bool {
+        matches!(self, 
+            MessageType::Connect | MessageType::ConnectAck |
+            MessageType::Disconnect | MessageType::DisconnectAck |
+            MessageType::ProtocolSwitch | MessageType::ProtocolTest
+        )
     }
 
+    pub fn is_data(&self) -> bool {
+        matches!(self, MessageType::Data | MessageType::DataAck | MessageType::Retransmit)
+    }
+}
+
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageType::Heartbeat => write!(f, "Heartbeat"),
+            MessageType::HeartbeatAck => write!(f, "HeartbeatAck"),
+            MessageType::Connect => write!(f, "Connect"),
+            MessageType::ConnectAck => write!(f, "ConnectAck"),
+            MessageType::Disconnect => write!(f, "Disconnect"),
+            MessageType::DisconnectAck => write!(f, "DisconnectAck"),
+            MessageType::Data => write!(f, "Data"),
+            MessageType::DataAck => write!(f, "DataAck"),
+            MessageType::Retransmit => write!(f, "Retransmit"),
+            MessageType::ProtocolSwitch => write!(f, "ProtocolSwitch"),
+            MessageType::ProtocolTest => write!(f, "ProtocolTest"),
+            MessageType::Error => write!(f, "Error"),
+            MessageType::Notification => write!(f, "Notification"),
+            MessageType::CustomEvent => write!(f, "CustomEvent"),
+            MessageType::CustomMessage => write!(f, "CustomMessage"),
+        }
+    }
+}
+
+/// 消息可靠性级别
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Reliability {
+    /// 尽力而为，不保证送达
+    BestEffort = 0,
+    /// 至少一次送达
+    AtLeastOnce = 1,
+    /// 恰好一次送达
+    ExactlyOnce = 2,
+    /// 有序送达
+    Ordered = 3,
+}
+
+impl Reliability {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Reliability::BestEffort),
+            1 => Some(Reliability::AtLeastOnce),
+            2 => Some(Reliability::ExactlyOnce),
+            3 => Some(Reliability::Ordered),
+            _ => None,
+        }
+    }
+
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            Reliability::BestEffort => 0,
+            Reliability::AtLeastOnce => 1,
+            Reliability::ExactlyOnce => 2,
+            Reliability::Ordered => 3,
+        }
+    }
+}
+
+/// 二进制消息帧
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame {
+    /// 消息类型
+    pub message_type: MessageType,
+    /// 消息ID
+    pub message_id: u64,
+    /// 可靠性级别
+    pub reliability: Reliability,
+    /// 时间戳
+    pub timestamp: u64,
+    /// 消息体
+    pub payload: Vec<u8>,
+    /// 压缩算法
+    pub compression: Option<u8>,
+    /// 加密标志
+    pub encrypted: bool,
+}
+
+impl Frame {
+    /// 创建新的消息帧
+    pub fn new(
+        message_type: MessageType,
+        message_id: u64,
+        reliability: Reliability,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            message_type,
+            message_id,
+            reliability,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            payload,
+            compression: None,
+            encrypted: false,
+        }
+    }
+
+    /// 创建心跳帧
+    pub fn heartbeat() -> Self {
+        Self::new(MessageType::Heartbeat, 0, Reliability::BestEffort, vec![])
+    }
+
+    /// 创建心跳确认帧
+    pub fn heartbeat_ack() -> Self {
+        Self::new(MessageType::HeartbeatAck, 0, Reliability::BestEffort, vec![])
+    }
+
+    /// 创建连接帧
+    pub fn connect(client_id: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "client_id": client_id,
+            "protocol": "auto"
+        })).unwrap_or_default();
+        Self::new(MessageType::Connect, 0, Reliability::ExactlyOnce, payload)
+    }
+
+    /// 创建数据帧
+    pub fn data(message_id: u64, data: Vec<u8>) -> Self {
+        Self::new(MessageType::Data, message_id, Reliability::AtLeastOnce, data)
+    }
+
+    /// 创建错误帧
+    pub fn error(code: u32, message: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "code": code,
+            "message": message
+        })).unwrap_or_default();
+        Self::new(MessageType::Error, 0, Reliability::ExactlyOnce, payload)
+    }
+
+    /// 序列化为字节
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    /// 从字节反序列化
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(bincode::deserialize(bytes)?)
+    }
+}
+
+/// 统一协议消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedProtocolMessage {
+    /// 消息帧
+    pub frame: Frame,
+    /// 会话ID
+    pub session_id: Option<String>,
+    /// 优先级
+    pub priority: u8,
+}
+
+impl UnifiedProtocolMessage {
+    /// 创建新的统一协议消息
+    pub fn new(frame: Frame, session_id: Option<String>, priority: u8) -> Self {
+        Self {
+            frame,
+            session_id,
+            priority,
+        }
+    }
+
+    /// 获取可靠性级别
+    pub fn get_reliability(&self) -> Reliability {
+        self.frame.reliability
+    }
+
+    /// 获取消息类型
+    pub fn get_message_type(&self) -> MessageType {
+        self.frame.message_type
+    }
+
+    /// 获取消息ID
+    pub fn get_message_id(&self) -> u64 {
+        self.frame.message_id
+    }
+
+    /// 获取时间戳
+    pub fn get_timestamp(&self) -> u64 {
+        self.frame.timestamp
+    }
+
+    /// 获取负载
+    pub fn get_payload(&self) -> &[u8] {
+        &self.frame.payload
+    }
+
+    /// 检查是否为心跳消息
+    pub fn is_heartbeat(&self) -> bool {
+        self.frame.message_type.is_heartbeat()
+    }
+
+    /// 检查是否为控制消息
+    pub fn is_control(&self) -> bool {
+        self.frame.message_type.is_control()
+    }
+
+    /// 检查是否为数据消息
+    pub fn is_data(&self) -> bool {
+        self.frame.message_type.is_data()
+    }
+
+    /// 检查是否为自定义消息
+    pub fn is_custom(&self) -> bool {
+        matches!(self.frame.message_type, MessageType::CustomEvent | MessageType::CustomMessage)
+    }
+
+    /// 检查是否为断开连接消息
+    pub fn is_disconnect(&self) -> bool {
+        self.frame.message_type == MessageType::Disconnect
+    }
+
+    /// 检查是否为通知消息
     pub fn is_notification(&self) -> bool {
-        matches!(self.t, MessageType::Notification)
+        self.frame.message_type == MessageType::Notification
     }
 
+    /// 检查是否为错误消息
     pub fn is_error(&self) -> bool {
-        matches!(self.t, MessageType::Error)
+        self.frame.message_type == MessageType::Error
     }
 
-    pub fn is_custom_event(&self) -> bool {
-        matches!(self.t, MessageType::CustomEvent(_))
-    }
-
-    pub fn is_rest_request(&self) -> bool {
-        matches!(self.t, MessageType::RestRequest)
-    }
-
-    pub fn is_rest_response(&self) -> bool {
-        matches!(self.t, MessageType::RestResponse)
-    }
-
-    // 私有辅助方法 - 解析分隔符分隔的内容
-    fn parse_separated_content(&self, expected_type: bool) -> Option<(String, Vec<u8>)> {
-        if !expected_type {
-            return None;
-        }
-        
-        if let Some(separator_pos) = self.c.iter().position(|&b| b == 0) {
-            let first_part = String::from_utf8_lossy(&self.c[..separator_pos]).to_string();
-            let second_part = self.c[separator_pos + 1..].to_vec();
-            Some((first_part, second_part))
-        } else {
-            None
-        }
-    }
-
-    // 获取方法
-    /// 获取文本内容
-    pub fn as_text(&self) -> Option<String> {
-        if self.is_text() {
-            String::from_utf8(self.c.clone()).ok()
-        } else {
-            None
-        }
-    }
-
-    /// 获取二进制数据
-    pub fn as_binary(&self) -> &Vec<u8> {
-        &self.c
-    }
-
-    /// 获取连接信息
-    pub fn as_connect_info(&self) -> Option<(String, String)> {
-        if self.is_connect() {
-            if let Some(first_sep) = self.c.iter().position(|&b| b == 0) {
-                let user_id = String::from_utf8_lossy(&self.c[..first_sep]).to_string();
-                let session_id = String::from_utf8_lossy(&self.c[first_sep + 1..]).to_string();
-                Some((user_id, session_id))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-
-
-    /// 获取带元数据的连接信息
-    pub fn as_connect_with_metadata(&self) -> Option<(String, String, Vec<u8>)> {
-        if self.is_connect() {
-            let mut parts = self.c.split(|&b| b == 0);
-            if let (Some(user_id_bytes), Some(session_id_bytes), Some(metadata)) = 
-                (parts.next(), parts.next(), parts.next()) {
-                let user_id = String::from_utf8_lossy(user_id_bytes).to_string();
-                let session_id = String::from_utf8_lossy(session_id_bytes).to_string();
-                Some((user_id, session_id, metadata.to_vec()))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取带JSON元数据的连接信息
-    pub fn as_connect_with_json_metadata(&self) -> Option<(String, String, serde_json::Value)> {
-        if let Some((user_id, session_id, metadata)) = self.as_connect_with_metadata() {
-            if let Ok(json_value) = serde_json::from_slice(&metadata) {
-                Some((user_id, session_id, json_value))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取带文本元数据的连接信息
-    pub fn as_connect_with_text_metadata(&self) -> Option<(String, String, String)> {
-        if let Some((user_id, session_id, metadata)) = self.as_connect_with_metadata() {
-            if let Ok(text) = String::from_utf8(metadata) {
-                Some((user_id, session_id, text))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取断开连接信息
-    pub fn as_disconnect_info(&self) -> Option<(String, String, String)> {
-        if self.is_disconnect() {
-            let mut parts = self.c.split(|&b| b == 0);
-            if let (Some(user_id_bytes), Some(session_id_bytes), Some(reason_bytes)) = 
-                (parts.next(), parts.next(), parts.next()) {
-                let user_id = String::from_utf8_lossy(user_id_bytes).to_string();
-                let session_id = String::from_utf8_lossy(session_id_bytes).to_string();
-                let reason = String::from_utf8_lossy(reason_bytes).to_string();
-                Some((user_id, session_id, reason))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取通知信息
-    pub fn as_notification_info(&self) -> Option<(String, Vec<u8>)> {
-        self.parse_separated_content(self.is_notification())
-    }
-
-    /// 获取文本通知信息
-    pub fn as_notification_text(&self) -> Option<(String, String)> {
-        if let Some((title, content)) = self.as_notification_info() {
-            if let Ok(text) = String::from_utf8(content) {
-                Some((title, text))
-            } else {
-                None
-            }
+    /// 获取通知文本
+    pub fn notification_text(&self) -> Option<String> {
+        if self.frame.message_type == MessageType::Notification {
+            serde_json::from_slice(&self.frame.payload).ok()
         } else {
             None
         }
     }
 
     /// 获取错误信息
-    pub fn as_error_info(&self) -> Option<(String, String)> {
-        if let Some((code, message_bytes)) = self.parse_separated_content(self.is_error()) {
-            if let Ok(message) = String::from_utf8(message_bytes) {
-                Some((code, message))
-            } else {
-                None
-            }
+    pub fn error(&self) -> Option<(u32, String)> {
+        if self.frame.message_type == MessageType::Error {
+            let data: serde_json::Value = serde_json::from_slice(&self.frame.payload).ok()?;
+            let code = data["code"].as_u64()? as u32;
+            let message = data["message"].as_str()?.to_string();
+            Some((code, message))
         } else {
             None
         }
     }
 
-    /// 获取自定义事件信息
-    pub fn as_custom_event_info(&self) -> Option<(String, Vec<u8>)> {
-        self.parse_separated_content(self.is_custom_event())
+    /// 创建自定义消息
+    pub fn custom_message(_message_type: &str, data: Vec<u8>) -> Self {
+        let frame = Frame::new(
+            MessageType::CustomMessage,
+            0,
+            Reliability::AtLeastOnce,
+            data,
+        );
+        Self::new(frame, None, 0)
     }
 
-    /// 获取自定义消息信息
-    pub fn as_custom_message_info(&self) -> Option<(String, Vec<u8>)> {
-        self.parse_separated_content(matches!(self.t, MessageType::CustomMessage(_)))
+    /// 创建自定义事件
+    pub fn custom_event(event_name: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "event": event_name
+        })).unwrap_or_default();
+        let frame = Frame::new(
+            MessageType::CustomEvent,
+            0,
+            Reliability::BestEffort,
+            payload,
+        );
+        Self::new(frame, None, 0)
     }
 
-    /// 获取 REST 请求信息（带ID）
-    pub fn as_rest_request_info(&self) -> Option<(String, String, String, Vec<u8>)> {
-        if self.is_rest_request() {
-            let mut parts = self.c.split(|&b| b == 0);
-            if let (Some(id_bytes), Some(method_bytes), Some(path_bytes), Some(body)) = 
-                (parts.next(), parts.next(), parts.next(), parts.next()) {
-                let id = String::from_utf8_lossy(id_bytes).to_string();
-                let method = String::from_utf8_lossy(method_bytes).to_string();
-                let path = String::from_utf8_lossy(path_bytes).to_string();
-                Some((id, method, path, body.to_vec()))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    /// 创建REST响应
+    pub fn rest_response(status: u16, data: Vec<u8>) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "status": status,
+            "data": data
+        })).unwrap_or_default();
+        let frame = Frame::new(
+            MessageType::Data,
+            0,
+            Reliability::ExactlyOnce,
+            payload,
+        );
+        Self::new(frame, None, 0)
     }
 
-    /// 获取 REST 响应信息（带ID）
-    pub fn as_rest_response_info(&self) -> Option<(String, u16, Vec<u8>)> {
-        if self.is_rest_response() {
-            let mut parts = self.c.split(|&b| b == 0);
-            if let (Some(id_bytes), Some(status_bytes), Some(body)) = 
-                (parts.next(), parts.next(), parts.next()) {
-                let id = String::from_utf8_lossy(id_bytes).to_string();
-                if let Ok(status_code) = String::from_utf8_lossy(status_bytes).parse::<u16>() {
-                    Some((id, status_code, body.to_vec()))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    /// 创建心跳确认
+    pub fn heartbeat_ack() -> Self {
+        let frame = Frame::heartbeat_ack();
+        Self::new(frame, None, 0)
     }
 
-    /// 获取 JSON REST 请求信息（带ID）
-    pub fn as_rest_request_json(&self) -> Option<(String, String, String, serde_json::Value)> {
-        if let Some((id, method, path, body)) = self.as_rest_request_info() {
-            if let Ok(json_value) = serde_json::from_slice(&body) {
-                Some((id, method, path, json_value))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取 JSON REST 响应信息（带ID）
-    pub fn as_rest_response_json(&self) -> Option<(String, u16, serde_json::Value)> {
-        if let Some((id, status_code, body)) = self.as_rest_response_info() {
-            if let Ok(json_value) = serde_json::from_slice(&body) {
-                Some((id, status_code, json_value))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// 获取时间戳
-    pub fn timestamp(&self) -> DateTime<Utc> {
-        self.ts.unwrap_or_else(Utc::now)
-    }
-
-    /// 获取发送者ID
-    pub fn sender_id(&self) -> Option<&str> {
-        self.s.as_deref()
-    }
-
-    /// 获取目标ID
-    pub fn target_id(&self) -> Option<&str> {
-        self.d.as_deref()
-    }
-
-    /// 获取请求ID
-    pub fn get_request_id(&self) -> Option<&str> {
-        self.req_id.as_deref()
-    }
-
-    /// 检查是否有请求ID
-    pub fn has_request_id(&self) -> bool {
-        self.req_id.is_some()
+    /// 创建断开连接消息
+    pub fn disconnect(reason: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "reason": reason
+        })).unwrap_or_default();
+        let frame = Frame::new(
+            MessageType::Disconnect,
+            0,
+            Reliability::ExactlyOnce,
+            payload,
+        );
+        Self::new(frame, None, 0)
     }
 }
 
+/// 协议选择模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProtocolSelection {
+    /// 仅使用 QUIC
+    QuicOnly,
+    /// 仅使用 WebSocket
+    WebSocketOnly,
+    /// 自动选择（协议竞速）
+    Auto,
+}
 
+impl Default for ProtocolSelection {
+    fn default() -> Self {
+        ProtocolSelection::Auto
+    }
+}
 
+/// 连接质量指标
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionQuality {
+    /// 延迟（毫秒）
+    pub latency_ms: u32,
+    /// 抖动（毫秒）
+    pub jitter_ms: u32,
+    /// 丢包率（百分比）
+    pub packet_loss_percent: f32,
+    /// 带宽（字节/秒）
+    pub bandwidth_bps: u64,
+    /// 稳定性评分（0-100）
+    pub stability_score: u8,
+}
 
+impl Default for ConnectionQuality {
+    fn default() -> Self {
+        Self {
+            latency_ms: 0,
+            jitter_ms: 0,
+            packet_loss_percent: 0.0,
+            bandwidth_bps: 0,
+            stability_score: 100,
+        }
+    }
+}
 
+/// 协议测试结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolTestResult {
+    /// 协议类型
+    pub protocol: ProtocolSelection,
+    /// 连接质量
+    pub quality: ConnectionQuality,
+    /// 连接时间（毫秒）
+    pub connection_time_ms: u32,
+    /// 是否成功
+    pub success: bool,
+}
 
+impl ProtocolTestResult {
+    /// 计算综合评分
+    pub fn calculate_score(&self) -> f32 {
+        if !self.success {
+            return 0.0;
+        }
 
+        let latency_score = (1000.0 / (self.quality.latency_ms as f32 + 1.0)).min(100.0);
+        let stability_score = self.quality.stability_score as f32;
+        let connection_score = (1000.0 / (self.connection_time_ms as f32 + 1.0)).min(100.0);
 
-
+        latency_score * 0.4 + stability_score * 0.4 + connection_score * 0.2
+    }
+}

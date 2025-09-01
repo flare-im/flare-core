@@ -11,6 +11,7 @@ pub enum ErrorCode {
     ConnectionClosed = 1002,
     ConnectionRefused = 1003,
     ConnectionLimitExceeded = 1004,
+    NotConnected = 1005,
     
     // 认证相关错误 (2000-2999)
     AuthenticationFailed = 2000,
@@ -80,6 +81,7 @@ impl ErrorCode {
             1002 => Some(ErrorCode::ConnectionClosed),
             1003 => Some(ErrorCode::ConnectionRefused),
             1004 => Some(ErrorCode::ConnectionLimitExceeded),
+            1005 => Some(ErrorCode::NotConnected),
             2000 => Some(ErrorCode::AuthenticationFailed),
             2001 => Some(ErrorCode::AuthenticationExpired),
             2002 => Some(ErrorCode::AuthenticationInvalid),
@@ -129,6 +131,7 @@ impl ErrorCode {
             ErrorCode::ConnectionClosed => "CONNECTION_CLOSED",
             ErrorCode::ConnectionRefused => "CONNECTION_REFUSED",
             ErrorCode::ConnectionLimitExceeded => "CONNECTION_LIMIT_EXCEEDED",
+            ErrorCode::NotConnected => "NOT_CONNECTED",
             ErrorCode::AuthenticationFailed => "AUTHENTICATION_FAILED",
             ErrorCode::AuthenticationExpired => "AUTHENTICATION_EXPIRED",
             ErrorCode::AuthenticationInvalid => "AUTHENTICATION_INVALID",
@@ -267,6 +270,14 @@ pub enum FlareError {
     /// 认证错误
     #[error("认证错误: {0}")]
     AuthenticationError(String),
+    
+    /// 不支持的格式
+    #[error("不支持的格式: {0}")]
+    UnsupportedFormat(String),
+    
+    /// 解码错误
+    #[error("解码错误: {0}")]
+    DecodeError(String),
 }
 
 impl FlareError {
@@ -335,6 +346,21 @@ impl FlareError {
         FlareError::Localized(LocalizedError::new(ErrorCode::SerializationError, reason))
     }
     
+    /// 创建反序列化错误
+    pub fn deserialization_failed(reason: impl Into<String>) -> Self {
+        FlareError::Localized(LocalizedError::new(ErrorCode::DeserializationError, reason))
+    }
+    
+    /// 创建不支持的格式错误
+    pub fn unsupported_format(reason: impl Into<String>) -> Self {
+        FlareError::UnsupportedFormat(reason.into())
+    }
+    
+    /// 创建解码错误
+    pub fn decode_error(reason: impl Into<String>) -> Self {
+        FlareError::DecodeError(reason.into())
+    }
+    
     /// 创建通用错误
     pub fn general_error(reason: impl Into<String>) -> Self {
         FlareError::Localized(LocalizedError::new(ErrorCode::GeneralError, reason))
@@ -350,6 +376,8 @@ impl FlareError {
             FlareError::ProtocolError(_) => None,
             FlareError::ConnectionFailed(_) => None,
             FlareError::AuthenticationError(_) => None,
+            FlareError::UnsupportedFormat(_) => None,
+            FlareError::DecodeError(_) => None,
         }
     }
     
@@ -363,6 +391,8 @@ impl FlareError {
             FlareError::ProtocolError(_) => None,
             FlareError::ConnectionFailed(_) => None,
             FlareError::AuthenticationError(_) => None,
+            FlareError::UnsupportedFormat(_) => None,
+            FlareError::DecodeError(_) => None,
         }
     }
     
@@ -376,6 +406,8 @@ impl FlareError {
             FlareError::ProtocolError(msg) => msg,
             FlareError::ConnectionFailed(msg) => msg,
             FlareError::AuthenticationError(msg) => msg,
+            FlareError::UnsupportedFormat(msg) => msg,
+            FlareError::DecodeError(msg) => msg,
         }
     }
     
@@ -389,6 +421,8 @@ impl FlareError {
             FlareError::ProtocolError(msg) => LocalizedError::new(ErrorCode::ProtocolError, msg),
             FlareError::ConnectionFailed(msg) => LocalizedError::new(ErrorCode::ConnectionFailed, msg),
             FlareError::AuthenticationError(msg) => LocalizedError::new(ErrorCode::AuthenticationFailed, msg),
+            FlareError::UnsupportedFormat(msg) => LocalizedError::new(ErrorCode::GeneralError, msg),
+            FlareError::DecodeError(msg) => LocalizedError::new(ErrorCode::DeserializationError, msg),
         }
     }
 }
@@ -433,17 +467,18 @@ impl From<tokio::time::error::Elapsed> for FlareError {
     }
 }
 
-impl From<quinn::ConnectionError> for FlareError {
-    fn from(err: quinn::ConnectionError) -> Self {
-        FlareError::connection_failed(err.to_string())
-    }
-}
+// 移除对不存在依赖的 From 实现
+// impl From<quinn::ConnectionError> for FlareError {
+//     fn from(err: quinn::ConnectionError) -> Self {
+//         FlareError::ConnectionFailed(err.to_string())
+//     }
+// }
 
-impl From<tokio_tungstenite::tungstenite::Error> for FlareError {
-    fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
-        FlareError::connection_failed(err.to_string())
-    }
-}
+// impl From<tokio_tungstenite::tungstenite::Error> for FlareError {
+//     fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
+//         FlareError::ConnectionFailed(err.to_string())
+//     }
+// }
 
 // 错误构建器
 pub struct ErrorBuilder {

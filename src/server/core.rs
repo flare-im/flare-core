@@ -1,85 +1,56 @@
-//! Flare IM 服务端核心模块
+//! Flare 服务端核心模块
 //!
 //! 提供统一的QUIC和WebSocket服务端
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use crate::common::{
-    Result, ProtocolSelection,
-    MessageParser,
+    error::Result, protocol::ProtocolSelection,
 };
 
 use super::{
     config::ServerConfig,
-    conn_manager::{
-        MemoryServerConnectionManager, 
-        ServerConnectionManager, ServerConnectionManagerConfig
-    },
     websocket_server::WebSocketServer,
     quic_server::QuicServer,
 };
 
-/// Flare IM 服务端
+/// Flare 服务端
 /// 提供统一的QUIC和WebSocket服务端
 pub struct FlareIMServer {
     /// 配置
     config: ServerConfig,
-    /// 连接管理器
-    connection_manager: Arc<dyn ServerConnectionManager>,
-    /// 消息解析器
-    message_parser: Arc<MessageParser>,
     /// WebSocket服务器
     websocket_server: Option<WebSocketServer>,
     /// QUIC服务器
     quic_server: Option<QuicServer>,
     /// 运行状态
     running: Arc<RwLock<bool>>,
+    /// 消息发送器
+    message_sender: Option<tokio::sync::mpsc::Sender<crate::common::protocol::UnifiedProtocolMessage>>,
 }
 
 impl FlareIMServer {
-    /// 创建新的 Flare IM 服务端
-    pub fn new(
-        config: ServerConfig,
-        connection_manager: Arc<dyn ServerConnectionManager>,
-        message_parser: Arc<MessageParser>,
-    ) -> Self {
+    /// 创建新的 Flare 服务端
+    pub fn new(config: ServerConfig) -> Self {
         Self {
             config,
-            connection_manager,
-            message_parser,
             websocket_server: None,
             quic_server: None,
             running: Arc::new(RwLock::new(false)),
+            message_sender: None,
         }
     }
     
-    /// 使用默认配置创建新的 Flare IM 服务端
+    /// 使用默认配置创建新的 Flare 服务端
     pub fn with_default_config(config: ServerConfig) -> Self {
-        // 创建连接管理器配置
-        let conn_config = ServerConnectionManagerConfig {
-            max_connections: config.connection_manager.max_connections,
-            connection_timeout_ms: config.connection_manager.connection_timeout_ms,
-            heartbeat_interval_ms: config.connection_manager.heartbeat_interval_ms,
-            heartbeat_timeout_ms: config.connection_manager.heartbeat_timeout_ms,
-            max_missed_heartbeats: config.connection_manager.max_missed_heartbeats as u64,
-            cleanup_interval_ms: config.connection_manager.cleanup_interval_ms,
-            enable_auto_reconnect: config.connection_manager.enable_auto_reconnect,
-            max_reconnect_attempts: config.connection_manager.max_reconnect_attempts,
-            reconnect_delay_ms: config.connection_manager.reconnect_delay_ms,
-        };
-        
-        let connection_manager = Arc::new(MemoryServerConnectionManager::new(conn_config));
-        let message_parser = Arc::new(MessageParser::with_default_callbacks());
-        
-        Self::new(config, connection_manager, message_parser)
+        Self::new(config)
     }
     
-    /// 设置消息解析器
-    pub fn with_message_parser(mut self, parser: Arc<MessageParser>) -> Self {
-        self.message_parser = parser;
-        self
+    /// 设置消息发送器
+    pub fn set_message_sender(&mut self, sender: tokio::sync::mpsc::Sender<crate::common::protocol::UnifiedProtocolMessage>) {
+        self.message_sender = Some(sender);
     }
 
     /// 启动服务端
@@ -92,273 +63,140 @@ impl FlareIMServer {
             *running = true;
         }
         
-        // 启动连接管理器
-        ServerConnectionManager::start(&*self.connection_manager).await?;
-        
         // 根据协议选择启动相应的服务器
         match self.config.protocol.selection {
             ProtocolSelection::WebSocketOnly => {
-                self.start_websocket_server().await?;
-                info!("Flare IM 服务端已启动 (仅WebSocket)");
+                info!("启动 WebSocket 服务器");
+                let ws_server = WebSocketServer::new("127.0.0.1:4000".to_string(), false);
+                // TODO: 实现消息发送器设置
+                ws_server.start().await?;
+                self.websocket_server = Some(ws_server);
             }
             ProtocolSelection::QuicOnly => {
-                self.start_quic_server().await?;
-                info!("Flare IM 服务端已启动 (仅QUIC)");
-            }
-            ProtocolSelection::Both => {
-                if self.config.protocol.websocket.enabled {
-                    self.start_websocket_server().await?;
-                }
-                if self.config.protocol.quic.enabled {
-                    self.start_quic_server().await?;
-                }
-                info!("Flare IM 服务端已启动 (WebSocket + QUIC)");
+                info!("启动 QUIC 服务器");
+                let mut quic_server = QuicServer::new(self.config.clone());
+                quic_server.start().await?;
+                self.quic_server = Some(quic_server);
             }
             ProtocolSelection::Auto => {
-                // 自动选择：优先QUIC，如果QUIC不可用则使用WebSocket
-                if self.config.protocol.quic.enabled {
-                    match self.start_quic_server().await {
-                        Ok(_) => {
-                            info!("Flare IM 服务端已启动 (自动选择: QUIC)");
-                        }
-                        Err(e) => {
-                            warn!("QUIC启动失败，回退到WebSocket: {}", e);
-                            if self.config.protocol.websocket.enabled {
-                                self.start_websocket_server().await?;
-                                info!("Flare IM 服务端已启动 (自动选择: WebSocket)");
-                            } else {
-                                return Err(e);
-                            }
-                        }
-                    }
-                } else if self.config.protocol.websocket.enabled {
-                    self.start_websocket_server().await?;
-                    info!("Flare IM 服务端已启动 (自动选择: WebSocket)");
+                info!("启动 QUIC 和 WebSocket 服务器");
+                
+                // 启动WebSocket服务器
+                let ws_server = WebSocketServer::new("127.0.0.1:4000".to_string(), false);
+                // TODO: 实现消息发送器设置
+                if let Err(e) = ws_server.start().await {
+                    warn!("启动WebSocket服务器失败: {}", e);
                 } else {
-                    return Err(crate::common::error::FlareError::general_error("自动模式下没有可用的协议"));
+                    self.websocket_server = Some(ws_server);
+                }
+                
+                // 启动QUIC服务器
+                let mut quic_server = QuicServer::new(self.config.clone());
+                if let Err(e) = quic_server.start().await {
+                    warn!("启动QUIC服务器失败: {}", e);
+                } else {
+                    self.quic_server = Some(quic_server);
+                }
+                
+                // 检查是否至少有一个服务器启动成功
+                if self.websocket_server.is_none() && self.quic_server.is_none() {
+                    return Err(crate::common::error::FlareError::InvalidConfiguration(
+                        "无法启动任何服务器".to_string()
+                    ));
                 }
             }
         }
-
+        
+        info!("服务端启动成功");
         Ok(())
     }
 
     /// 停止服务端
     pub async fn stop(&mut self) -> Result<()> {
-        let mut running = self.running.write().await;
-        if !*running {
-            return Ok(());
-        }
-        
-        *running = false;
-        
-        // 停止WebSocket服务器
-        if let Some(ref mut ws_server) = self.websocket_server {
-            if let Err(e) = ws_server.stop().await {
-                warn!("停止WebSocket服务器失败: {}", e);
+        {
+            let mut running = self.running.write().await;
+            if !*running {
+                return Ok(());
             }
+            *running = false;
         }
         
-        // 停止QUIC服务器
-        if let Some(ref mut quic_server) = self.quic_server {
+        // 停止所有服务器
+        if let Some(_ws_server) = self.websocket_server.take() {
+            // TODO: 实现 WebSocket 服务器停止
+            warn!("WebSocket 服务器停止功能尚未实现");
+        }
+        
+        if let Some(mut quic_server) = self.quic_server.take() {
             if let Err(e) = quic_server.stop().await {
-                warn!("停止QUIC服务器失败: {}", e);
+                warn!("停止 QUIC 服务器时出错: {:?}", e);
             }
         }
         
-        // 停止连接管理器
-        ServerConnectionManager::stop(&*self.connection_manager).await?;
-        
-        info!("Flare IM 服务端已停止");
+        info!("服务端已停止");
         Ok(())
     }
 
-    /// 获取连接管理器
-    pub fn get_connection_manager(&self) -> Arc<dyn ServerConnectionManager> {
-        Arc::clone(&self.connection_manager)
+    /// 检查服务端是否正在运行
+    pub async fn is_running(&self) -> bool {
+        *self.running.read().await
     }
 
-    /// 获取消息解析器
-    pub fn get_message_parser(&self) -> Arc<MessageParser> {
-        Arc::clone(&self.message_parser)
+    /// 获取配置
+    pub fn config(&self) -> &ServerConfig {
+        &self.config
     }
     
-    /// 启动WebSocket服务器
-    async fn start_websocket_server(&mut self) -> Result<()> {
-        let config = self.config.protocol.websocket.clone();
-        let connection_manager = Arc::clone(&self.connection_manager);
-        let message_parser = Arc::clone(&self.message_parser);
-        let running = Arc::clone(&self.running);
+    /// 获取WebSocket服务器
+    pub fn get_websocket_server(&self) -> Option<&WebSocketServer> {
+        self.websocket_server.as_ref()
+    }
+    
+    /// 获取QUIC服务器
+    pub fn get_quic_server(&self) -> Option<&QuicServer> {
+        self.quic_server.as_ref()
+    }
+    
+    /// 获取当前连接数
+    pub async fn get_total_connection_count(&self) -> usize {
+        let mut total = 0;
         
-        let mut server = WebSocketServer::new(
-            config,
-            connection_manager,
-            message_parser,
-            running,
-        );
+        if let Some(_ws_server) = &self.websocket_server {
+            // WebSocket服务器暂时没有连接计数方法
+            // total += ws_server.get_connection_count().await;
+        }
         
-        server.start().await?;
-        self.websocket_server = Some(server);
+        if let Some(quic_server) = &self.quic_server {
+            total += quic_server.get_connection_count().await;
+        }
+        
+        total
+    }
+    
+    /// 广播消息到所有连接
+    pub async fn broadcast_message(&self, message: crate::common::protocol::UnifiedProtocolMessage) -> Result<()> {
+        let mut success_count = 0;
+        let mut error_count = 0;
+        
+        // 广播到WebSocket连接
+        if let Some(_ws_server) = &self.websocket_server {
+            // WebSocket服务器暂时没有广播方法
+            // 这里可以添加WebSocket广播逻辑
+        }
+        
+        // 广播到QUIC连接
+        if let Some(quic_server) = &self.quic_server {
+            match quic_server.broadcast_message(message.clone()).await {
+                Ok(_) => success_count += 1,
+                Err(e) => {
+                    error!("QUIC广播失败: {}", e);
+                    error_count += 1;
+                }
+            }
+        }
+        
+        info!("广播完成: 成功 {} 个服务器, 失败 {} 个服务器", success_count, error_count);
         Ok(())
-    }
-    
-    /// 启动QUIC服务器
-    async fn start_quic_server(&mut self) -> Result<()> {
-        let config = self.config.protocol.quic.clone();
-        let connection_manager = Arc::clone(&self.connection_manager);
-        let message_parser = Arc::clone(&self.message_parser);
-        let running = Arc::clone(&self.running);
-        
-        let mut server = QuicServer::new(
-            config,
-            connection_manager,
-            message_parser,
-            running,
-        );
-        
-        server.start().await?;
-        self.quic_server = Some(server);
-        Ok(())
-    }
-}
-
-/// Flare IM 服务端构建器
-pub struct FlareIMServerBuilder {
-    config: ServerConfig,
-    connection_manager: Option<Arc<dyn ServerConnectionManager>>,
-    message_parser: Option<Arc<MessageParser>>,
-}
-
-impl FlareIMServerBuilder {
-    pub fn new() -> Self {
-        Self {
-            config: ServerConfig::default(),
-            connection_manager: None,
-            message_parser: None,
-        }
-    }
-    
-    /// 设置协议选择
-    pub fn protocol_selection(mut self, selection: ProtocolSelection) -> Self {
-        self.config.protocol.selection = selection;
-        self
-    }
-    
-    /// 仅使用WebSocket
-    pub fn websocket_only(mut self) -> Self {
-        self.config.protocol.selection = ProtocolSelection::WebSocketOnly;
-        self.config.protocol.websocket.enabled = true;
-        self.config.protocol.quic.enabled = false;
-        self
-    }
-    
-    /// 仅使用QUIC
-    pub fn quic_only(mut self) -> Self {
-        self.config.protocol.selection = ProtocolSelection::QuicOnly;
-        self.config.protocol.websocket.enabled = false;
-        self.config.protocol.quic.enabled = true;
-        self
-    }
-    
-    /// 同时使用WebSocket和QUIC
-    pub fn both_protocols(mut self) -> Self {
-        self.config.protocol.selection = ProtocolSelection::Both;
-        self.config.protocol.websocket.enabled = true;
-        self.config.protocol.quic.enabled = true;
-        self
-    }
-    
-    /// 自动选择协议
-    pub fn auto_protocol(mut self) -> Self {
-        self.config.protocol.selection = ProtocolSelection::Auto;
-        self.config.protocol.websocket.enabled = true;
-        self.config.protocol.quic.enabled = true;
-        self
-    }
-    
-    /// 设置连接管理器 (必须实现 ServerConnectionManager trait)
-    pub fn with_connection_manager(mut self, manager: Arc<dyn ServerConnectionManager>) -> Self {
-        // 从提供的连接管理器获取配置
-        let config = manager.get_config().clone();
-        
-        // 创建新的 MemoryServerConnectionManager 实例，使用相同的配置
-        // 这样可以确保类型一致性，同时允许用户提供自定义的连接管理器
-        self.connection_manager = Some(manager);
-        
-        self
-    }
-    
-    /// 设置消息解析器
-    pub fn with_message_parser(mut self, parser: Arc<MessageParser>) -> Self {
-        self.message_parser = Some(parser);
-        self
-    }
-
-    pub fn websocket_addr(mut self, addr: std::net::SocketAddr) -> Self {
-        self.config.protocol.websocket.bind_addr = addr.to_string();
-        self
-    }
-
-    pub fn quic_addr(mut self, addr: std::net::SocketAddr) -> Self {
-        self.config.protocol.quic.bind_addr = addr.to_string();
-        self
-    }
-
-    pub fn max_connections(mut self, max: usize) -> Self {
-        self.config.connection_manager.max_connections = max;
-        // 如果已经设置了连接管理器，则更新其配置
-        if let Some(ref manager) = self.connection_manager {
-            let current_config = manager.get_config();
-            let new_config = ServerConnectionManagerConfig {
-                max_connections: max,
-                connection_timeout_ms: current_config.connection_timeout_ms,
-                heartbeat_interval_ms: current_config.heartbeat_interval_ms,
-                heartbeat_timeout_ms: current_config.heartbeat_timeout_ms,
-                max_missed_heartbeats: current_config.max_missed_heartbeats,
-                cleanup_interval_ms: current_config.cleanup_interval_ms,
-                enable_auto_reconnect: current_config.enable_auto_reconnect,
-                max_reconnect_attempts: current_config.max_reconnect_attempts,
-                reconnect_delay_ms: current_config.reconnect_delay_ms,
-            };
-            // 创建一个新的 MemoryServerConnectionManager 实例
-            self.connection_manager = Some(Arc::new(MemoryServerConnectionManager::new(new_config)));
-        }
-        self
-    }
-    
-    /// 配置 QUIC TLS 证书
-    pub fn quic_tls(mut self, cert_path: String, key_path: String) -> Self {
-        self.config.protocol.quic.cert_path = cert_path;
-        self.config.protocol.quic.key_path = key_path;
-        self
-    }
-    
-    pub fn build(self) -> Result<FlareIMServer> {
-        // 验证必需字段并提供默认值
-        let connection_manager = self.connection_manager
-            .unwrap_or_else(|| Arc::new(MemoryServerConnectionManager::new(ServerConnectionManagerConfig::default())));
-
-        let message_parser = self.message_parser
-            .unwrap_or_else(|| Arc::new(MessageParser::with_default_callbacks()));
-
-        // 验证连接管理器配置
-        let config = connection_manager.get_config();
-        if config.max_connections == 0 {
-            return Err(crate::common::error::FlareError::InvalidConfiguration(
-                "连接管理器最大连接数不能为0".to_string()
-            ));
-        }
-
-        // 创建服务器实例
-        let server = FlareIMServer::new(self.config, connection_manager, message_parser);
-
-        Ok(server)
-    }
-}
-
-impl Default for FlareIMServerBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 } 
 

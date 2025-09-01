@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::ProtocolSelection;
+use crate::common::protocol::ProtocolSelection;
 
 /// 服务器协议配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub struct ServerProtocolConfig {
 impl Default for ServerProtocolConfig {
     fn default() -> Self {
         Self {
-            selection: ProtocolSelection::Both,
+            selection: ProtocolSelection::Auto,
             websocket: WebSocketServerConfig::default(),
             quic: QuicServerConfig::default(),
         }
@@ -59,6 +59,34 @@ impl Default for WebSocketServerConfig {
     }
 }
 
+impl WebSocketServerConfig {
+    /// 检查是否真正启用了TLS（启用TLS且有证书）
+    pub fn is_tls_enabled(&self) -> bool {
+        self.enable_tls && self.cert_path.is_some() && self.key_path.is_some()
+    }
+
+    /// 验证TLS配置
+    pub fn validate_tls_config(&self) -> Result<(), String> {
+        if self.enable_tls {
+            if self.cert_path.is_none() || self.key_path.is_none() {
+                return Err("启用TLS时必须指定证书和私钥路径".to_string());
+            }
+            
+            let cert_path = self.cert_path.as_ref().unwrap();
+            let key_path = self.key_path.as_ref().unwrap();
+            
+            if !std::path::Path::new(cert_path).exists() {
+                return Err(format!("TLS证书文件不存在: {}", cert_path));
+            }
+            
+            if !std::path::Path::new(key_path).exists() {
+                return Err(format!("TLS私钥文件不存在: {}", key_path));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// QUIC服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuicServerConfig {
@@ -89,6 +117,26 @@ impl Default for QuicServerConfig {
             alpn_protocols: vec![b"flare-core".to_vec()],
             enable_0rtt: true,
         }
+    }
+}
+
+impl QuicServerConfig {
+    /// 检查是否真正启用了TLS（有证书且文件存在）
+    pub fn is_tls_enabled(&self) -> bool {
+        std::path::Path::new(&self.cert_path).exists() && std::path::Path::new(&self.key_path).exists()
+    }
+
+    /// 验证TLS配置（QUIC必须启用TLS）
+    pub fn validate_tls_config(&self) -> Result<(), String> {
+        if !std::path::Path::new(&self.cert_path).exists() {
+            return Err(format!("QUIC TLS证书文件不存在: {}", self.cert_path));
+        }
+        
+        if !std::path::Path::new(&self.key_path).exists() {
+            return Err(format!("QUIC TLS私钥文件不存在: {}", self.key_path));
+        }
+        
+        Ok(())
     }
 }
 
