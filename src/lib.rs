@@ -11,7 +11,7 @@ pub mod server;
 // 重新导出核心类型
 pub use common::{
     error::FlareError,
-    protocol::{Frame, MessageType, UnifiedProtocolMessage, ProtocolSelection},
+    protocol::{Frame, MessageType, ProtocolSelection},
     connections::{
         Connection, ClientConnection, ServerConnection, ConnectionFactory, ConnectionManager,
         ConnectionConfig, ConnectionType, ConnectionRole, ConnectionState,

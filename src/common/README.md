@@ -180,7 +180,7 @@ pub trait ConnectionEventHandler {
     async fn on_connected(&self, connection_id: &str);
     async fn on_disconnected(&self, connection_id: &str, reason: &str);
     async fn on_error(&self, connection_id: &str, error: &str);
-    async fn on_message_received(&self, connection_id: &str, message: &UnifiedProtocolMessage);
+    async fn on_message_received(&self, connection_id: &str, message: &Frame);
     async fn on_heartbeat_timeout(&self, connection_id: &str);
     async fn on_quality_changed(&self, connection_id: &str, quality_score: u8);
 }
@@ -266,7 +266,7 @@ println!("WebSocket 特性: {:?}", features);
 ### 4. 消息收发
 
 ```rust
-use flare_core::protocol::{UnifiedProtocolMessage, Frame, MessageType, Reliability};
+use flare_core::protocol::{Frame, MessageType, Reliability};
 
 // 创建消息
 let frame = Frame::new(
@@ -275,7 +275,7 @@ let frame = Frame::new(
     Reliability::Reliable,
     b"Hello, World!".to_vec(),
 );
-let message = UnifiedProtocolMessage::new(frame, None, 1);
+let message = frame;
 
 // 发送消息
 connection.send_message(message).await?;

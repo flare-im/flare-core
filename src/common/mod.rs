@@ -11,8 +11,8 @@ pub use connections::{
     Connection, ClientConnection, ServerConnection, 
     ConnectionFactory, ConnectionManager,
     ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, 
-    ConnectionEventHandler, DefaultConnectionEventHandler,
+    ConnectionEventHandler, DefaultConnectionEventHandler, EchoConnectionEventHandler, HeartbeatConnectionEventHandler,
     QuicConnection, WebSocketConnection,
 };
 pub use error::{Result, FlareError};
-pub use protocol::{UnifiedProtocolMessage, Frame, MessageType, Reliability, ProtocolSelection}; 
+pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection}; 

@@ -118,10 +118,10 @@ impl ConnectionEventHandler for CustomEventHandler {
 
 ### 消息收发
 ```rust
-use flare_core::protocol::UnifiedProtocolMessage;
+use flare_core::protocol::Frame;
 
 // 发送消息
-let message = UnifiedProtocolMessage::new(
+let message = Frame::new(
     "Hello, World!".to_string(),
     "text".to_string(),
     None,

@@ -10,11 +10,14 @@ use tracing::{info, error, warn};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
-    ConnectionEventHandler, UnifiedProtocolMessage,
+    ConnectionEventHandler, Frame,
     FlareError,
 };
-use flare_core::common::connections::{
-    WebSocketConfig, RawConnectionHandler,
+use flare_core::common::{
+    EchoConnectionEventHandler, HeartbeatConnectionEventHandler,
+    connections::{
+        WebSocketConfig, RawConnectionHandler,
+    },
 };
 
 type Result<T> = std::result::Result<T, FlareError>;
@@ -39,7 +42,7 @@ impl ConnectionEventHandler for SimpleEventHandler {
         error!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
 
-    async fn on_message_received(&self, connection_id: &str, message: &UnifiedProtocolMessage) {
+    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
         let payload = message.get_payload();
         if let Ok(text) = String::from_utf8(payload.to_vec()) {
             info!("[{}] 收到消息: {} - 内容: {}", self.name, connection_id, text);
@@ -108,10 +111,8 @@ async fn main() -> Result<()> {
                     Ok((tcp_stream, addr)) => {
                         info!("客户端已连接: {}", addr);
                         
-                        // 为每个连接创建独立的事件处理器
-                        let connection_event_handler = Arc::new(SimpleEventHandler::new(
-                            format!("服务端-{}", addr)
-                        ));
+                        // 使用心跳事件处理器来处理客户端心跳
+                        let connection_event_handler = Arc::new(HeartbeatConnectionEventHandler::new());
                         
                         // 克隆配置用于新连接
                         let connection_config = config.clone();
@@ -121,27 +122,25 @@ async fn main() -> Result<()> {
                             match RawConnectionHandler::from_websocket_with_handler(
                                 tcp_stream, 
                                 connection_config, 
-                                connection_event_handler
+                                Arc::clone(&connection_event_handler) as Arc<dyn ConnectionEventHandler>
                             ).await {
                                 Ok(mut server_connection) => {
+                                    info!("WebSocket 服务端连接已建立: {}", addr);
+                                    
                                     // 接受连接
                                     if let Err(e) = server_connection.accept().await {
                                         error!("接受连接失败: {}", e);
                                         return;
                                     }
                                     
-                                    info!("WebSocket 服务端连接已建立: {}", addr);
+                                    // 将连接设置到心跳事件处理器中
+                                    let server_conn_arc = Arc::new(tokio::sync::Mutex::new(server_connection));
+                                    connection_event_handler.set_connection(server_conn_arc).await;
                                     
-                                    // 等待直到连接不健康
-                                    while server_connection.is_healthy().await {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                                    }
-                                    
-                                    // 关闭连接
-                                    if let Err(e) = server_connection.close().await {
-                                        error!("关闭连接失败: {} - {}", addr, e);
-                                    } else {
-                                        info!("客户端已断开: {}", addr);
+                                    // 保持连接活跃，等待客户端断开
+                                    loop {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                        // 这里可以添加连接健康检查
                                     }
                                 }
                                 Err(e) => {

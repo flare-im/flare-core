@@ -7,13 +7,13 @@ use tracing::{info, error};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
-    ConnectionEventHandler, UnifiedProtocolMessage,
+    ConnectionEventHandler, Frame,
     FlareError,
 };
 use flare_core::common::connections::{
     ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
 };
-use flare_core::common::protocol::{Frame, MessageType, Reliability};
+use flare_core::common::protocol::{MessageType, Reliability};
 
 use std::sync::Arc;
 
@@ -39,12 +39,27 @@ impl ConnectionEventHandler for SimpleEventHandler {
         error!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
 
-    async fn on_message_received(&self, connection_id: &str, message: &UnifiedProtocolMessage) {
-        let payload = message.get_payload();
-        if let Ok(text) = String::from_utf8(payload.to_vec()) {
-            info!("[{}] 收到消息: {} - 内容: {}", self.name, connection_id, text);
+    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
+        if message.is_heartbeat() {
+            let message_type = message.get_message_type();
+            match message_type {
+                MessageType::HeartbeatAck => {
+                    info!("[{}] 收到心跳确认: {}", self.name, connection_id);
+                }
+                MessageType::Heartbeat => {
+                    info!("[{}] 收到服务端心跳: {}", self.name, connection_id);
+                }
+                _ => {
+                    info!("[{}] 收到其他心跳消息: {} - 类型: {:?}", self.name, connection_id, message_type);
+                }
+            }
         } else {
-            info!("[{}] 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
+            let payload = message.get_payload();
+            if let Ok(text) = String::from_utf8(payload.to_vec()) {
+                info!("[{}] 收到消息: {} - 内容: {}", self.name, connection_id, text);
+            } else {
+                info!("[{}] 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
+            }
         }
     }
 
@@ -95,14 +110,43 @@ async fn main() -> Result<()> {
     // 创建客户端连接
     let mut client_connection = factory.create_client_connection(config).await?;
     
-    // 注意：set_event_handler 方法不在 ClientConnection trait 中
-    // 事件处理需要在具体的连接实现中设置
-    let _event_handler = Arc::new(SimpleEventHandler::new("客户端".to_string()));
+    // 设置事件处理器
+    let event_handler = Arc::new(SimpleEventHandler::new("客户端".to_string()));
+    client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEventHandler>).await;
     
     // 建立连接
     info!("正在连接服务端...");
     client_connection.connect().await?;
     info!("已连接到服务端！");
+    
+    // 等待一下让连接稳定
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // 启动心跳任务
+    let client_connection_heartbeat = Arc::new(tokio::sync::Mutex::new(client_connection));
+    let heartbeat_connection = Arc::clone(&client_connection_heartbeat);
+    let heartbeat_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(30000)); // 30秒心跳间隔
+        loop {
+            interval.tick().await;
+            
+            let mut conn = heartbeat_connection.lock().await;
+            
+            // 发送心跳消息
+            let heartbeat_frame = Frame::heartbeat();
+            if let Err(e) = conn.send_message(heartbeat_frame).await {
+                error!("心跳发送失败: {}", e);
+                break;
+            } else {
+                info!("心跳已发送");
+            }
+            
+            // 调用连接的心跳方法更新活跃状态
+            if let Err(e) = conn.send_heartbeat().await {
+                error!("心跳状态更新失败: {}", e);
+            }
+        }
+    });
     
     // 启动用户输入处理
     info!("请输入消息 (输入 'quit' 退出):");
@@ -126,16 +170,16 @@ async fn main() -> Result<()> {
         
         if !input.is_empty() {
             // 创建统一协议消息
-            let frame = Frame::new(
+            let message = Frame::new(
                 MessageType::Data,
                 0,
                 Reliability::AtLeastOnce,
                 input.as_bytes().to_vec(),
             );
-            let message = UnifiedProtocolMessage::new(frame, None, 1);
             
             // 通过Connection trait发送消息
-            if let Err(e) = client_connection.send_message(message).await {
+            let mut conn = client_connection_heartbeat.lock().await;
+            if let Err(e) = conn.send_message(message).await {
                 error!("发送消息失败: {}", e);
                 break;
             } else {
@@ -144,9 +188,13 @@ async fn main() -> Result<()> {
         }
     }
     
+    // 停止心跳任务
+    heartbeat_task.abort();
+    
     // 断开连接
     info!("正在断开连接...");
-    client_connection.disconnect().await?;
+    let mut conn = client_connection_heartbeat.lock().await;
+    conn.disconnect().await?;
     
     info!("客户端已断开");
     Ok(())

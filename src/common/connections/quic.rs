@@ -10,7 +10,7 @@ use tracing::{debug, info, warn, error};
 
 use crate::common::{
     error::{Result, FlareError},
-    protocol::UnifiedProtocolMessage,
+    protocol::Frame,
     connections::{
         traits::{Connection, ClientConnection, ServerConnection, ConnectionEventHandler, ConnectionStats, HeartbeatResponseHandler},
         types::{ConnectionState, ConnectionConfig},
@@ -135,11 +135,7 @@ impl QuicConnection {
                                                 crate::common::protocol::Reliability::AtLeastOnce,
                                                 data,
                                             );
-                                            let message = crate::common::protocol::UnifiedProtocolMessage::new(
-                                                frame,
-                                                None,
-                                                1,
-                                            );
+                                            let message = frame;
                                             handler.on_message_received(&id, &message).await;
                                         });
                                     }
@@ -273,6 +269,10 @@ impl Connection for QuicConnection {
         let mut stats = self.stats.write().await;
         stats.last_activity = *last_activity;
     }
+    
+    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+        *self.event_handler.write().await = Some(handler);
+    }
 }
 
 #[async_trait::async_trait]
@@ -357,7 +357,7 @@ impl ClientConnection for QuicConnection {
         Ok(())
     }
     
-    async fn send_message(&mut self, message: UnifiedProtocolMessage) -> Result<()> {
+    async fn send_message(&mut self, message: Frame) -> Result<()> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
@@ -399,18 +399,6 @@ impl ClientConnection for QuicConnection {
 
         
         Ok(())
-    }
-    
-    async fn receive_message(&mut self) -> Result<Option<UnifiedProtocolMessage>> {
-        // 检查连接状态
-        let state = *self.state.read().await;
-        if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
-            return Err(FlareError::connection_failed("连接未就绪"));
-        }
-        
-        // 消息接收由后台任务处理，这里返回 None
-        // 实际的消息处理通过事件处理器进行
-        Ok(None)
     }
     
     async fn try_reconnect(&mut self) -> Result<()> {
@@ -522,7 +510,7 @@ impl ServerConnection for QuicConnection {
         Ok(())
     }
     
-    async fn send_message(&mut self, message: UnifiedProtocolMessage) -> Result<()> {
+    async fn send_message(&mut self, message: Frame) -> Result<()> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
@@ -566,7 +554,7 @@ impl ServerConnection for QuicConnection {
         Ok(())
     }
     
-    async fn receive_message(&mut self) -> Result<Option<UnifiedProtocolMessage>> {
+    async fn receive_message(&mut self) -> Result<Option<Frame>> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {

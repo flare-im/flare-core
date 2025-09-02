@@ -8,13 +8,13 @@ use tracing::{info, debug};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
-    ConnectionEventHandler, UnifiedProtocolMessage,
+    ConnectionEventHandler, Frame,
     FlareError,
 };
 use flare_core::common::connections::{
     ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
 };
-use flare_core::common::protocol::{Frame, MessageType, Reliability};
+use flare_core::common::protocol::{MessageType, Reliability};
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ impl ConnectionEventHandler for HeartbeatEventHandler {
         info!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
 
-    async fn on_message_received(&self, connection_id: &str, message: &UnifiedProtocolMessage) {
+    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
         let payload = message.get_payload();
         if let Ok(text) = String::from_utf8(payload.to_vec()) {
             info!("[{}] 收到消息: {} - 内容: {}", self.name, connection_id, text);

@@ -7,12 +7,12 @@ use async_trait::async_trait;
 
 use crate::common::{
     error::Result,
-    protocol::UnifiedProtocolMessage,
+    protocol::Frame,
     connections::types::{ConnectionState, ConnectionConfig},
 };
 
 // 重新导出事件处理相关定义，保持对外路径稳定
-pub use super::event::{ConnectionEventHandler, DefaultConnectionEventHandler};
+pub use super::event::{ConnectionEventHandler, DefaultConnectionEventHandler, EchoConnectionEventHandler, HeartbeatConnectionEventHandler};
 
 /// 心跳响应处理器类型
 pub type HeartbeatResponseHandler = Box<dyn Fn(Vec<u8>) -> Result<()> + Send + Sync>;
@@ -54,6 +54,9 @@ pub trait Connection: Send + Sync {
     
     /// 重置心跳状态
     async fn reset_heartbeat_state(&self);
+    
+    /// 设置事件处理器（新增方法）
+    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>);
 }
 
 /// 客户端连接接口
@@ -68,10 +71,7 @@ pub trait ClientConnection: Connection + Send + Sync {
     async fn disconnect(&mut self) -> Result<()>;
     
     /// 发送消息
-    async fn send_message(&mut self, message: UnifiedProtocolMessage) -> Result<()>;
-    
-    /// 接收消息
-    async fn receive_message(&mut self) -> Result<Option<UnifiedProtocolMessage>>;
+    async fn send_message(&mut self, message: Frame) -> Result<()>;
     
     /// 尝试重连
     async fn try_reconnect(&mut self) -> Result<()>;
@@ -98,10 +98,10 @@ pub trait ServerConnection: Connection + Send + Sync {
     async fn close(&mut self) -> Result<()>;
     
     /// 发送消息
-    async fn send_message(&mut self, message: UnifiedProtocolMessage) -> Result<()>;
+    async fn send_message(&mut self, message: Frame) -> Result<()>;
     
     /// 接收消息
-    async fn receive_message(&mut self) -> Result<Option<UnifiedProtocolMessage>>;
+    async fn receive_message(&mut self) -> Result<Option<Frame>>;
     
     /// 检查连接健康状态
     async fn is_healthy(&self) -> bool;
@@ -187,7 +187,7 @@ pub trait ServerConnectionManager: Send + Sync {
     async fn get_connection_count(&self) -> usize;
     
     /// 广播消息到所有连接
-    async fn broadcast_message(&self, message: UnifiedProtocolMessage) -> Result<usize>;
+    async fn broadcast_message(&self, message: Frame) -> Result<usize>;
     
     /// 清理不活跃的连接
     async fn cleanup_inactive_connections(&mut self, timeout: std::time::Duration) -> usize;

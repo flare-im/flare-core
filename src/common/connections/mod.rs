@@ -14,7 +14,7 @@ pub mod event;
 pub use traits::{
     Connection, ClientConnection, ServerConnection, 
     ConnectionFactory as ConnectionFactoryTrait, 
-    ConnectionEventHandler, DefaultConnectionEventHandler,
+    ConnectionEventHandler, DefaultConnectionEventHandler, EchoConnectionEventHandler, HeartbeatConnectionEventHandler,
     ServerConnectionManager, ServerStats,
 };
 // 事件处理模块通过 traits 统一对外导出

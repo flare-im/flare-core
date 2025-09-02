@@ -147,7 +147,7 @@ impl Reliability {
     }
 }
 
-/// 二进制消息帧
+/// 统一消息帧 - 核心消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
     /// 消息类型
@@ -160,6 +160,10 @@ pub struct Frame {
     pub timestamp: u64,
     /// 消息体
     pub payload: Vec<u8>,
+    /// 会话ID
+    pub session_id: Option<String>,
+    /// 优先级
+    pub priority: u8,
     /// 压缩算法
     pub compression: Option<u8>,
     /// 加密标志
@@ -180,6 +184,30 @@ impl Frame {
             reliability,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
             payload,
+            session_id: None,
+            priority: 0,
+            compression: None,
+            encrypted: false,
+        }
+    }
+
+    /// 创建完整参数的消息帧
+    pub fn new_full(
+        message_type: MessageType,
+        message_id: u64,
+        reliability: Reliability,
+        payload: Vec<u8>,
+        session_id: Option<String>,
+        priority: u8,
+    ) -> Self {
+        Self {
+            message_type,
+            message_id,
+            reliability,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            payload,
+            session_id,
+            priority,
             compression: None,
             encrypted: false,
         }
@@ -227,102 +255,100 @@ impl Frame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(bincode::deserialize(bytes)?)
     }
-}
-
-/// 统一协议消息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnifiedProtocolMessage {
-    /// 消息帧
-    pub frame: Frame,
-    /// 会话ID
-    pub session_id: Option<String>,
-    /// 优先级
-    pub priority: u8,
-}
-
-impl UnifiedProtocolMessage {
-    /// 创建新的统一协议消息
-    pub fn new(frame: Frame, session_id: Option<String>, priority: u8) -> Self {
-        Self {
-            frame,
-            session_id,
-            priority,
-        }
-    }
 
     /// 获取可靠性级别
     pub fn get_reliability(&self) -> Reliability {
-        self.frame.reliability
+        self.reliability
     }
 
     /// 获取消息类型
     pub fn get_message_type(&self) -> MessageType {
-        self.frame.message_type
+        self.message_type
     }
 
     /// 获取消息ID
     pub fn get_message_id(&self) -> u64 {
-        self.frame.message_id
+        self.message_id
     }
 
     /// 获取时间戳
     pub fn get_timestamp(&self) -> u64 {
-        self.frame.timestamp
+        self.timestamp
     }
 
     /// 获取负载
     pub fn get_payload(&self) -> &[u8] {
-        &self.frame.payload
+        &self.payload
+    }
+
+    /// 获取会话ID
+    pub fn get_session_id(&self) -> &Option<String> {
+        &self.session_id
+    }
+
+    /// 获取优先级
+    pub fn get_priority(&self) -> u8 {
+        self.priority
+    }
+
+    /// 设置会话ID
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
+    }
+
+    /// 设置优先级
+    pub fn set_priority(&mut self, priority: u8) {
+        self.priority = priority;
     }
 
     /// 检查是否为心跳消息
     pub fn is_heartbeat(&self) -> bool {
-        self.frame.message_type.is_heartbeat()
+        self.message_type.is_heartbeat()
     }
 
     /// 检查是否为控制消息
     pub fn is_control(&self) -> bool {
-        self.frame.message_type.is_control()
+        self.message_type.is_control()
     }
 
     /// 检查是否为数据消息
     pub fn is_data(&self) -> bool {
-        self.frame.message_type.is_data()
+        self.message_type.is_data()
     }
 
     /// 检查是否为自定义消息
     pub fn is_custom(&self) -> bool {
-        matches!(self.frame.message_type, MessageType::CustomEvent | MessageType::CustomMessage)
+        matches!(self.message_type, MessageType::CustomEvent | MessageType::CustomMessage)
     }
 
     /// 检查是否为断开连接消息
     pub fn is_disconnect(&self) -> bool {
-        self.frame.message_type == MessageType::Disconnect
+        self.message_type == MessageType::Disconnect
     }
 
     /// 检查是否为通知消息
     pub fn is_notification(&self) -> bool {
-        self.frame.message_type == MessageType::Notification
+        self.message_type == MessageType::Notification
     }
 
     /// 检查是否为错误消息
     pub fn is_error(&self) -> bool {
-        self.frame.message_type == MessageType::Error
+        self.message_type == MessageType::Error
     }
 
     /// 获取通知文本
     pub fn notification_text(&self) -> Option<String> {
-        if self.frame.message_type == MessageType::Notification {
-            serde_json::from_slice(&self.frame.payload).ok()
+        if self.message_type == MessageType::Notification {
+            serde_json::from_slice(&self.payload).ok()
         } else {
             None
         }
     }
 
     /// 获取错误信息
-    pub fn error(&self) -> Option<(u32, String)> {
-        if self.frame.message_type == MessageType::Error {
-            let data: serde_json::Value = serde_json::from_slice(&self.frame.payload).ok()?;
+    pub fn get_error(&self) -> Option<(u32, String)> {
+        if self.message_type == MessageType::Error {
+            let data: serde_json::Value = serde_json::from_slice(&self.payload).ok()?;
             let code = data["code"].as_u64()? as u32;
             let message = data["message"].as_str()?.to_string();
             Some((code, message))
@@ -333,13 +359,12 @@ impl UnifiedProtocolMessage {
 
     /// 创建自定义消息
     pub fn custom_message(_message_type: &str, data: Vec<u8>) -> Self {
-        let frame = Frame::new(
+        Self::new(
             MessageType::CustomMessage,
             0,
             Reliability::AtLeastOnce,
             data,
-        );
-        Self::new(frame, None, 0)
+        )
     }
 
     /// 创建自定义事件
@@ -347,13 +372,12 @@ impl UnifiedProtocolMessage {
         let payload = serde_json::to_vec(&serde_json::json!({
             "event": event_name
         })).unwrap_or_default();
-        let frame = Frame::new(
+        Self::new(
             MessageType::CustomEvent,
             0,
             Reliability::BestEffort,
             payload,
-        );
-        Self::new(frame, None, 0)
+        )
     }
 
     /// 创建REST响应
@@ -362,19 +386,12 @@ impl UnifiedProtocolMessage {
             "status": status,
             "data": data
         })).unwrap_or_default();
-        let frame = Frame::new(
+        Self::new(
             MessageType::Data,
             0,
             Reliability::ExactlyOnce,
             payload,
-        );
-        Self::new(frame, None, 0)
-    }
-
-    /// 创建心跳确认
-    pub fn heartbeat_ack() -> Self {
-        let frame = Frame::heartbeat_ack();
-        Self::new(frame, None, 0)
+        )
     }
 
     /// 创建断开连接消息
@@ -382,15 +399,16 @@ impl UnifiedProtocolMessage {
         let payload = serde_json::to_vec(&serde_json::json!({
             "reason": reason
         })).unwrap_or_default();
-        let frame = Frame::new(
+        Self::new(
             MessageType::Disconnect,
             0,
             Reliability::ExactlyOnce,
             payload,
-        );
-        Self::new(frame, None, 0)
+        )
     }
 }
+
+
 
 /// 协议选择模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

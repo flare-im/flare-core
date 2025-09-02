@@ -10,7 +10,7 @@ use tracing::{info, debug, warn};
 
 use crate::common::{
     error::Result,
-    protocol::UnifiedProtocolMessage,
+    protocol::Frame,
     connections::{
         traits::{ClientConnection, ConnectionEventHandler, ConnectionFactory as ConnectionFactoryTrait},
         types::{ConnectionConfig, ConnectionState},
@@ -208,7 +208,7 @@ impl ConnectionManager {
     }
     
     /// 发送消息
-    pub async fn send_message(&mut self, connection_id: &str, message: UnifiedProtocolMessage) -> Result<()> {
+    pub async fn send_message(&mut self, connection_id: &str, message: Frame) -> Result<()> {
         // 先发送消息
         {
             let connections = self.connections.read().await;
@@ -231,33 +231,7 @@ impl ConnectionManager {
         debug!("消息已发送: {}", connection_id);
         Ok(())
     }
-    
-    /// 接收消息
-    pub async fn receive_message(&mut self, connection_id: &str) -> Result<Option<UnifiedProtocolMessage>> {
-        // 先接收消息
-        let message = {
-            let connections = self.connections.read().await;
-            if let Some(conn_info) = connections.get(connection_id) {
-                let mut connection = conn_info.connection.lock().await;
-                connection.receive_message().await?
-            } else {
-                return Err(crate::common::error::FlareError::connection_failed(
-                    "连接不存在"
-                ));
-            }
-        };
-        
-        // 如果有消息，更新活跃时间
-        if message.is_some() {
-            let mut connections = self.connections.write().await;
-            if let Some(conn_info) = connections.get_mut(connection_id) {
-                conn_info.update_activity();
-            }
-        }
-        
-        Ok(message)
-    }
-    
+
     /// 移除连接
     pub async fn remove_connection(&mut self, connection_id: &str) -> Result<()> {
         let mut connections = self.connections.write().await;
