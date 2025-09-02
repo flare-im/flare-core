@@ -17,7 +17,7 @@ path = "examples/common/websocket_connection_demo.rs"
 
 [dependencies]
 # 异步运行时（核心功能）
-tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal"] }
 
 # 序列化（协议需要）
 serde = { version = "1.0.210", features = ["derive"] }

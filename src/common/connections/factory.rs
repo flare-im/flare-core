@@ -5,7 +5,7 @@
 use crate::common::{
     error::Result,
     connections::{
-        traits::{ConnectionFactory as ConnectionFactoryTrait, ClientConnection, ServerConnection},
+        traits::{ConnectionFactory as ConnectionFactoryTrait, ClientConnection, ServerConnection, ConnectionEventHandler},
         types::{ConnectionConfig, ConnectionType, ConnectionRole},
         quic::QuicConnection,
         websocket::WebSocketConnection,
@@ -110,6 +110,38 @@ impl RawConnectionHandler {
         
         // 创建 WebSocket 连接
         let mut connection = WebSocketConnection::new(config);
+        
+        // 设置 WebSocket 流到连接中
+        connection.set_connection(ws_stream).await;
+        
+        // 启动消息接收任务
+        connection.start_receive_task().await
+            .map_err(|e| crate::common::error::FlareError::connection_failed(
+                format!("启动消息接收任务失败: {}", e)
+            ))?;
+        
+        Ok(Box::new(connection))
+    }
+    
+    /// 从 WebSocket 原始连接创建服务端连接，并设置事件处理器
+    pub async fn from_websocket_with_handler(
+        tcp_stream: tokio::net::TcpStream,
+        config: ConnectionConfig,
+        handler: std::sync::Arc<dyn ConnectionEventHandler>,
+    ) -> Result<Box<dyn ServerConnection>> {
+        use tokio_tungstenite::accept_async;
+        
+        // 接受 WebSocket 握手
+        let ws_stream = accept_async(tcp_stream).await
+            .map_err(|e| crate::common::error::FlareError::connection_failed(
+                format!("WebSocket 握手失败: {}", e)
+            ))?;
+        
+        // 创建 WebSocket 连接
+        let mut connection = WebSocketConnection::new(config);
+        
+        // 设置事件处理器
+        connection.set_event_handler(handler).await;
         
         // 设置 WebSocket 流到连接中
         connection.set_connection(ws_stream).await;

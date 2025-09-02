@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, error};
+use futures_util::{StreamExt, SinkExt};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::common::{
     error::{Result, FlareError},
@@ -39,6 +41,8 @@ pub struct WebSocketConnection {
     receive_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// 心跳响应处理器
     heartbeat_response_handler: Arc<RwLock<Option<HeartbeatResponseHandler>>>,
+    /// 消息发送通道
+    message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<UnifiedProtocolMessage>>>>,
 }
 
 impl WebSocketConnection {
@@ -65,6 +69,7 @@ impl WebSocketConnection {
             connection: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
             heartbeat_response_handler: Arc::new(RwLock::new(None)),
+            message_sender: Arc::new(RwLock::new(None)),
         }
     }
     
@@ -78,34 +83,176 @@ impl WebSocketConnection {
         *self.connection.write().await = Some(stream);
     }
     
-    /// 启动消息接收任务
+    /// 启动消息处理任务（分离发送和接收）
     pub async fn start_receive_task(&mut self) -> Result<()> {
         let id = self.id.clone();
         let connection = Arc::clone(&self.connection);
+        let event_handler = Arc::clone(&self.event_handler);
+        let stats = Arc::clone(&self.stats);
+        let last_activity = Arc::clone(&self.last_activity);
         
-        let task = tokio::spawn(async move {
-            loop {
-                // 获取可用的流
-                let conn_guard = connection.read().await;
-                let stream = if let Some(_conn) = &*conn_guard {
-                    Some(_conn)
-                } else {
-                    None
-                };
-                
-                if stream.is_some() {
-                    // 简化实现：暂时跳过消息接收处理
-                    // 实际的消息接收应该由外部处理
-                    debug!("WebSocket 消息接收任务已启动: {}", id);
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
-                } else {
-                    // 没有可用的流，等待一下
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+        // 创建消息发送通道
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UnifiedProtocolMessage>();
+        *self.message_sender.write().await = Some(tx);
+        
+        // 启动发送任务
+        let _send_task = {
+            let id = id.clone();
+            let connection = Arc::clone(&connection);
+            let event_handler = Arc::clone(&event_handler);
+            let stats = Arc::clone(&stats);
+            let last_activity = Arc::clone(&last_activity);
+            
+            tokio::spawn(async move {
+                loop {
+                    // 等待发送消息
+                    if let Some(out_msg) = rx.recv().await {
+                        let payload = out_msg.get_payload().to_vec();
+                        let ws_out = match String::from_utf8(payload.clone()) {
+                            Ok(text) => WsMessage::Text(text.into()),
+                            Err(_) => WsMessage::Binary(payload.into()),
+                        };
+                        
+                        // 获取连接并发送
+                        {
+                            let mut conn_guard = connection.write().await;
+                            if let Some(ws_stream) = &mut *conn_guard {
+                                if let Err(e) = ws_stream.send(ws_out).await {
+                                    error!("WebSocket 发送错误: {} - {}", id, e);
+                                    if let Some(handler) = &*event_handler.read().await {
+                                        let handler = std::sync::Arc::clone(handler);
+                                        let id_clone = id.clone();
+                                        let err_text = e.to_string();
+                                        tokio::spawn(async move { handler.on_error(&id_clone, &err_text).await; });
+                                    }
+                                } else {
+                                    // 更新统计与活跃时间
+                                    {
+                                        let mut s = stats.write().await; 
+                                        s.messages_sent += 1;
+                                    }
+                                    {
+                                        let mut last = last_activity.write().await; 
+                                        *last = Instant::now();
+                                    }
+                                    debug!("WebSocket 消息已发送: {} - 类型: {:?}", id, out_msg.get_message_type());
+                                }
+                            } else {
+                                error!("WebSocket 连接不可用，无法发送消息: {}", id);
+                                break;
+                            }
+                        }
+                    } else {
+                        // 发送通道关闭，退出任务
+                        debug!("WebSocket 发送通道关闭: {}", id);
+                        break;
+                    }
                 }
-            }
-        });
+            })
+        };
         
-        *self.receive_task.write().await = Some(task);
+        // 启动接收任务
+        let receive_task = {
+            let id = id.clone();
+            let connection = Arc::clone(&connection);
+            let event_handler = Arc::clone(&event_handler);
+            let stats = Arc::clone(&stats);
+            let last_activity = Arc::clone(&last_activity);
+            
+            tokio::spawn(async move {
+                loop {
+                    // 读取 WebSocket 消息
+                    {
+                        let mut conn_guard = connection.write().await;
+                        if let Some(ws_stream) = &mut *conn_guard {
+                            match ws_stream.next().await {
+                                Some(Ok(msg)) => {
+                                    // 更新活跃时间
+                                    {
+                                        let mut last = last_activity.write().await;
+                                        *last = Instant::now();
+                                    }
+                                    
+                                    match msg {
+                                        WsMessage::Text(text) => {
+                                            let frame = crate::common::protocol::Frame::new(
+                                                crate::common::protocol::MessageType::Data,
+                                                0,
+                                                crate::common::protocol::Reliability::AtLeastOnce,
+                                                text.bytes().collect::<Vec<u8>>(),
+                                            );
+                                            let upm = crate::common::protocol::UnifiedProtocolMessage::new(frame, None, 1);
+                                            if let Some(handler) = &*event_handler.read().await {
+                                                let handler = std::sync::Arc::clone(handler);
+                                                let id_clone = id.clone();
+                                                tokio::spawn(async move { 
+                                                    handler.on_message_received(&id_clone, &upm).await; 
+                                                });
+                                            }
+                                            let mut s = stats.write().await; 
+                                            s.messages_received += 1;
+                                            debug!("WebSocket 收到文本消息: {} - 长度: {}", id, text.len());
+                                        }
+                                        WsMessage::Binary(data) => {
+                                            let frame = crate::common::protocol::Frame::new(
+                                                crate::common::protocol::MessageType::Data,
+                                                0,
+                                                crate::common::protocol::Reliability::AtLeastOnce,
+                                                data.to_vec(),
+                                            );
+                                            let upm = crate::common::protocol::UnifiedProtocolMessage::new(frame, None, 1);
+                                            if let Some(handler) = &*event_handler.read().await {
+                                                let handler = std::sync::Arc::clone(handler);
+                                                let id_clone = id.clone();
+                                                tokio::spawn(async move { 
+                                                    handler.on_message_received(&id_clone, &upm).await; 
+                                                });
+                                            }
+                                            let mut s = stats.write().await; 
+                                            s.messages_received += 1;
+                                            debug!("WebSocket 收到二进制消息: {} - 长度: {}", id, data.len());
+                                        }
+                                        WsMessage::Ping(_) | WsMessage::Pong(_) => {
+                                            debug!("收到 ping/pong: {}", id);
+                                        }
+                                        WsMessage::Close(frame) => {
+                                            debug!("连接关闭: {} - {:?}", id, frame);
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    error!("WebSocket 读取错误: {} - {}", id, e);
+                                    if let Some(handler) = &*event_handler.read().await {
+                                        let handler = std::sync::Arc::clone(handler);
+                                        let id_clone = id.clone();
+                                        let err_text = e.to_string();
+                                        tokio::spawn(async move { 
+                                            handler.on_error(&id_clone, &err_text).await; 
+                                        });
+                                    }
+                                    break;
+                                }
+                                None => {
+                                    // 对端关闭
+                                    debug!("WebSocket 对端关闭: {}", id);
+                                    break;
+                                }
+                            }
+                        } else {
+                            debug!("WebSocket 连接不可用，退出接收任务: {}", id);
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+        
+        // 保存任务句柄（这里我们只保存接收任务，发送任务会在通道关闭时自动结束）
+        *self.receive_task.write().await = Some(receive_task);
+        
+        // 注意：发送任务会在通道关闭时自动结束，不需要单独管理
         Ok(())
     }
     
@@ -288,18 +435,18 @@ impl ClientConnection for WebSocketConnection {
             return Err(FlareError::connection_failed("连接未就绪"));
         }
         
-        // 简化实现：直接返回成功，实际发送由外部处理
-        debug!("消息发送请求: {} - 类型: {:?}", self.id, message.get_message_type());
-        
-        // 更新统计和活跃时间
-        {
-            let mut stats = self.stats.write().await;
-            stats.messages_sent += 1;
+        // 通过通道发送消息
+        let sender = self.message_sender.read().await;
+        if let Some(tx) = &*sender {
+            let message_type = message.get_message_type();
+            tx.send(message)
+                .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
+            
+            debug!("WebSocket 消息已发送: {} - 类型: {:?}", self.id, message_type);
+            Ok(())
+        } else {
+            Err(FlareError::connection_failed("消息发送通道不可用"))
         }
-        self.update_last_activity().await;
-        
-        debug!("WebSocket 消息已发送: {} - 类型: {:?}", self.id, message.get_message_type());
-        Ok(())
     }
     
     async fn receive_message(&mut self) -> Result<Option<UnifiedProtocolMessage>> {

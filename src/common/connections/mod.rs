@@ -8,6 +8,7 @@ pub mod quic;
 pub mod websocket;
 pub mod factory;
 pub mod manager;
+pub mod event;
 
 // 重新导出主要类型
 pub use traits::{
@@ -16,6 +17,7 @@ pub use traits::{
     ConnectionEventHandler, DefaultConnectionEventHandler,
     ServerConnectionManager, ServerStats,
 };
+// 事件处理模块通过 traits 统一对外导出
 pub use types::{
     ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, 
     ConnectionQuality, ProtocolFeature, ProtocolConfig, WebSocketConfig, 

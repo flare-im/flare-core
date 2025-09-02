@@ -9,9 +9,16 @@ use futures_util::{StreamExt, SinkExt};
 use tracing::{info, error, warn};
 
 use flare_core::{
+    ConnectionConfig, ConnectionType,
     ConnectionEventHandler, UnifiedProtocolMessage,
     FlareError,
 };
+use flare_core::common::connections::{
+    ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
+};
+use flare_core::common::protocol::{Frame, MessageType, Reliability};
+
+use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, FlareError>;
 
@@ -113,34 +120,35 @@ pub async fn run_websocket_server() -> Result<()> {
 pub async fn run_websocket_client() -> Result<()> {
     info!("=== WebSocket 客户端启动 ===");
     
-    // 使用更简单的方式直接连接WebSocket
-    let url = "ws://127.0.0.1:8080";
-    info!("正在连接到: {}", url);
+    // 创建客户端配置
+    let config = ConnectionConfig::client(
+        "websocket_client".to_string(),
+        "ws://127.0.0.1:8080".to_string()
+    ).with_type(ConnectionType::WebSocket)
+     .with_websocket_config(WebSocketConfig {
+         subprotocols: vec!["text".to_string()],
+         extensions: vec![],
+         compression_threshold: None,
+     })
+     .with_heartbeat(30000, 10000);
     
-    // 直接使用tokio_tungstenite连接
-    let (ws_stream, _) = tokio_tungstenite::client_async(url, tokio::net::TcpStream::connect("127.0.0.1:8080").await?)
-        .await
-        .map_err(|e| FlareError::connection_failed(format!("WebSocket连接失败: {}", e)))?;
+    info!("客户端配置: {:?}", config);
+    info!("连接地址: {}", config.remote_addr);
     
-    info!("WebSocket连接已建立！");
+    // 创建连接工厂
+    let factory = ConnectionFactory::new();
     
-    // 分离读写流
-    let (mut write, mut read) = ws_stream.split();
+    // 创建客户端连接
+    let mut client_connection = factory.create_client_connection(config).await?;
     
-    // 启动消息接收任务
-    let read_task = tokio::spawn(async move {
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(msg) => {
-                    info!("客户端收到消息: {:?}", msg);
-                }
-                Err(e) => {
-                    error!("接收消息错误: {}", e);
-                    break;
-                }
-            }
-        }
-    });
+    // 注意：set_event_handler 方法不在 ClientConnection trait 中
+    // 事件处理需要在具体的连接实现中设置
+    let _event_handler = Arc::new(SimpleEventHandler::new("客户端".to_string()));
+    
+    // 建立连接
+    info!("正在连接服务端...");
+    client_connection.connect().await?;
+    info!("已连接到服务端！");
     
     // 启动用户输入处理
     let mut input = String::new();
@@ -159,8 +167,17 @@ pub async fn run_websocket_client() -> Result<()> {
             }
             
             if !input.is_empty() {
-                // 发送文本消息
-                if let Err(e) = write.send(tokio_tungstenite::tungstenite::Message::Text(input.to_string().into())).await {
+                // 创建统一协议消息
+                let frame = Frame::new(
+                    MessageType::Data,
+                    0,
+                    Reliability::AtLeastOnce,
+                    input.as_bytes().to_vec(),
+                );
+                let message = UnifiedProtocolMessage::new(frame, None, 1);
+                
+                // 通过Connection trait发送消息
+                if let Err(e) = client_connection.send_message(message).await {
                     error!("发送消息失败: {}", e);
                     break;
                 } else {
@@ -170,12 +187,9 @@ pub async fn run_websocket_client() -> Result<()> {
         }
     }
     
-    // 停止读取任务
-    read_task.abort();
-    
-    // 关闭连接
-    info!("正在关闭连接...");
-    let _ = write.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+    // 断开连接
+    info!("正在断开连接...");
+    client_connection.disconnect().await?;
     
     info!("客户端已断开");
     Ok(())
