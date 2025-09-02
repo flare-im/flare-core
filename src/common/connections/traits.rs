@@ -12,7 +12,7 @@ use crate::common::{
 };
 
 // 重新导出事件处理相关定义，保持对外路径稳定
-pub use super::event::{ConnectionEventHandler, DefaultConnectionEventHandler, EchoConnectionEventHandler, HeartbeatConnectionEventHandler};
+pub use super::event::{ConnectionEvent, DefConnectionEventHandler};
 
 /// 心跳响应处理器类型
 pub type HeartbeatResponseHandler = Box<dyn Fn(Vec<u8>) -> Result<()> + Send + Sync>;
@@ -56,7 +56,7 @@ pub trait Connection: Send + Sync {
     async fn reset_heartbeat_state(&self);
     
     /// 设置事件处理器（新增方法）
-    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>);
+    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>);
 }
 
 /// 客户端连接接口

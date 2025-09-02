@@ -12,7 +12,7 @@ use crate::common::{
     error::Result,
     protocol::Frame,
     connections::{
-        traits::{ClientConnection, ConnectionEventHandler, ConnectionFactory as ConnectionFactoryTrait},
+        traits::{ClientConnection, ConnectionEvent, ConnectionFactory as ConnectionFactoryTrait},
         types::{ConnectionConfig, ConnectionState},
         factory::ConnectionFactory,
     },
@@ -97,7 +97,7 @@ pub struct ConnectionManager {
     /// 管理器配置
     config: ManagerConfig,
     /// 事件处理器
-    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEventHandler>>>>,
+    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>>,
     /// 管理任务句柄
     management_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
@@ -115,7 +115,7 @@ impl ConnectionManager {
     }
     
     /// 设置事件处理器
-    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
     }
     

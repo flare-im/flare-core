@@ -13,7 +13,7 @@ use crate::common::{
     error::{Result, FlareError},
     protocol::Frame,
     connections::{
-        traits::{Connection, ClientConnection, ServerConnection, ConnectionEventHandler, ConnectionStats, HeartbeatResponseHandler},
+        traits::{Connection, ClientConnection, ServerConnection, ConnectionEvent, ConnectionStats, HeartbeatResponseHandler},
         types::{ConnectionState, ConnectionConfig},
     },
 };
@@ -27,7 +27,7 @@ pub struct WebSocketConnection {
     /// 连接状态
     state: Arc<RwLock<ConnectionState>>,
     /// 事件处理器
-    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEventHandler>>>>,
+    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>>,
     /// 最后活跃时间
     last_activity: Arc<RwLock<Instant>>,
     /// 重连次数
@@ -74,7 +74,7 @@ impl WebSocketConnection {
     }
     
     /// 设置事件处理器（公开方法）
-    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
     }
     
@@ -100,6 +100,77 @@ impl WebSocketConnection {
         // 创建消息发送通道
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
         *self.message_sender.write().await = Some(tx);
+        
+        // 启动心跳监控任务
+        let _heartbeat_monitor_task = {
+            let id = id.clone();
+            let event_handler = Arc::clone(&event_handler);
+            let last_activity = Arc::clone(&last_activity);
+            let stats = Arc::clone(&stats);
+            let heartbeat_interval = Duration::from_millis(self.config.heartbeat_interval_ms);
+            let heartbeat_timeout = Duration::from_millis(self.config.heartbeat_monitor_timeout_ms);
+            
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(heartbeat_interval);
+                let mut last_quality_score = 100u8;
+                
+                loop {
+                    interval.tick().await;
+                    
+                    let last_act = *last_activity.read().await;
+                    let elapsed = last_act.elapsed();
+                    
+                    // 检查心跳超时
+                    if elapsed > heartbeat_timeout {
+                        if let Some(handler) = &*event_handler.read().await {
+                            let handler = std::sync::Arc::clone(handler);
+                            let id_clone = id.clone();
+                            tokio::spawn(async move {
+                                handler.on_heartbeat_timeout(&id_clone).await;
+                            });
+                        }
+                    }
+                    
+                    // 计算连接质量（基于活跃度）
+                    let quality_score = if elapsed > heartbeat_timeout {
+                        0u8 // 超时，质量为0
+                    } else if elapsed > heartbeat_interval {
+                        let ratio = elapsed.as_millis() as f64 / heartbeat_timeout.as_millis() as f64;
+                        ((1.0 - ratio) * 100.0).max(10.0) as u8 // 最低10分
+                    } else {
+                        100u8 // 正常，满分
+                    };
+                    
+                    // 如果质量发生显著变化（差值大于10），触发质量变化事件
+                    if (quality_score as i16 - last_quality_score as i16).abs() > 10 {
+                        {
+                            let mut stats_guard = stats.write().await;
+                            stats_guard.quality_score = quality_score;
+                        }
+                        
+                        if let Some(handler) = &*event_handler.read().await {
+                            let handler = std::sync::Arc::clone(handler);
+                            let id_clone = id.clone();
+                            tokio::spawn(async move {
+                                handler.on_quality_changed(&id_clone, quality_score).await;
+                            });
+                        }
+                        
+                        last_quality_score = quality_score;
+                    }
+                    
+                    // 定期触发统计更新事件
+                    if let Some(handler) = &*event_handler.read().await {
+                        let stats_snapshot = stats.read().await.clone();
+                        let handler = std::sync::Arc::clone(handler);
+                        let id_clone = id.clone();
+                        tokio::spawn(async move {
+                            handler.on_statistics_updated(&id_clone, &stats_snapshot).await;
+                        });
+                    }
+                }
+            })
+        };
         
         // 启动发送任务
         let _send_task = {
@@ -154,11 +225,28 @@ impl WebSocketConnection {
                                     {
                                         let mut s = stats.write().await; 
                                         s.messages_sent += 1;
+                                        s.last_activity = Instant::now();
                                     }
                                     {
                                         let mut last = last_activity.write().await; 
                                         *last = Instant::now();
                                     }
+                                    
+                                    // 触发消息发送事件
+                                    if let Some(handler) = &*event_handler.read().await {
+                                        let handler = std::sync::Arc::clone(handler);
+                                        let id_clone = id.clone();
+                                        let msg_clone = out_msg.clone();
+                                        tokio::spawn(async move { 
+                                            handler.on_message_sent(&id_clone, &msg_clone).await;
+                                            
+                                            // 如果是心跳消息，触发心跳发送事件
+                                            if msg_clone.is_heartbeat() {
+                                                handler.on_heartbeat_sent(&id_clone).await;
+                                            }
+                                        });
+                                    }
+                                    
                                     debug!("WebSocket 消息已发送: {} - 类型: {:?}", id, out_msg.get_message_type());
                                 }
                             } else {
@@ -230,8 +318,14 @@ impl WebSocketConnection {
                                                 info!("调用事件处理器 on_message_received");
                                                 let handler = std::sync::Arc::clone(handler);
                                                 let id_clone = id.clone();
+                                                let msg_clone = unified_msg.clone();
                                                 tokio::spawn(async move { 
-                                                    handler.on_message_received(&id_clone, &unified_msg).await; 
+                                                    handler.on_message_received(&id_clone, &msg_clone).await;
+                                                    
+                                                    // 如果是心跳消息，触发心跳接收事件
+                                                    if msg_clone.is_heartbeat() {
+                                                        handler.on_heartbeat_received(&id_clone).await;
+                                                    }
                                                 });
                                             } else {
                                                 info!("没有事件处理器可用");
@@ -259,8 +353,14 @@ impl WebSocketConnection {
                                             if let Some(handler) = &*event_handler.read().await {
                                                 let handler = std::sync::Arc::clone(handler);
                                                 let id_clone = id.clone();
+                                                let msg_clone = unified_msg.clone();
                                                 tokio::spawn(async move { 
-                                                    handler.on_message_received(&id_clone, &unified_msg).await; 
+                                                    handler.on_message_received(&id_clone, &msg_clone).await;
+                                                    
+                                                    // 如果是心跳消息，触发心跳接收事件
+                                                    if msg_clone.is_heartbeat() {
+                                                        handler.on_heartbeat_received(&id_clone).await;
+                                                    }
                                                 });
                                             }
                                             
@@ -423,8 +523,17 @@ impl Connection for WebSocketConnection {
     }
     
     async fn send_heartbeat(&self) -> Result<()> {
-        // 简化实现：直接返回成功，实际发送由外部处理
         debug!("心跳发送请求: {}", self.id);
+        
+        // 创建心跳消息
+        let heartbeat_frame = Frame::heartbeat();
+        
+        // 通过消息发送通道发送心跳
+        let sender = self.message_sender.read().await;
+        if let Some(tx) = &*sender {
+            tx.send(heartbeat_frame.clone())
+                .map_err(|e| FlareError::message_send_failed(format!("心跳消息发送失败: {}", e)))?;
+        }
         
         // 更新统计和活跃时间
         {
@@ -441,8 +550,17 @@ impl Connection for WebSocketConnection {
     }
     
     async fn send_heartbeat_response(&self, data: Option<Vec<u8>>) -> Result<()> {
-        // 简化实现：直接返回成功，实际发送由外部处理
         debug!("心跳响应发送请求: {} - 数据: {:?}", self.id, data);
+        
+        // 创建心跳响应消息
+        let heartbeat_ack_frame = Frame::heartbeat_ack();
+        
+        // 通过消息发送通道发送心跳响应
+        let sender = self.message_sender.read().await;
+        if let Some(tx) = &*sender {
+            tx.send(heartbeat_ack_frame.clone())
+                .map_err(|e| FlareError::message_send_failed(format!("心跳响应消息发送失败: {}", e)))?;
+        }
         
         // 更新活跃时间
         let mut last_activity = self.last_activity.write().await;
@@ -471,7 +589,7 @@ impl Connection for WebSocketConnection {
         stats.last_activity = *last_activity;
     }
     
-    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
     }
 }
@@ -582,28 +700,69 @@ impl ClientConnection for WebSocketConnection {
     async fn try_reconnect(&mut self) -> Result<()> {
         let attempts = *self.reconnect_attempts.read().await;
         if attempts >= self.config.max_reconnect_attempts {
+            // 触发重连失败事件
+            if let Some(handler) = &*self.event_handler.read().await {
+                let handler = Arc::clone(handler);
+                let id = self.id.clone();
+                let error_msg = format!("超过最大重连次数: {}", self.config.max_reconnect_attempts);
+                tokio::spawn(async move {
+                    handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
+                });
+            }
             return Err(FlareError::connection_failed("超过最大重连次数"));
         }
         
         *self.state.write().await = ConnectionState::Reconnecting;
         
+        // 触发重连开始事件
+        if let Some(handler) = &*self.event_handler.read().await {
+            let handler = Arc::clone(handler);
+            let id = self.id.clone();
+            tokio::spawn(async move {
+                handler.on_reconnect_started(&id, attempts + 1).await;
+            });
+        }
+        
         // 等待重连延迟
         tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
         
         // 尝试重新连接
-        self.connect().await?;
-        
-        // 更新重连次数
-        {
-            let mut attempts = self.reconnect_attempts.write().await;
-            *attempts += 1;
+        match self.connect().await {
+            Ok(_) => {
+                // 更新重连次数
+                {
+                    let mut attempts_guard = self.reconnect_attempts.write().await;
+                    *attempts_guard += 1;
+                }
+                
+                // 更新最后活跃时间
+                self.update_last_activity().await;
+                
+                // 触发重连成功事件
+                if let Some(handler) = &*self.event_handler.read().await {
+                    let handler = Arc::clone(handler);
+                    let id = self.id.clone();
+                    tokio::spawn(async move {
+                        handler.on_reconnected(&id, attempts + 1).await;
+                    });
+                }
+                
+                info!("WebSocket 重连成功: {} (第 {} 次)", self.id, attempts + 1);
+                Ok(())
+            }
+            Err(e) => {
+                // 触发重连失败事件
+                if let Some(handler) = &*self.event_handler.read().await {
+                    let handler = Arc::clone(handler);
+                    let id = self.id.clone();
+                    let error_msg = e.to_string();
+                    tokio::spawn(async move {
+                        handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
+                    });
+                }
+                Err(e)
+            }
         }
-        
-        // 更新最后活跃时间
-        self.update_last_activity().await;
-        
-        info!("WebSocket 重连成功: {} (第 {} 次)", self.id, attempts + 1);
-        Ok(())
     }
     
     async fn needs_reconnect(&self) -> bool {

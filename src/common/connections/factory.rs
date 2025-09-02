@@ -5,7 +5,7 @@
 use crate::common::{
     error::Result,
     connections::{
-        traits::{ConnectionFactory as ConnectionFactoryTrait, ClientConnection, ServerConnection, ConnectionEventHandler},
+        traits::{ConnectionFactory as ConnectionFactoryTrait, ClientConnection, ServerConnection, ConnectionEvent},
         types::{ConnectionConfig, ConnectionType, ConnectionRole},
         quic::QuicConnection,
         websocket::WebSocketConnection,
@@ -127,7 +127,7 @@ impl RawConnectionHandler {
     pub async fn from_websocket_with_handler(
         tcp_stream: tokio::net::TcpStream,
         config: ConnectionConfig,
-        handler: std::sync::Arc<dyn ConnectionEventHandler>,
+        handler: std::sync::Arc<dyn ConnectionEvent>,
     ) -> Result<Box<dyn ServerConnection>> {
         use tokio_tungstenite::accept_async;
         

@@ -10,8 +10,7 @@ pub mod protocol;
 pub use connections::{
     Connection, ClientConnection, ServerConnection, 
     ConnectionFactory, ConnectionManager,
-    ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, 
-    ConnectionEventHandler, DefaultConnectionEventHandler, EchoConnectionEventHandler, HeartbeatConnectionEventHandler,
+    ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, DefConnectionEventHandler ,
     QuicConnection, WebSocketConnection,
 };
 pub use error::{Result, FlareError};

@@ -7,7 +7,7 @@ use tracing::{info, error};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
-    ConnectionEventHandler, Frame,
+    ConnectionEvent, Frame,
     FlareError,
 };
 use flare_core::common::connections::{
@@ -26,7 +26,7 @@ pub struct SimpleEventHandler {
 }
 
 #[async_trait::async_trait]
-impl ConnectionEventHandler for SimpleEventHandler {
+impl ConnectionEvent for SimpleEventHandler {
     async fn on_connected(&self, connection_id: &str) {
         info!("[{}] 连接已建立: {}", self.name, connection_id);
     }
@@ -70,6 +70,39 @@ impl ConnectionEventHandler for SimpleEventHandler {
     async fn on_quality_changed(&self, connection_id: &str, quality_score: u8) {
         info!("[{}] 连接质量变化: {} - 评分: {}", self.name, connection_id, quality_score);
     }
+
+    async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
+        if message.is_heartbeat() {
+            info!("[{}] 心跳消息已发送: {} - 类型: {:?}", self.name, connection_id, message.get_message_type());
+        } else {
+            info!("[{}] 消息已发送: {} - 类型: {:?}", self.name, connection_id, message.get_message_type());
+        }
+    }
+
+    async fn on_heartbeat_sent(&self, connection_id: &str) {
+        info!("[{}] 心跳已发送: {}", self.name, connection_id);
+    }
+
+    async fn on_heartbeat_received(&self, connection_id: &str) {
+        info!("[{}] 收到心跳: {}", self.name, connection_id);
+    }
+
+    async fn on_reconnect_started(&self, connection_id: &str, attempt: u32) {
+        info!("[{}] 开始重连: {} - 尝试次数: {}", self.name, connection_id, attempt);
+    }
+
+    async fn on_reconnected(&self, connection_id: &str, attempt: u32) {
+        info!("[{}] 重连成功: {} - 尝试次数: {}", self.name, connection_id, attempt);
+    }
+
+    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
+        info!("[{}] 重连失败: {} - 尝试次数: {} - 错误: {}", self.name, connection_id, attempt, error);
+    }
+
+    async fn on_statistics_updated(&self, connection_id: &str, stats: &flare_core::common::connections::traits::ConnectionStats) {
+        info!("[{}] 统计信息更新: {} - 收到消息: {} - 发送消息: {}", 
+             self.name, connection_id, stats.messages_received, stats.messages_sent);
+    }
 }
 
 impl SimpleEventHandler {
@@ -112,7 +145,7 @@ async fn main() -> Result<()> {
     
     // 设置事件处理器
     let event_handler = Arc::new(SimpleEventHandler::new("客户端".to_string()));
-    client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEventHandler>).await;
+    client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEvent>).await;
     
     // 建立连接
     info!("正在连接服务端...");

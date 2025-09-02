@@ -10,61 +10,16 @@ use tracing::{info, error, warn};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
-    ConnectionEventHandler, Frame,
+    ConnectionEvent, Frame,
+    DefConnectionEventHandler,
     FlareError,
 };
-use flare_core::common::{
-    EchoConnectionEventHandler, HeartbeatConnectionEventHandler,
-    connections::{
-        WebSocketConfig, RawConnectionHandler,
-    },
+use flare_core::common::connections::{
+    WebSocketConfig, RawConnectionHandler,
 };
 
 type Result<T> = std::result::Result<T, FlareError>;
 
-/// 简单事件处理器
-#[derive(Debug)]
-pub struct SimpleEventHandler {
-    pub name: String,
-}
-
-#[async_trait::async_trait]
-impl ConnectionEventHandler for SimpleEventHandler {
-    async fn on_connected(&self, connection_id: &str) {
-        info!("[{}] 连接已建立: {}", self.name, connection_id);
-    }
-
-    async fn on_disconnected(&self, connection_id: &str, reason: &str) {
-        info!("[{}] 连接已断开: {} - 原因: {}", self.name, connection_id, reason);
-    }
-
-    async fn on_error(&self, connection_id: &str, error: &str) {
-        error!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
-    }
-
-    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        let payload = message.get_payload();
-        if let Ok(text) = String::from_utf8(payload.to_vec()) {
-            info!("[{}] 收到消息: {} - 内容: {}", self.name, connection_id, text);
-        } else {
-            info!("[{}] 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
-        }
-    }
-
-    async fn on_heartbeat_timeout(&self, connection_id: &str) {
-        info!("[{}] 心跳超时: {}", self.name, connection_id);
-    }
-    
-    async fn on_quality_changed(&self, connection_id: &str, quality_score: u8) {
-        info!("[{}] 连接质量变化: {} - 评分: {}", self.name, connection_id, quality_score);
-    }
-}
-
-impl SimpleEventHandler {
-    pub fn new(name: String) -> Self {
-        Self { name }
-    }
-}
 
 /// WebSocket 服务端
 #[tokio::main]
@@ -111,8 +66,10 @@ async fn main() -> Result<()> {
                     Ok((tcp_stream, addr)) => {
                         info!("客户端已连接: {}", addr);
                         
-                        // 使用心跳事件处理器来处理客户端心跳
-                        let connection_event_handler = Arc::new(HeartbeatConnectionEventHandler::new());
+                        // 使用回显事件处理器来处理和显示消息
+                        let connection_event_handler = Arc::new(DefConnectionEventHandler::default());
+                        // 如果想要自动回显消息，可以使用 EchoConnectionEventHandler
+                        // let connection_event_handler = Arc::new(EchoConnectionEventHandler::new());
                         
                         // 克隆配置用于新连接
                         let connection_config = config.clone();
@@ -122,7 +79,7 @@ async fn main() -> Result<()> {
                             match RawConnectionHandler::from_websocket_with_handler(
                                 tcp_stream, 
                                 connection_config, 
-                                Arc::clone(&connection_event_handler) as Arc<dyn ConnectionEventHandler>
+                                Arc::clone(&connection_event_handler) as Arc<dyn ConnectionEvent>
                             ).await {
                                 Ok(mut server_connection) => {
                                     info!("WebSocket 服务端连接已建立: {}", addr);
@@ -133,14 +90,20 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                     
-                                    // 将连接设置到心跳事件处理器中
-                                    let server_conn_arc = Arc::new(tokio::sync::Mutex::new(server_connection));
-                                    connection_event_handler.set_connection(server_conn_arc).await;
+                                    // SimpleEventHandler 不需要设置连接实例，直接保持连接活跃
+                                    // 如果使用 EchoConnectionEventHandler 或 HeartbeatConnectionEventHandler，需要设置连接
+                                    // let server_conn_arc = Arc::new(tokio::sync::Mutex::new(server_connection));
+                                    // connection_event_handler.set_connection(server_conn_arc).await;
                                     
                                     // 保持连接活跃，等待客户端断开
+                                    info!("连接已就绪，等待消息...");
                                     loop {
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                                        // 这里可以添加连接健康检查
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // 更频繁的检查
+                                        // 检查连接是否还活跃
+                                        if !server_connection.is_active().await {
+                                            info!("连接已断开: {}", addr);
+                                            break;
+                                        }
                                     }
                                 }
                                 Err(e) => {

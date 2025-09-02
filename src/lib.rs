@@ -15,7 +15,7 @@ pub use common::{
     connections::{
         Connection, ClientConnection, ServerConnection, ConnectionFactory, ConnectionManager,
         ConnectionConfig, ConnectionType, ConnectionRole, ConnectionState,
-        ConnectionEventHandler, DefaultConnectionEventHandler,
+        ConnectionEvent, DefConnectionEventHandler,
         QuicConnection, WebSocketConnection,
     },
 };

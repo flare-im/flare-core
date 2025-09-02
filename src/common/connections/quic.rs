@@ -12,7 +12,7 @@ use crate::common::{
     error::{Result, FlareError},
     protocol::Frame,
     connections::{
-        traits::{Connection, ClientConnection, ServerConnection, ConnectionEventHandler, ConnectionStats, HeartbeatResponseHandler},
+        traits::{Connection, ClientConnection, ServerConnection, ConnectionEvent, ConnectionStats, HeartbeatResponseHandler},
         types::{ConnectionState, ConnectionConfig},
     },
 };
@@ -28,7 +28,7 @@ pub struct QuicConnection {
     /// 连接状态
     state: Arc<RwLock<ConnectionState>>,
     /// 事件处理器
-    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEventHandler>>>>,
+    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>>,
     /// 最后活跃时间
     last_activity: Arc<RwLock<Instant>>,
     /// 重连次数
@@ -72,7 +72,7 @@ impl QuicConnection {
     }
     
     /// 设置事件处理器
-    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
     }
     
@@ -270,7 +270,7 @@ impl Connection for QuicConnection {
         stats.last_activity = *last_activity;
     }
     
-    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEventHandler>) {
+    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
     }
 }
