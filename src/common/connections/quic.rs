@@ -19,6 +19,59 @@ use crate::common::{
 
 use quinn::{Connection as QuinnConnection, Endpoint, Connecting};
 
+/// 跳过服务器证书验证的实现（仅用于演示）
+#[derive(Debug)]
+struct SkipServerVerification;
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer,
+        _intermediates: &[rustls::pki_types::CertificateDer],
+        _server_name: &rustls::pki_types::ServerName,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA1,
+            rustls::SignatureScheme::ECDSA_SHA1_Legacy,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
 /// QUIC 连接实现
 pub struct QuicConnection {
     /// 连接ID
@@ -280,29 +333,39 @@ impl ClientConnection for QuicConnection {
     async fn connect(&mut self) -> Result<()> {
         *self.state.write().await = ConnectionState::Connecting;
         
-        #[cfg(feature = "quic")]
-        {
-            // 解析服务器地址
-            let addr = self.config.remote_addr.parse::<std::net::SocketAddr>()
-                .map_err(|e| FlareError::connection_failed(format!("无效的地址格式: {}", e)))?;
-            
-            // 创建 QUIC 端点
-            let endpoint = Endpoint::client(addr)
-                .map_err(|e| FlareError::connection_failed(format!("无法创建 QUIC 端点: {}", e)))?;
-            
-            // 连接到服务器
-            let connecting = endpoint.connect(addr, "localhost")
-                .map_err(|e| FlareError::connection_failed(format!("QUIC 连接失败: {}", e)))?;
-            
-            let new_conn = connecting.await
-                .map_err(|e| FlareError::connection_failed(format!("QUIC 握手失败: {}", e)))?;
-            
-            // 保存连接
-            *self.connection.write().await = Some(new_conn.connection);
-            
-            // 启动消息接收任务
-            self.start_receive_task().await?;
-        }
+        // 解析服务器地址
+        let addr = self.config.remote_addr.parse::<std::net::SocketAddr>()
+            .map_err(|e| FlareError::connection_failed(format!("无效的地址格式: {}", e)))?;
+        
+        // 创建客户端 QUIC 配置
+        let client_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+        
+        let mut quinn_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+                .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
+        ));
+        
+        // 创建 QUIC 端点
+        let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
+            .map_err(|e| FlareError::connection_failed(format!("无法创建 QUIC 端点: {}", e)))?;
+        
+        endpoint.set_default_client_config(quinn_config);
+        
+        // 连接到服务器
+        let connecting = endpoint.connect(addr, "localhost")
+            .map_err(|e| FlareError::connection_failed(format!("QUIC 连接失败: {}", e)))?;
+        
+        let new_conn = connecting.await
+            .map_err(|e| FlareError::connection_failed(format!("QUIC 握手失败: {}", e)))?;
+        
+        // 保存连接
+        *self.connection.write().await = Some(new_conn);
+        
+        // 启动消息接收任务
+        self.start_receive_task().await?;
         
 
         
@@ -331,16 +394,16 @@ impl ClientConnection for QuicConnection {
         // 停止接收任务
         self.stop_receive_task().await?;
         
-        #[cfg(feature = "quic")]
-        {
-            // 关闭 QUIC 连接
-            if let Some(conn) = &*self.connection.read().await {
-                conn.close(0u32.into(), b"client disconnect");
-            }
-            
-            // 清理连接
-            *self.connection.write().await = None;
+        // 停止接收任务
+        self.stop_receive_task().await?;
+        
+        // 关闭 QUIC 连接
+        if let Some(conn) = &*self.connection.read().await {
+            conn.close(0u32.into(), b"client disconnect");
         }
+        
+        // 清理连接
+        *self.connection.write().await = None;
         
         *self.state.write().await = ConnectionState::Disconnected;
         
@@ -364,36 +427,33 @@ impl ClientConnection for QuicConnection {
             return Err(FlareError::connection_failed("连接未就绪"));
         }
         
-        #[cfg(feature = "quic")]
-        {
-            // 发送消息
-            if let Some(conn) = &*self.connection.read().await {
-                // 打开双向流
-                let (mut send, _recv) = conn.open_bi().await
-                    .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
-                
-                // 序列化消息
-                let message_data = serde_json::to_vec(&message)
-                    .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
-                
-                // 发送数据
-                send.write_all(&message_data).await
-                    .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
-                
-                send.finish().await
-                    .map_err(|e| FlareError::message_send_failed(format!("流关闭失败: {}", e)))?;
-                
-                // 更新统计和活跃时间
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.messages_sent += 1;
-                }
-                self.update_last_activity().await;
-                
-                debug!("QUIC 消息已发送: {} - 类型: {:?}", self.id, message.get_message_type());
-            } else {
-                return Err(FlareError::connection_failed("QUIC 连接不可用"));
+        // 发送消息
+        if let Some(conn) = &*self.connection.read().await {
+            // 打开双向流
+            let (mut send, _recv) = conn.open_bi().await
+                .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
+            
+            // 序列化消息
+            let message_data = serde_json::to_vec(&message)
+                .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
+            
+            // 发送数据
+            send.write_all(&message_data).await
+                .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
+            
+            send.finish()
+                .map_err(|e| FlareError::message_send_failed(format!("流关闭失败: {}", e)))?;
+            
+            // 更新统计和活跃时间
+            {
+                let mut stats = self.stats.write().await;
+                stats.messages_sent += 1;
             }
+            self.update_last_activity().await;
+            
+            debug!("QUIC 消息已发送: {} - 类型: {:?}", self.id, message.get_message_type());
+        } else {
+            return Err(FlareError::connection_failed("QUIC 连接不可用"));
         }
         
 
@@ -412,11 +472,11 @@ impl ClientConnection for QuicConnection {
         // 等待重连延迟
         tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
         
-        #[cfg(feature = "quic")]
-        {
-            // 尝试重新连接
-            self.connect().await?;
-        }
+        // 等待重连延迟
+        tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
+        
+        // 尝试重新连接
+        self.connect().await?;
         
 
         
@@ -484,16 +544,16 @@ impl ServerConnection for QuicConnection {
         // 停止接收任务
         self.stop_receive_task().await?;
         
-        #[cfg(feature = "quic")]
-        {
-            // 关闭 QUIC 连接
-            if let Some(conn) = &*self.connection.read().await {
-                conn.close(0u32.into(), b"server close");
-            }
-            
-            // 清理连接
-            *self.connection.write().await = None;
+        // 停止接收任务
+        self.stop_receive_task().await?;
+        
+        // 关闭 QUIC 连接
+        if let Some(conn) = &*self.connection.read().await {
+            conn.close(0u32.into(), b"server close");
         }
+        
+        // 清理连接
+        *self.connection.write().await = None;
         
         *self.state.write().await = ConnectionState::Disconnected;
         
@@ -517,36 +577,33 @@ impl ServerConnection for QuicConnection {
             return Err(FlareError::connection_failed("连接未就绪"));
         }
         
-        #[cfg(feature = "quic")]
-        {
-            // 发送消息
-            if let Some(conn) = &*self.connection.read().await {
-                // 打开双向流
-                let (mut send, _recv) = conn.open_bi().await
-                    .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
-                
-                // 序列化消息
-                let message_data = serde_json::to_vec(&message)
-                    .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
-                
-                // 发送数据
-                send.write_all(&message_data).await
-                    .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
-                
-                send.finish().await
-                    .map_err(|e| FlareError::message_send_failed(format!("流关闭失败: {}", e)))?;
-                
-                // 更新统计和活跃时间
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.messages_sent += 1;
-                }
-                self.update_last_activity().await;
-                
-                debug!("QUIC 服务端消息已发送: {} - 类型: {:?}", self.id, message.get_message_type());
-            } else {
-                return Err(FlareError::connection_failed("QUIC 连接不可用"));
+        // 发送消息
+        if let Some(conn) = &*self.connection.read().await {
+            // 打开双向流
+            let (mut send, _recv) = conn.open_bi().await
+                .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
+            
+            // 序列化消息
+            let message_data = serde_json::to_vec(&message)
+                .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
+            
+            // 发送数据
+            send.write_all(&message_data).await
+                .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
+            
+            send.finish()
+                .map_err(|e| FlareError::message_send_failed(format!("流关闭失败: {}", e)))?;
+            
+            // 更新统计和活跃时间
+            {
+                let mut stats = self.stats.write().await;
+                stats.messages_sent += 1;
             }
+            self.update_last_activity().await;
+            
+            debug!("QUIC 服务端消息已发送: {} - 类型: {:?}", self.id, message.get_message_type());
+        } else {
+            return Err(FlareError::connection_failed("QUIC 连接不可用"));
         }
         
 

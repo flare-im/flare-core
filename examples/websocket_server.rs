@@ -20,6 +20,105 @@ use flare_core::common::connections::{
 
 type Result<T> = std::result::Result<T, FlareError>;
 
+/// 简单事件处理器 - 用于更好的消息可见性
+#[derive(Debug)]
+pub struct SimpleEventHandler {
+    pub name: String,
+}
+
+#[async_trait::async_trait]
+impl ConnectionEvent for SimpleEventHandler {
+    async fn on_connected(&self, connection_id: &str) {
+        info!("[{}] 连接已建立: {}", self.name, connection_id);
+    }
+
+    async fn on_disconnected(&self, connection_id: &str, reason: &str) {
+        info!("[{}] 连接已断开: {} - 原因: {}", self.name, connection_id, reason);
+    }
+
+    async fn on_error(&self, connection_id: &str, error: &str) {
+        error!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
+    }
+
+    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
+        if message.is_heartbeat() {
+            let message_type = message.get_message_type();
+            match message_type {
+                flare_core::common::protocol::MessageType::HeartbeatAck => {
+                    info!("[{}] 💗 收到心跳确认: {}", self.name, connection_id);
+                }
+                flare_core::common::protocol::MessageType::Heartbeat => {
+                    info!("[{}] ❤️  收到客户端心跳: {}", self.name, connection_id);
+                }
+                _ => {
+                    info!("[{}] 💓 收到其他心跳消息: {} - 类型: {:?}", self.name, connection_id, message_type);
+                }
+            }
+        } else {
+            let payload = message.get_payload();
+            if let Ok(text) = String::from_utf8(payload.to_vec()) {
+                println!("📨 [客户端消息] {}", text);
+                info!("[{}] 📨 收到客户端消息: {} - 内容: '{}'", self.name, connection_id, text);
+            } else {
+                println!("📦 [客户端消息] 二进制数据 ({} bytes)", payload.len());
+                info!("[{}] 📦 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
+            }
+        }
+    }
+
+    async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
+        if message.is_heartbeat() {
+            info!("[{}] ❤️  心跳消息已发送: {} - 类型: {:?}", self.name, connection_id, message.get_message_type());
+        } else {
+            let payload = message.get_payload();
+            if let Ok(text) = String::from_utf8(payload.to_vec()) {
+                info!("[{}] 📤 数据消息已发送 (ID: {}): '{}'", self.name, message.get_message_id(), text);
+            } else {
+                info!("[{}] 📦 二进制消息已发送 (ID: {}): {} bytes", self.name, message.get_message_id(), payload.len());
+            }
+        }
+    }
+
+    async fn on_heartbeat_timeout(&self, connection_id: &str) {
+        info!("[{}] 心跳超时: {}", self.name, connection_id);
+    }
+    
+    async fn on_quality_changed(&self, connection_id: &str, quality_score: u8) {
+        info!("[{}] 连接质量变化: {} - 评分: {}", self.name, connection_id, quality_score);
+    }
+
+    async fn on_heartbeat_sent(&self, connection_id: &str) {
+        info!("[{}] 心跳已发送: {}", self.name, connection_id);
+    }
+
+    async fn on_heartbeat_received(&self, connection_id: &str) {
+        info!("[{}] 收到心跳: {}", self.name, connection_id);
+    }
+
+    async fn on_reconnect_started(&self, connection_id: &str, attempt: u32) {
+        info!("[{}] 开始重连: {} - 尝试次数: {}", self.name, connection_id, attempt);
+    }
+
+    async fn on_reconnected(&self, connection_id: &str, attempt: u32) {
+        info!("[{}] 重连成功: {} - 尝试次数: {}", self.name, connection_id, attempt);
+    }
+
+    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
+        info!("[{}] 重连失败: {} - 尝试次数: {} - 错误: {}", self.name, connection_id, attempt, error);
+    }
+
+    async fn on_statistics_updated(&self, connection_id: &str, stats: &flare_core::common::connections::traits::ConnectionStats) {
+        info!("[{}] 统计信息更新: {} - 收到消息: {} - 发送消息: {}", 
+             self.name, connection_id, stats.messages_received, stats.messages_sent);
+    }
+}
+
+impl SimpleEventHandler {
+    pub fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
 
 /// WebSocket 服务端
 #[tokio::main]
@@ -66,10 +165,8 @@ async fn main() -> Result<()> {
                     Ok((tcp_stream, addr)) => {
                         info!("客户端已连接: {}", addr);
                         
-                        // 使用回显事件处理器来处理和显示消息
-                        let connection_event_handler = Arc::new(DefConnectionEventHandler::default());
-                        // 如果想要自动回显消息，可以使用 EchoConnectionEventHandler
-                        // let connection_event_handler = Arc::new(EchoConnectionEventHandler::new());
+                        // 使用新的SimpleEventHandler来处理和显示消息
+                        let connection_event_handler = Arc::new(SimpleEventHandler::new(format!("服务端-{}", addr)));
                         
                         // 克隆配置用于新连接
                         let connection_config = config.clone();
@@ -98,12 +195,14 @@ async fn main() -> Result<()> {
                                     // 保持连接活跃，等待客户端断开
                                     info!("连接已就绪，等待消息...");
                                     loop {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // 更频繁的检查
+                                        tokio::task::yield_now().await; // 使用超低延迟策略
                                         // 检查连接是否还活跃
                                         if !server_connection.is_active().await {
                                             info!("连接已断开: {}", addr);
                                             break;
                                         }
+                                        // 给系统一个微小的处理时间
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                                     }
                                 }
                                 Err(e) => {

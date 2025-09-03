@@ -1,7 +1,7 @@
-//! WebSocket 客户端示例
+//! QUIC 客户端示例
 //! 
 //! 演示如何使用 common 模块的 Connection trait 和 ConnectionFactory
-//! 创建 WebSocket 客户端连接
+//! 创建 QUIC 客户端连接
 
 use tracing::{info, error};
 
@@ -11,7 +11,7 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::connections::{
-    ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
+    ConnectionFactory, QuicConfig, ConnectionFactoryTrait
 };
 use flare_core::common::protocol::{MessageType, Reliability};
 
@@ -118,28 +118,35 @@ impl SimpleEventHandler {
     }
 }
 
-/// WebSocket 客户端
+/// QUIC 客户端
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 初始化 TLS 加密提供程序
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("无法初始化 TLS 加密提供程序");
+    
     // 初始化日志，指定 info 级别
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 WebSocket 客户端");
-    info!("=== WebSocket 客户端启动 ===");
+    info!("启动 QUIC 客户端");
+    info!("=== QUIC 客户端启动 ===");
     
     // 创建客户端配置
     let config = ConnectionConfig::client(
-        "websocket_client".to_string(),
-        "ws://127.0.0.1:8080".to_string()
-    ).with_type(ConnectionType::WebSocket)
-     .with_websocket_config(WebSocketConfig {
-         subprotocols: vec!["text".to_string()],
-         extensions: vec![],
-         compression_threshold: None,
+        "quic_client".to_string(),
+        "127.0.0.1:4433".to_string()  // QUIC 使用专门的端口
+    ).with_type(ConnectionType::Quic)
+     .with_quic_config(QuicConfig {
+         max_concurrent_streams: 10,
+         initial_stream_window: 65536,
+         connection_window: 262144,
+         congestion_control: "cubic".to_string(),
      })
-     .with_heartbeat(30000, 10000);
+     .with_heartbeat(30000, 10000)
+     .with_tls();  // QUIC 强制使用 TLS
     
     info!("客户端配置: {:?}", config);
     info!("连接地址: {}", config.remote_addr);
@@ -151,13 +158,13 @@ async fn main() -> Result<()> {
     let mut client_connection = factory.create_client_connection(config).await?;
     
     // 设置事件处理器
-    let event_handler = Arc::new(SimpleEventHandler::new("客户端".to_string()));
+    let event_handler = Arc::new(SimpleEventHandler::new("QUIC客户端".to_string()));
     client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEvent>).await;
     
     // 建立连接
-    info!("正在连接服务端...");
+    info!("正在连接QUIC服务端...");
     client_connection.connect().await?;
-    info!("已连接到服务端！");
+    info!("已连接到QUIC服务端！");
     
     // 等待一下让连接稳定
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -189,14 +196,14 @@ async fn main() -> Result<()> {
     });
     
     // 启动用户输入处理
-    println!("\n==== WebSocket 客户端控制台 ====");
+    println!("\n==== QUIC 客户端控制台 ====");
     println!("📝 请输入要发送的消息:");
     println!("💡 命令说明:");
     println!("   - 输入任意文本发送消息");
     println!("   - 输入 'quit' 或 'exit' 退出程序");
     println!("   - 输入 'help' 查看帮助");
     println!("   - 输入 'status' 查看连接状态");
-    println!("================================\n");
+    println!("==============================\n");
     
     let mut message_counter = 1u64;
     
@@ -235,7 +242,7 @@ async fn main() -> Result<()> {
                 let conn = client_connection_heartbeat.lock().await;
                 let is_active = conn.is_active().await;
                 println!("\n📊 连接状态: {}", if is_active { "✅ 活跃" } else { "❌ 断开" });
-                println!("🔗 服务器地址: ws://127.0.0.1:8080");
+                println!("🔗 服务器地址: 127.0.0.1:4433 (QUIC)");
                 println!("📈 已发送消息数: {}\n", message_counter - 1);
                 continue;
             }
@@ -282,6 +289,6 @@ async fn main() -> Result<()> {
     let mut conn = client_connection_heartbeat.lock().await;
     conn.disconnect().await?;
     
-    info!("客户端已断开");
+    info!("QUIC客户端已断开");
     Ok(())
 }

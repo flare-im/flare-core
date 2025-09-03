@@ -176,4 +176,28 @@ impl RawConnectionHandler {
         
         Ok(Box::new(connection))
     }
+    
+    /// 从 QUIC 原始连接创建服务端连接，并设置事件处理器
+    pub async fn from_quic_with_handler(
+        quic_connection: quinn::Connection,
+        config: ConnectionConfig,
+        handler: std::sync::Arc<dyn ConnectionEvent>,
+    ) -> Result<Box<dyn ServerConnection>> {
+        // 创建 QUIC 连接
+        let mut connection = QuicConnection::new(config);
+        
+        // 设置事件处理器
+        connection.set_event_handler(handler).await;
+        
+        // 设置 QUIC 连接到连接中
+        connection.set_connection(quic_connection).await;
+        
+        // 启动消息接收任务
+        connection.start_receive_task().await
+            .map_err(|e| crate::common::error::FlareError::connection_failed(
+                format!("启动消息接收任务失败: {}", e)
+            ))?;
+        
+        Ok(Box::new(connection))
+    }
 }

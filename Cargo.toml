@@ -12,8 +12,28 @@ documentation = "https://docs.rs/flare-core"
 readme = "README.md"
 
 [[example]]
-name = "websocket_connection_demo"
-path = "examples/common/websocket_connection_demo.rs"
+name = "quic_client"
+path = "examples/quic_client.rs"
+
+[[example]]
+name = "quic_server" 
+path = "examples/quic_server.rs"
+
+[[example]]
+name = "quick_test_quic_client"
+path = "examples/quick_test_quic_client.rs"
+
+[[example]]
+name = "websocket_client"
+path = "examples/websocket_client.rs"
+
+[[example]]
+name = "websocket_server"
+path = "examples/websocket_server.rs"
+
+[[example]]
+name = "quick_test_client"
+path = "examples/quick_test_client.rs"
 
 [dependencies]
 # 异步运行时（核心功能）
