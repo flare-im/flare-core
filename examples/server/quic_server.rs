@@ -1,9 +1,13 @@
-//! QUIC 服务端示例
+//! QUIC 超低延迟服务端示例
 //! 
-//! 演示如何使用 common 模块的 ConnectionFactory 和 RawConnectionHandler
-//! 创建 QUIC 服务端连接
+//! 演示使用最新优化技术的QUIC服务端：
+//! - 零拷贝Bincode序列化器
+//! - 自适应LZ4压缩器  
+//! - 异步消息Pipeline
+//! - 微批处理优化
+//! - CPU亲和性绑定
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tokio::signal;
 use tracing::{info, error, warn};
 
@@ -12,8 +16,12 @@ use flare_core::{
     ConnectionEvent, Frame,
     FlareError,
 };
-use flare_core::common::connections::{
-    QuicConfig, RawConnectionHandler,
+use flare_core::common::{
+    connections::{QuicConfig, RawConnectionHandler},
+    serialization::BincodeSerializer,
+    compression::{Lz4Compressor, CompressionConfig},
+    pipeline::AsyncMessagePipeline,
+    system::CpuAffinityManager,
 };
 
 type Result<T> = std::result::Result<T, FlareError>;
@@ -162,7 +170,7 @@ async fn create_quic_endpoint() -> Result<quinn::Endpoint> {
     Ok(endpoint)
 }
 
-/// QUIC 服务端
+/// QUIC 超低延迟服务端
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 TLS 加密提供程序
@@ -175,22 +183,41 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 QUIC 服务端");
-    info!("=== QUIC 服务端启动 ===");
+    info!("启动 QUIC 超低延迟服务端");
+    info!("=== QUIC 超低延迟服务端启动 ===");
     
-    // 创建服务端配置
+    // CPU亲和性优化 - 绑定到专用核心
+    if let Ok(affinity_mgr) = CpuAffinityManager::new() {
+        if let Err(e) = affinity_mgr.bind_current_thread(1) {
+            info!("CPU亲和性绑定失败: {}, 继续运行", e);
+        } else {
+            info!("✅ 已绑定到CPU核心1，获得专用计算资源");
+        }
+    }
+    
+    // 创建超低延迟服务端配置
     let config = ConnectionConfig::server(
-        "quic_server".to_string(),
+        "quic_ultra_low_latency_server".to_string(),
         "127.0.0.1:4433".to_string()
     ).with_type(ConnectionType::Quic)
      .with_quic_config(QuicConfig {
-         max_concurrent_streams: 100,
-         initial_stream_window: 65536,
-         connection_window: 1048576,
-         congestion_control: "bbr".to_string(),
+         max_concurrent_streams: 200,        // 增加并发流数量
+         initial_stream_window: 2097152,     // 2MB窗口
+         connection_window: 8388608,         // 8MB连接窗口
+         congestion_control: "bbr".to_string(), // BBR拥塞控制
      })
-     .with_heartbeat_monitoring(30000, 60000)
+     .with_heartbeat_monitoring(5000, 10000)  // 5s间隔，10s超时
      .with_tls();
+    
+    // 创建超低延迟序列化器和压缩器
+    let serializer = Arc::new(BincodeSerializer::new());
+    let compressor = Arc::new(Lz4Compressor::ultra_fast());
+    
+    // 创建异步消息Pipeline
+    let pipeline = AsyncMessagePipeline::ultra_low_latency(
+        serializer.clone() as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+        compressor.clone() as Arc<dyn flare_core::common::compression::Compressor>,
+    );
     
     info!("服务端配置: {:?}", config);
     info!("监听地址: {}", config.local_addr.as_ref().unwrap());
@@ -210,6 +237,8 @@ async fn main() -> Result<()> {
                 if let Some(connecting) = incoming {
                     let connection_config = config.clone();
                     
+                    let serializer_clone = serializer.clone();
+                    let compressor_clone = compressor.clone();
                     tokio::spawn(async move {
                         match connecting.await {
                             Ok(quic_connection) => {
@@ -236,6 +265,12 @@ async fn main() -> Result<()> {
                                             return;
                                         }
                                         
+                                        // 为每个连接创建独立的Pipeline
+                                        let connection_pipeline = AsyncMessagePipeline::ultra_low_latency(
+                                            serializer_clone as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+                                            compressor_clone as Arc<dyn flare_core::common::compression::Compressor>,
+                                        );
+                                        
                                         // 保持连接活跃，等待客户端断开
                                         info!("连接已就绪，等待消息...");
                                         loop {
@@ -245,8 +280,27 @@ async fn main() -> Result<()> {
                                                 info!("连接已断开: {}", remote_addr);
                                                 break;
                                             }
+                                            
+                                            // 处理收到的消息 - 使用Pipeline优化
+                                            if let Ok(Some(frame)) = server_connection.receive_message().await {
+                                                let pipeline_start = Instant::now();
+                                                match connection_pipeline.process_async(frame.clone()).await {
+                                                    Ok(()) => {
+                                                        info!("✅ Pipeline处理完成");
+                                                        
+                                                        // 发送回显消息
+                                                        if let Err(e) = server_connection.send_message(frame).await {
+                                                            error!("发送回显消息失败: {}", e);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Pipeline处理失败: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            
                                             // 给系统一个微小的处理时间
-                                            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                                            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
                                         }
                                     }
                                     Err(e) => {

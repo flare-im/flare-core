@@ -5,6 +5,11 @@
 pub mod connections;
 pub mod error;
 pub mod protocol;
+pub mod serialization;
+pub mod compression;
+pub mod messaging;
+pub mod pipeline;
+pub mod system;
 
 // 重新导出主要类型
 pub use connections::{
@@ -14,4 +19,12 @@ pub use connections::{
     QuicConnection, WebSocketConnection,
 };
 pub use error::{Result, FlareError};
-pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection}; 
+pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection};
+pub use serialization::{
+    FrameSerializer, SerializationFormat, SerializationConfig,
+    JsonSerializer, SerializerFactory,
+};
+pub use compression::{
+    Compressor, CompressionFormat, CompressionConfig,
+    Lz4Compressor, SnappyCompressor, GzipCompressor, CompressorFactory,
+}; 

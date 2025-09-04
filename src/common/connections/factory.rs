@@ -9,8 +9,11 @@ use crate::common::{
         types::{ConnectionConfig, ConnectionType, ConnectionRole},
         quic::QuicConnection,
         websocket::WebSocketConnection,
+        builder::ConnectionBuilder,
     },
+    serialization::FrameSerializer,
 };
+use std::sync::Arc;
 
 /// 连接工厂
 pub struct ConnectionFactory;
@@ -19,6 +22,74 @@ impl ConnectionFactory {
     /// 创建新的连接工厂
     pub fn new() -> Self {
         Self
+    }
+    
+    /// 从构建器创建客户端连接
+    pub async fn create_client_from_builder(&self, builder: ConnectionBuilder) -> Result<Box<dyn ClientConnection>> {
+        let (config, custom_serializer) = builder.build();
+        
+        // 确保是客户端配置
+        if config.role != ConnectionRole::Client {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "只能为客户端角色创建客户端连接"
+            ));
+        }
+        
+        match config.connection_type {
+            ConnectionType::Quic => {
+                if let Some(serializer) = custom_serializer {
+                    Ok(Box::new(QuicConnection::with_serializer(config, serializer)))
+                } else {
+                    Ok(Box::new(QuicConnection::new(config)))
+                }
+            }
+            ConnectionType::WebSocket => {
+                if let Some(serializer) = custom_serializer {
+                    Ok(Box::new(WebSocketConnection::with_serializer(config, serializer)))
+                } else {
+                    Ok(Box::new(WebSocketConnection::new(config)))
+                }
+            }
+            ConnectionType::Tcp | ConnectionType::Udp => {
+                Err(crate::common::error::FlareError::connection_failed(
+                    format!("{:?} 协议暂未实现", config.connection_type)
+                ))
+            }
+        }
+    }
+    
+    /// 从构建器创建服务端连接
+    pub async fn create_server_from_builder(&self, builder: ConnectionBuilder) -> Result<Box<dyn ServerConnection>> {
+        let (config, custom_serializer) = builder.build();
+        
+        // 确保是服务端配置
+        if config.role != ConnectionRole::Server {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "只能为服务端角色创建服务端连接"
+            ));
+        }
+        
+        match config.connection_type {
+            ConnectionType::Quic => {
+                if let Some(serializer) = custom_serializer {
+                    Ok(Box::new(QuicConnection::with_serializer(config, serializer)))
+                } else {
+                    Ok(Box::new(QuicConnection::new(config)))
+                }
+            }
+            ConnectionType::WebSocket => {
+                if let Some(serializer) = custom_serializer {
+                    Ok(Box::new(WebSocketConnection::with_serializer(config, serializer)))
+                } else {
+                    Ok(Box::new(WebSocketConnection::new(config)))
+                }
+            }
+            ConnectionType::Tcp | ConnectionType::Udp => {
+                Err(crate::common::error::FlareError::connection_failed(
+                    format!("{:?} 协议暂未实现", config.connection_type)
+                ))
+            }
+        }
     }
 }
 
@@ -185,6 +256,52 @@ impl RawConnectionHandler {
     ) -> Result<Box<dyn ServerConnection>> {
         // 创建 QUIC 连接
         let mut connection = QuicConnection::new(config);
+        
+        // 设置事件处理器
+        connection.set_event_handler(handler).await;
+        
+        // 设置 QUIC 连接到连接中
+        connection.set_connection(quic_connection).await;
+        
+        // 启动消息接收任务
+        connection.start_receive_task().await
+            .map_err(|e| crate::common::error::FlareError::connection_failed(
+                format!("启动消息接收任务失败: {}", e)
+            ))?;
+        
+        Ok(Box::new(connection))
+    }
+    
+    /// 从 QUIC 原始连接创建服务端连接（使用自定义序列化器）
+    pub async fn from_quic_with_serializer(
+        quic_connection: quinn::Connection,
+        config: ConnectionConfig,
+        serializer: Arc<Box<dyn FrameSerializer>>,
+    ) -> Result<Box<dyn ServerConnection>> {
+        // 创建 QUIC 连接（使用自定义序列化器）
+        let mut connection = QuicConnection::with_serializer(config, serializer);
+        
+        // 设置 QUIC 连接到连接中
+        connection.set_connection(quic_connection).await;
+        
+        // 启动消息接收任务
+        connection.start_receive_task().await
+            .map_err(|e| crate::common::error::FlareError::connection_failed(
+                format!("启动消息接收任务失败: {}", e)
+            ))?;
+        
+        Ok(Box::new(connection))
+    }
+    
+    /// 从 QUIC 原始连接创建服务端连接，并设置事件处理器和序列化器
+    pub async fn from_quic_with_handler_and_serializer(
+        quic_connection: quinn::Connection,
+        config: ConnectionConfig,
+        handler: Arc<dyn ConnectionEvent>,
+        serializer: Arc<Box<dyn FrameSerializer>>,
+    ) -> Result<Box<dyn ServerConnection>> {
+        // 创建 QUIC 连接（使用自定义序列化器）
+        let mut connection = QuicConnection::with_serializer(config, serializer);
         
         // 设置事件处理器
         connection.set_event_handler(handler).await;

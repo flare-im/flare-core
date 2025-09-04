@@ -9,6 +9,8 @@ pub mod websocket;
 pub mod factory;
 pub mod manager;
 pub mod event;
+pub mod builder;
+pub mod pool;
 
 // 重新导出主要类型
 pub use traits::{
@@ -28,3 +30,5 @@ pub use quic::QuicConnection;
 pub use websocket::WebSocketConnection;
 pub use factory::{ConnectionFactory, RawConnectionHandler};
 pub use manager::ConnectionManager;
+pub use builder::{ConnectionBuilder, connection, client_connection, server_connection};
+pub use pool::{ConnectionPool, PoolStats};

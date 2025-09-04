@@ -1,9 +1,13 @@
-//! WebSocket 服务端示例
+//! WebSocket 超低延迟服务端示例
 //! 
-//! 演示如何使用 common 模块的 ConnectionFactory 和 RawConnectionHandler
-//! 创建 WebSocket 服务端连接
+//! 演示使用最新优化技术的WebSocket服务端：
+//! - 零拷贝Bincode序列化器
+//! - 自适应LZ4压缩器  
+//! - 异步消息Pipeline
+//! - 微批处理优化
+//! - CPU亲和性绑定
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, error, warn};
@@ -14,8 +18,12 @@ use flare_core::{
     DefConnectionEventHandler,
     FlareError,
 };
-use flare_core::common::connections::{
-    WebSocketConfig, RawConnectionHandler,
+use flare_core::common::{
+    connections::{WebSocketConfig, RawConnectionHandler},
+    serialization::BincodeSerializer,
+    compression::{Lz4Compressor, CompressionConfig},
+    pipeline::AsyncMessagePipeline,
+    system::CpuAffinityManager,
 };
 
 type Result<T> = std::result::Result<T, FlareError>;
@@ -120,7 +128,7 @@ impl SimpleEventHandler {
 }
 
 
-/// WebSocket 服务端
+/// WebSocket 超低延迟服务端
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志，指定 info 级别
@@ -128,20 +136,39 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 WebSocket 服务端");
-    info!("=== WebSocket 服务端启动 ===");
+    info!("启动 WebSocket 超低延迟服务端");
+    info!("=== WebSocket 超低延迟服务端启动 ===");
     
-    // 创建服务端配置
+    // CPU亲和性优化 - 绑定到专用核心
+    if let Ok(affinity_mgr) = CpuAffinityManager::new() {
+        if let Err(e) = affinity_mgr.bind_current_thread(3) {
+            info!("CPU亲和性绑定失败: {}, 继续运行", e);
+        } else {
+            info!("✅ 已绑定到CPU核心3，获得专用计算资源");
+        }
+    }
+    
+    // 创建超低延迟服务端配置
     let config = ConnectionConfig::server(
-        "websocket_server".to_string(),
+        "websocket_ultra_low_latency_server".to_string(),
         "127.0.0.1:8080".to_string()
     ).with_type(ConnectionType::WebSocket)
      .with_websocket_config(WebSocketConfig {
-         subprotocols: vec!["text".to_string()],
+         subprotocols: vec!["binary".to_string()],  // 使用二进制协议
          extensions: vec![],
-         compression_threshold: None,
+         compression_threshold: Some(128),  // 128字节以上启用压缩
      })
-     .with_heartbeat_monitoring(30000, 60000);
+     .with_heartbeat_monitoring(5000, 10000);  // 5s间隔，10s超时
+    
+    // 创建超低延迟序列化器和压缩器
+    let serializer = Arc::new(BincodeSerializer::new());
+    let compressor = Arc::new(Lz4Compressor::ultra_fast());
+    
+    // 创建异步消息Pipeline
+    let pipeline = AsyncMessagePipeline::ultra_low_latency(
+        serializer.clone() as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+        compressor.clone() as Arc<dyn flare_core::common::compression::Compressor>,
+    );
     
     info!("服务端配置: {:?}", config);
     info!("监听地址: {}", config.local_addr.as_ref().unwrap());
@@ -171,6 +198,8 @@ async fn main() -> Result<()> {
                         // 克隆配置用于新连接
                         let connection_config = config.clone();
                         
+                        let serializer_clone = serializer.clone();
+                        let compressor_clone = compressor.clone();
                         // 为每个连接创建独立的任务
                         tokio::spawn(async move {
                             match RawConnectionHandler::from_websocket_with_handler(
@@ -187,6 +216,12 @@ async fn main() -> Result<()> {
                                         return;
                                     }
                                     
+                                    // 为每个连接创建独立的Pipeline
+                                    let connection_pipeline = AsyncMessagePipeline::ultra_low_latency(
+                                        serializer_clone as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+                                        compressor_clone as Arc<dyn flare_core::common::compression::Compressor>,
+                                    );
+                                    
                                     // SimpleEventHandler 不需要设置连接实例，直接保持连接活跃
                                     // 如果使用 EchoConnectionEventHandler 或 HeartbeatConnectionEventHandler，需要设置连接
                                     // let server_conn_arc = Arc::new(tokio::sync::Mutex::new(server_connection));
@@ -201,8 +236,27 @@ async fn main() -> Result<()> {
                                             info!("连接已断开: {}", addr);
                                             break;
                                         }
+                                        
+                                        // 处理收到的消息 - 使用Pipeline优化
+                                        if let Ok(Some(frame)) = server_connection.receive_message().await {
+                                            let pipeline_start = Instant::now();
+                                            match connection_pipeline.process_async(frame.clone()).await {
+                                                Ok(()) => {
+                                                    info!("✅ Pipeline处理完成");
+                                                    
+                                                    // 发送回显消息
+                                                    if let Err(e) = server_connection.send_message(frame).await {
+                                                        error!("发送回显消息失败: {}", e);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Pipeline处理失败: {}", e);
+                                                }
+                                            }
+                                        }
+                                        
                                         // 给系统一个微小的处理时间
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                                        tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
                                     }
                                 }
                                 Err(e) => {

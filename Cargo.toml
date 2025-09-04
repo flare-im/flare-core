@@ -12,28 +12,56 @@ documentation = "https://docs.rs/flare-core"
 readme = "README.md"
 
 [[example]]
+name = "compression_demo"
+path = "examples/common/compression_demo.rs"
+
+[[example]]
+name = "ultra_low_latency_demo"
+path = "examples/common/ultra_low_latency_demo.rs"
+
+[[example]]
 name = "quic_client"
-path = "examples/quic_client.rs"
+path = "examples/client/quic_client.rs"
 
 [[example]]
 name = "quic_server" 
-path = "examples/quic_server.rs"
+path = "examples/server/quic_server.rs"
 
 [[example]]
 name = "quick_test_quic_client"
-path = "examples/quick_test_quic_client.rs"
+path = "examples/client/quick_test_quic_client.rs"
 
 [[example]]
 name = "websocket_client"
-path = "examples/websocket_client.rs"
+path = "examples/client/websocket_client.rs"
 
 [[example]]
 name = "websocket_server"
-path = "examples/websocket_server.rs"
+path = "examples/server/websocket_server.rs"
 
 [[example]]
 name = "quick_test_client"
-path = "examples/quick_test_client.rs"
+path = "examples/client/quick_test_client.rs"
+
+[[example]]
+name = "all_serializers_simple"
+path = "examples/common/all_serializers_simple.rs"
+
+[[example]]
+name = "connection_serialization_demo"
+path = "examples/common/connection_serialization_demo.rs"
+
+[[example]]
+name = "flexible_serializer_demo"
+path = "examples/common/flexible_serializer_demo.rs"
+
+[[example]]
+name = "serialization_demo"
+path = "examples/common/serialization_demo.rs"
+
+[[example]]
+name = "optimized_ultra_low_latency_demo"
+path = "examples/common/optimized_ultra_low_latency_demo.rs"
 
 [dependencies]
 # 异步运行时（核心功能）
@@ -66,6 +94,17 @@ thiserror = "2.0.15"
 
 # 异步trait（连接接口需要）
 async-trait = "0.1.83"
+
+# 全局静态变量（工厂模式需要）
+lazy_static = "1.5.0"
+
+# 压缩算法库
+lz4_flex = "0.11.3"
+snap = "1.1.1"
+flate2 = "1.0.28"
+
+# 随机数生成（测试用）
+fastrand = "2.0"
 
 # 流处理（WebSocket 需要）
 futures-util = "0.3.30"

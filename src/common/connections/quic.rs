@@ -95,11 +95,52 @@ pub struct QuicConnection {
     receive_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// 心跳响应处理器
     heartbeat_response_handler: Arc<RwLock<Option<HeartbeatResponseHandler>>>,
+    /// 序列化器
+    serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>,
 }
 
 impl QuicConnection {
-    /// 创建新的 QUIC 连接
+    /// 创建新的 QUIC 连接（使用配置）
     pub fn new(config: ConnectionConfig) -> Self {
+        let stats = ConnectionStats {
+            established_at: Instant::now(),
+            last_activity: Instant::now(),
+            messages_received: 0,
+            messages_sent: 0,
+            heartbeat_responses: 0,
+            quality_score: 100,
+        };
+        
+        // 根据配置创建序列化器
+        let serializer = {
+            let factory = crate::common::serialization::SerializerFactory::new();
+            factory.create_with_config(
+                config.get_serialization_format(), 
+                config.get_serialization_config()
+            ).unwrap_or_else(|_| {
+                // 如果创建失败，使用默认JSON序列化器
+                crate::common::serialization::factory::json_serializer()
+            })
+        };
+        
+        Self {
+            id: config.id.clone(),
+            config,
+            state: Arc::new(RwLock::new(ConnectionState::Initializing)),
+            event_handler: Arc::new(RwLock::new(None)),
+            last_activity: Arc::new(RwLock::new(Instant::now())),
+            reconnect_attempts: Arc::new(RwLock::new(0)),
+            stats: Arc::new(RwLock::new(stats)),
+            
+            connection: Arc::new(RwLock::new(None)),
+            receive_task: Arc::new(RwLock::new(None)),
+            heartbeat_response_handler: Arc::new(RwLock::new(None)),
+            serializer: Arc::new(serializer),
+        }
+    }
+    
+    /// 创建新的 QUIC 连接（使用自定义序列化器）
+    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>) -> Self {
         let stats = ConnectionStats {
             established_at: Instant::now(),
             last_activity: Instant::now(),
@@ -121,6 +162,7 @@ impl QuicConnection {
             connection: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
             heartbeat_response_handler: Arc::new(RwLock::new(None)),
+            serializer,
         }
     }
     
@@ -143,6 +185,7 @@ impl QuicConnection {
         let stats = Arc::clone(&self.stats);
         let last_activity = Arc::clone(&self.last_activity);
         let connection = Arc::clone(&self.connection);
+        let serializer = Arc::clone(&self.serializer);
         
         let task = tokio::spawn(async move {
             loop {
@@ -181,15 +224,22 @@ impl QuicConnection {
                                     if let Some(handler) = &*event_handler.read().await {
                                         let handler = Arc::clone(handler);
                                         let id = id.clone();
+                                        let serializer_clone = Arc::clone(&serializer);
                                         tokio::spawn(async move {
-                                            let frame = crate::common::protocol::Frame::new(
-                                                crate::common::protocol::MessageType::Data,
-                                                0,
-                                                crate::common::protocol::Reliability::AtLeastOnce,
-                                                data,
-                                            );
-                                            let message = frame;
-                                            handler.on_message_received(&id, &message).await;
+                                            // 使用序列化器解析消息
+                                            let frame = match serializer_clone.deserialize(&data).await {
+                                                Ok(frame) => frame,
+                                                Err(_) => {
+                                                    // 如果解析失败，创建简单数据消息
+                                                    crate::common::protocol::Frame::new(
+                                                        crate::common::protocol::MessageType::Data,
+                                                        0,
+                                                        crate::common::protocol::Reliability::AtLeastOnce,
+                                                        data,
+                                                    )
+                                                }
+                                            };
+                                            handler.on_message_received(&id, &frame).await;
                                         });
                                     }
                                 }
@@ -343,7 +393,7 @@ impl ClientConnection for QuicConnection {
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
         
-        let mut quinn_config = quinn::ClientConfig::new(Arc::new(
+        let quinn_config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
                 .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
         ));
@@ -433,8 +483,8 @@ impl ClientConnection for QuicConnection {
             let (mut send, _recv) = conn.open_bi().await
                 .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
             
-            // 序列化消息
-            let message_data = serde_json::to_vec(&message)
+            // 使用序列化器序列化消息
+            let message_data = self.serializer.serialize(&message).await
                 .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
             
             // 发送数据
@@ -583,8 +633,8 @@ impl ServerConnection for QuicConnection {
             let (mut send, _recv) = conn.open_bi().await
                 .map_err(|e| FlareError::message_send_failed(format!("无法打开双向流: {}", e)))?;
             
-            // 序列化消息
-            let message_data = serde_json::to_vec(&message)
+            // 使用序列化器序列化消息
+            let message_data = self.serializer.serialize(&message).await
                 .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
             
             // 发送数据

@@ -1,21 +1,28 @@
-//! WebSocket 客户端示例
+//! WebSocket 超低延迟客户端示例
 //! 
-//! 演示如何使用 common 模块的 Connection trait 和 ConnectionFactory
-//! 创建 WebSocket 客户端连接
+//! 演示使用最新优化技术的WebSocket客户端：
+//! - 零拷贝Bincode序列化器
+//! - 自适应LZ4压缩器  
+//! - 异步消息Pipeline
+//! - 微批处理优化
+//! - CPU亲和性绑定
 
 use tracing::{info, error};
+use std::{sync::Arc, time::Instant};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
     ConnectionEvent, Frame,
     FlareError,
 };
-use flare_core::common::connections::{
-    ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
+use flare_core::common::{
+    connections::{ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait},
+    protocol::{MessageType, Reliability},
+    serialization::BincodeSerializer,
+    compression::{Lz4Compressor, CompressionConfig},
+    pipeline::AsyncMessagePipeline,
+    system::CpuAffinityManager,
 };
-use flare_core::common::protocol::{MessageType, Reliability};
-
-use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, FlareError>;
 
@@ -118,7 +125,7 @@ impl SimpleEventHandler {
     }
 }
 
-/// WebSocket 客户端
+/// WebSocket 超低延迟客户端
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志，指定 info 级别
@@ -126,20 +133,39 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 WebSocket 客户端");
-    info!("=== WebSocket 客户端启动 ===");
+    info!("启动 WebSocket 超低延迟客户端");
+    info!("=== WebSocket 超低延迟客户端启动 ===");
     
-    // 创建客户端配置
+    // CPU亲和性优化 - 绑定到专用核心
+    if let Ok(affinity_mgr) = CpuAffinityManager::new() {
+        if let Err(e) = affinity_mgr.bind_current_thread(2) {
+            info!("CPU亲和性绑定失败: {}, 继续运行", e);
+        } else {
+            info!("✅ 已绑定到CPU核心2，获得专用计算资源");
+        }
+    }
+    
+    // 创建超低延迟客户端配置
     let config = ConnectionConfig::client(
-        "websocket_client".to_string(),
+        "websocket_ultra_low_latency_client".to_string(),
         "ws://127.0.0.1:8080".to_string()
     ).with_type(ConnectionType::WebSocket)
      .with_websocket_config(WebSocketConfig {
-         subprotocols: vec!["text".to_string()],
+         subprotocols: vec!["binary".to_string()],  // 使用二进制协议
          extensions: vec![],
-         compression_threshold: None,
+         compression_threshold: Some(128),  // 128字节以上启用压缩
      })
-     .with_heartbeat(30000, 10000);
+     .with_heartbeat(5000, 2000);  // 5s间隔，2s超时
+    
+    // 创建超低延迟序列化器和压缩器
+    let serializer = Arc::new(BincodeSerializer::new());
+    let compressor = Arc::new(Lz4Compressor::ultra_fast());
+    
+    // 创建异步消息Pipeline
+    let pipeline = AsyncMessagePipeline::ultra_low_latency(
+        serializer.clone() as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+        compressor.clone() as Arc<dyn flare_core::common::compression::Compressor>,
+    );
     
     info!("客户端配置: {:?}", config);
     info!("连接地址: {}", config.remote_addr);
@@ -155,18 +181,21 @@ async fn main() -> Result<()> {
     client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEvent>).await;
     
     // 建立连接
-    info!("正在连接服务端...");
+    info!("正在连接WebSocket服务端...");
+    let connect_start = Instant::now();
     client_connection.connect().await?;
-    info!("已连接到服务端！");
+    let connect_time = connect_start.elapsed();
+    info!("✅ 已连接到WebSocket服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
     
-    // 等待一下让连接稳定
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // 优化：更短的稳定时间
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
-    // 启动心跳任务
+    // 启动优化的心跳任务
     let client_connection_heartbeat = Arc::new(tokio::sync::Mutex::new(client_connection));
     let heartbeat_connection = Arc::clone(&client_connection_heartbeat);
     let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(30000)); // 30秒心跳间隔
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(5000)); // 5秒心跳间隔
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             
@@ -178,7 +207,7 @@ async fn main() -> Result<()> {
                 error!("心跳发送失败: {}", e);
                 break;
             } else {
-                info!("心跳已发送");
+                info!("💗 心跳已发送");
             }
             
             // 调用连接的心跳方法更新活跃状态
@@ -246,7 +275,7 @@ async fn main() -> Result<()> {
             _ => {}
         }
         
-        // 发送用户消息
+        // 发送用户消息 - 使用优化的Pipeline处理
         if !input.is_empty() {
             println!("📤 正在发送消息: '{}'", input);
             
@@ -258,17 +287,43 @@ async fn main() -> Result<()> {
                 input.as_bytes().to_vec(),
             );
             
-            // 通过Connection trait发送消息
-            let mut conn = client_connection_heartbeat.lock().await;
-            match conn.send_message(message).await {
-                Ok(_) => {
-                    println!("✅ 消息发送成功 (#{})\n", message_counter);
-                    message_counter += 1;
+            // 通过异步Pipeline处理消息
+            let pipeline_start = Instant::now();
+            match pipeline.process_async(message.clone()).await {
+                Ok(()) => {
+                    println!("✅ Pipeline处理完成 (#{})", message_counter);
+                    
+                    // 通过Connection trait发送已处理的消息
+                    let mut conn = client_connection_heartbeat.lock().await;
+                    match conn.send_message(message).await {
+                        Ok(_) => {
+                            println!("📡 消息已发送 (#{})\n", message_counter);
+                            message_counter += 1;
+                        }
+                        Err(e) => {
+                            println!("❌ 消息发送失败: {}\n", e);
+                            error!("发送消息失败: {}", e);
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
-                    println!("❌ 消息发送失败: {}\n", e);
-                    error!("发送消息失败: {}", e);
-                    break;
+                    println!("❌ Pipeline处理失败: {}\n", e);
+                    error!("Pipeline处理失败: {}", e);
+                    
+                    // 回退到直接发送
+                    let mut conn = client_connection_heartbeat.lock().await;
+                    match conn.send_message(message).await {
+                        Ok(_) => {
+                            println!("📡 消息已回退发送 (#{})\n", message_counter);
+                            message_counter += 1;
+                        }
+                        Err(e) => {
+                            println!("❌ 回退发送也失败: {}\n", e);
+                            error!("回退发送失败: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }

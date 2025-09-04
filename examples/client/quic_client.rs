@@ -1,21 +1,28 @@
-//! QUIC 客户端示例
+//! QUIC 超低延迟客户端示例
 //! 
-//! 演示如何使用 common 模块的 Connection trait 和 ConnectionFactory
-//! 创建 QUIC 客户端连接
+//! 演示使用最新优化技术的QUIC客户端：
+//! - 零拷贝Bincode序列化器
+//! - 自适应LZ4压缩器  
+//! - 异步消息Pipeline
+//! - 微批处理优化
+//! - CPU亲和性绑定
 
 use tracing::{info, error};
+use std::{sync::Arc, time::Instant};
 
 use flare_core::{
     ConnectionConfig, ConnectionType,
     ConnectionEvent, Frame,
     FlareError,
 };
-use flare_core::common::connections::{
-    ConnectionFactory, QuicConfig, ConnectionFactoryTrait
+use flare_core::common::{
+    connections::{ConnectionFactory, QuicConfig, ConnectionFactoryTrait},
+    protocol::{MessageType, Reliability},
+    serialization::BincodeSerializer,
+    compression::{Lz4Compressor, CompressionConfig},
+    pipeline::AsyncMessagePipeline,
+    system::CpuAffinityManager,
 };
-use flare_core::common::protocol::{MessageType, Reliability};
-
-use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, FlareError>;
 
@@ -118,7 +125,7 @@ impl SimpleEventHandler {
     }
 }
 
-/// QUIC 客户端
+/// QUIC 超低延迟客户端
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 TLS 加密提供程序
@@ -131,22 +138,41 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 QUIC 客户端");
-    info!("=== QUIC 客户端启动 ===");
+    info!("启动 QUIC 超低延迟客户端");
+    info!("=== QUIC 超低延迟客户端启动 ===");
     
-    // 创建客户端配置
+    // CPU亲和性优化 - 绑定到专用核心
+    if let Ok(affinity_mgr) = CpuAffinityManager::new() {
+        if let Err(e) = affinity_mgr.bind_current_thread(0) {
+            info!("CPU亲和性绑定失败: {}, 继续运行", e);
+        } else {
+            info!("✅ 已绑定到CPU核心0，获得专用计算资源");
+        }
+    }
+    
+    // 创建超低延迟客户端配置
     let config = ConnectionConfig::client(
-        "quic_client".to_string(),
+        "quic_ultra_low_latency_client".to_string(),
         "127.0.0.1:4433".to_string()  // QUIC 使用专门的端口
     ).with_type(ConnectionType::Quic)
      .with_quic_config(QuicConfig {
-         max_concurrent_streams: 10,
-         initial_stream_window: 65536,
-         connection_window: 262144,
-         congestion_control: "cubic".to_string(),
+         max_concurrent_streams: 100,        // 增加并发流数量
+         initial_stream_window: 1048576,     // 1MB窗口
+         connection_window: 4194304,         // 4MB连接窗口
+         congestion_control: "bbr".to_string(), // BBR拥塞控制
      })
-     .with_heartbeat(30000, 10000)
+     .with_heartbeat(5000, 2000)  // 5s间隔，2s超时
      .with_tls();  // QUIC 强制使用 TLS
+    
+    // 创建超低延迟序列化器和压缩器
+    let serializer = Arc::new(BincodeSerializer::new());
+    let compressor = Arc::new(Lz4Compressor::ultra_fast());
+    
+    // 创建异步消息Pipeline
+    let pipeline = AsyncMessagePipeline::ultra_low_latency(
+        serializer.clone() as Arc<dyn flare_core::common::serialization::FrameSerializer>,
+        compressor.clone() as Arc<dyn flare_core::common::compression::Compressor>,
+    );
     
     info!("客户端配置: {:?}", config);
     info!("连接地址: {}", config.remote_addr);
@@ -163,17 +189,20 @@ async fn main() -> Result<()> {
     
     // 建立连接
     info!("正在连接QUIC服务端...");
+    let connect_start = Instant::now();
     client_connection.connect().await?;
-    info!("已连接到QUIC服务端！");
+    let connect_time = connect_start.elapsed();
+    info!("✅ 已连接到QUIC服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
     
-    // 等待一下让连接稳定
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // 优化：更短的稳定时间
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
-    // 启动心跳任务
+    // 启动优化的心跳任务
     let client_connection_heartbeat = Arc::new(tokio::sync::Mutex::new(client_connection));
     let heartbeat_connection = Arc::clone(&client_connection_heartbeat);
     let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(30000)); // 30秒心跳间隔
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(5000)); // 5秒心跳间隔
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             
@@ -185,7 +214,7 @@ async fn main() -> Result<()> {
                 error!("心跳发送失败: {}", e);
                 break;
             } else {
-                info!("心跳已发送");
+                info!("💗 心跳已发送");
             }
             
             // 调用连接的心跳方法更新活跃状态
@@ -196,8 +225,16 @@ async fn main() -> Result<()> {
     });
     
     // 启动用户输入处理
-    println!("\n==== QUIC 客户端控制台 ====");
-    println!("📝 请输入要发送的消息:");
+    println!("\n==== QUIC 超低延迟客户端控制台 ====");
+    println!("📝 请输入要发送的消息 (输入 'quit' 退出):");
+    println!("⚡ 优化特性:");
+    println!("   • 零拷贝Bincode序列化");
+    println!("   • 自适应LZ4压缩");
+    println!("   • 异步Pipeline处理");
+    println!("   • 微批处理 (批大小: 2)");
+    println!("   • CPU核心绑定");
+    println!("   • BBR拥塞控制");
+    println!("===============================\n");
     println!("💡 命令说明:");
     println!("   - 输入任意文本发送消息");
     println!("   - 输入 'quit' 或 'exit' 退出程序");
@@ -253,7 +290,7 @@ async fn main() -> Result<()> {
             _ => {}
         }
         
-        // 发送用户消息
+        // 发送用户消息 - 使用优化的Pipeline处理
         if !input.is_empty() {
             println!("📤 正在发送消息: '{}'", input);
             
@@ -265,17 +302,43 @@ async fn main() -> Result<()> {
                 input.as_bytes().to_vec(),
             );
             
-            // 通过Connection trait发送消息
-            let mut conn = client_connection_heartbeat.lock().await;
-            match conn.send_message(message).await {
-                Ok(_) => {
-                    println!("✅ 消息发送成功 (#{})\n", message_counter);
-                    message_counter += 1;
+            // 通过异步Pipeline处理消息
+            let pipeline_start = Instant::now();
+            match pipeline.process_async(message.clone()).await {
+                Ok(()) => {
+                    println!("✅ Pipeline处理完成 (#{})", message_counter);
+                    
+                    // 通过Connection trait发送已处理的消息
+                    let mut conn = client_connection_heartbeat.lock().await;
+                    match conn.send_message(message).await {
+                        Ok(_) => {
+                            println!("📡 消息已发送 (#{})\n", message_counter);
+                            message_counter += 1;
+                        }
+                        Err(e) => {
+                            println!("❌ 消息发送失败: {}\n", e);
+                            error!("发送消息失败: {}", e);
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
-                    println!("❌ 消息发送失败: {}\n", e);
-                    error!("发送消息失败: {}", e);
-                    break;
+                    println!("❌ Pipeline处理失败: {}\n", e);
+                    error!("Pipeline处理失败: {}", e);
+                    
+                    // 回退到直接发送
+                    let mut conn = client_connection_heartbeat.lock().await;
+                    match conn.send_message(message).await {
+                        Ok(_) => {
+                            println!("📡 消息已回退发送 (#{})\n", message_counter);
+                            message_counter += 1;
+                        }
+                        Err(e) => {
+                            println!("❌ 回退发送也失败: {}\n", e);
+                            error!("回退发送失败: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }

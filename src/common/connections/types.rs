@@ -101,6 +101,12 @@ pub struct ConnectionConfig {
     pub cleanup_interval_ms: u64,
     /// 协议特定配置
     pub protocol_config: ProtocolConfig,
+    /// 序列化格式（用于配置序列化）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serialization_format: Option<crate::common::serialization::SerializationFormat>,
+    /// 序列化配置（用于配置序列化）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serialization_config: Option<crate::common::serialization::SerializationConfig>,
 }
 
 /// 协议特定配置
@@ -355,6 +361,39 @@ impl ConnectionConfig {
         self
     }
     
+    /// 设置序列化格式
+    pub fn with_serialization_format(mut self, format: crate::common::serialization::SerializationFormat) -> Self {
+        self.serialization_format = Some(format);
+        self
+    }
+    
+    /// 设置序列化配置
+    pub fn with_serialization_config(mut self, config: crate::common::serialization::SerializationConfig) -> Self {
+        self.serialization_config = Some(config);
+        self
+    }
+    
+    /// 使用JSON序列化格式
+    pub fn with_json_serialization(mut self) -> Self {
+        self.serialization_format = Some(crate::common::serialization::SerializationFormat::Json);
+        self
+    }
+    
+    /// 使用Bincode序列化格式（高性能）
+    pub fn with_bincode_serialization(mut self) -> Self {
+        self.serialization_format = Some(crate::common::serialization::SerializationFormat::Bincode);
+        self
+    }
+    
+    /// 使用美化JSON序列化格式（调试友好）
+    pub fn with_pretty_json_serialization(mut self) -> Self {
+        self.serialization_format = Some(crate::common::serialization::SerializationFormat::Json);
+        let mut config = self.serialization_config.unwrap_or_default();
+        config.pretty_format = true;
+        self.serialization_config = Some(config);
+        self
+    }
+    
     /// 创建高性能配置（适合高吞吐量场景）
     pub fn high_performance(id: String, remote_addr: String) -> Self {
         Self {
@@ -410,6 +449,16 @@ impl ConnectionConfig {
             cleanup_interval_ms: 60000,   // 1分钟
             ..Default::default()
         }
+    }
+    
+    /// 获取序列化格式（带默认值）
+    pub fn get_serialization_format(&self) -> crate::common::serialization::SerializationFormat {
+        self.serialization_format.unwrap_or(crate::common::serialization::SerializationFormat::Json)
+    }
+    
+    /// 获取序列化配置（带默认值）
+    pub fn get_serialization_config(&self) -> crate::common::serialization::SerializationConfig {
+        self.serialization_config.clone().unwrap_or_default()
     }
     
     /// 获取协议特性
@@ -485,6 +534,8 @@ impl Default for ConnectionConfig {
             heartbeat_monitor_timeout_ms: 60000, // 1分钟
             cleanup_interval_ms: 300000, // 5分钟
             protocol_config: ProtocolConfig::default(),
+            serialization_format: Some(crate::common::serialization::SerializationFormat::Json),
+            serialization_config: Some(crate::common::serialization::SerializationConfig::default()),
         }
     }
 }

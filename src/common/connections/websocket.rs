@@ -43,11 +43,53 @@ pub struct WebSocketConnection {
     heartbeat_response_handler: Arc<RwLock<Option<HeartbeatResponseHandler>>>,
     /// 消息发送通道
     message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>>,
+    /// 序列化器
+    serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>,
 }
 
 impl WebSocketConnection {
-    /// 创建新的 WebSocket 连接
+    /// 创建新的 WebSocket 连接（使用配置）
     pub fn new(config: ConnectionConfig) -> Self {
+        let stats = ConnectionStats {
+            established_at: Instant::now(),
+            last_activity: Instant::now(),
+            messages_received: 0,
+            messages_sent: 0,
+            heartbeat_responses: 0,
+            quality_score: 100,
+        };
+        
+        // 根据配置创建序列化器
+        let serializer = {
+            let factory = crate::common::serialization::SerializerFactory::new();
+            factory.create_with_config(
+                config.get_serialization_format(),
+                config.get_serialization_config()
+            ).unwrap_or_else(|_| {
+                // 如果创建失败，使用默认JSON序列化器
+                crate::common::serialization::factory::json_serializer()
+            })
+        };
+        
+        Self {
+            id: config.id.clone(),
+            config,
+            state: Arc::new(RwLock::new(ConnectionState::Initializing)),
+            event_handler: Arc::new(RwLock::new(None)),
+            last_activity: Arc::new(RwLock::new(Instant::now())),
+            reconnect_attempts: Arc::new(RwLock::new(0)),
+            stats: Arc::new(RwLock::new(stats)),
+            
+            connection: Arc::new(RwLock::new(None)),
+            receive_task: Arc::new(RwLock::new(None)),
+            heartbeat_response_handler: Arc::new(RwLock::new(None)),
+            message_sender: Arc::new(RwLock::new(None)),
+            serializer: Arc::new(serializer),
+        }
+    }
+    
+    /// 创建新的 WebSocket 连接（使用自定义序列化器）
+    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>) -> Self {
         let stats = ConnectionStats {
             established_at: Instant::now(),
             last_activity: Instant::now(),
@@ -70,6 +112,7 @@ impl WebSocketConnection {
             receive_task: Arc::new(RwLock::new(None)),
             heartbeat_response_handler: Arc::new(RwLock::new(None)),
             message_sender: Arc::new(RwLock::new(None)),
+            serializer,
         }
     }
     
@@ -179,6 +222,7 @@ impl WebSocketConnection {
             let event_handler = Arc::clone(&event_handler);
             let stats = Arc::clone(&stats);
             let last_activity = Arc::clone(&last_activity);
+            let serializer = Arc::clone(&self.serializer);
             
             tokio::spawn(async move {
                 loop {
@@ -186,8 +230,8 @@ impl WebSocketConnection {
                     if let Some(out_msg) = rx.recv().await {
                         info!("准备发送消息: {} - 类型: {:?}", id, out_msg.get_message_type());
                         
-                        // 序列化消息以便发送
-                        let message_data = match serde_json::to_vec(&out_msg) {
+                        // 使用序列化器序列化消息
+                        let message_data = match serializer.serialize(&out_msg).await {
                             Ok(data) => {
                                 info!("消息序列化成功: {} - 长度: {}", id, data.len());
                                 data
@@ -271,6 +315,7 @@ impl WebSocketConnection {
             let stats = Arc::clone(&stats);
             let last_activity = Arc::clone(&last_activity);
             let state = Arc::clone(&state);
+            let serializer = Arc::clone(&self.serializer);
             
             tokio::spawn(async move {
                 loop {
@@ -299,19 +344,22 @@ impl WebSocketConnection {
                                         WsMessage::Text(text) => {
                                             info!("WebSocket 收到文本消息: {} - 内容: {}", id, text);
                                             
-                                            // 先尝试解析为完整的统一协议消息
-                                            let unified_msg = if let Ok(msg) = serde_json::from_str::<Frame>(&text) {
-                                                info!("成功解析为统一协议消息: {:?}", msg.get_message_type());
-                                                msg
-                                            } else {
-                                                info!("无法解析为统一协议消息，创建简单数据消息");
-                                                // 如果不是完整消息，创建简单的数据消息
-                                                crate::common::protocol::Frame::new(
-                                                    crate::common::protocol::MessageType::Data,
-                                                    0,
-                                                    crate::common::protocol::Reliability::AtLeastOnce,
-                                                    text.as_bytes().to_vec(),
-                                                )
+                                            // 先尝试使用序列化器解析为完整的统一协议消息
+                                            let unified_msg = match serializer.deserialize(text.as_bytes()).await {
+                                                Ok(msg) => {
+                                                    info!("成功解析为统一协议消息: {:?}", msg.get_message_type());
+                                                    msg
+                                                }
+                                                Err(_) => {
+                                                    info!("无法解析为统一协议消息，创建简单数据消息");
+                                                    // 如果不是完整消息，创建简单的数据消息
+                                                    crate::common::protocol::Frame::new(
+                                                        crate::common::protocol::MessageType::Data,
+                                                        0,
+                                                        crate::common::protocol::Reliability::AtLeastOnce,
+                                                        text.as_bytes().to_vec(),
+                                                    )
+                                                }
                                             };
                                             
                                             if let Some(handler) = &*event_handler.read().await {
@@ -337,17 +385,18 @@ impl WebSocketConnection {
                                         WsMessage::Binary(data) => {
                                             debug!("WebSocket 收到二进制消息: {} - 长度: {}", id, data.len());
                                             
-                                            // 先尝试解析为完整的统一协议消息
-                                            let unified_msg = if let Ok(msg) = serde_json::from_slice::<Frame>(&data) {
-                                                msg
-                                            } else {
-                                                // 如果不是完整消息，创建简单的数据消息
-                                                crate::common::protocol::Frame::new(
-                                                    crate::common::protocol::MessageType::Data,
-                                                    0,
-                                                    crate::common::protocol::Reliability::AtLeastOnce,
-                                                    data.to_vec(),
-                                                )
+                                            // 先尝试使用序列化器解析为完整的统一协议消息
+                                            let unified_msg = match serializer.deserialize(&data).await {
+                                                Ok(msg) => msg,
+                                                Err(_) => {
+                                                    // 如果不是完整消息，创建简单的数据消息
+                                                    crate::common::protocol::Frame::new(
+                                                        crate::common::protocol::MessageType::Data,
+                                                        0,
+                                                        crate::common::protocol::Reliability::AtLeastOnce,
+                                                        data.to_vec(),
+                                                    )
+                                                }
                                             };
                                             
                                             if let Some(handler) = &*event_handler.read().await {

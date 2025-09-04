@@ -246,14 +246,52 @@ impl Frame {
         Self::new(MessageType::Error, 0, Reliability::ExactlyOnce, payload)
     }
 
-    /// 序列化为字节
+    /// 序列化为字节（使用Bincode，保持向后兼容）
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Ok(bincode::serialize(self)?)
     }
 
-    /// 从字节反序列化
+    /// 从字节反序列化（使用Bincode，保持向后兼容）
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(bincode::deserialize(bytes)?)
+    }
+    
+    /// 使用指定序列化器序列化为字节
+    pub fn to_bytes_with_serializer(&self, serializer: &dyn crate::common::serialization::FrameSerializer) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // 注意：这里需要异步调用，但为了保持向后兼容，我们使用阻塞调用
+        // 在实际使用中，建议直接使用序列化器的async方法
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(serializer.serialize(self))
+        })
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    }
+    
+    /// 使用指定序列化器从字节反序列化
+    pub fn from_bytes_with_serializer(bytes: &[u8], serializer: &dyn crate::common::serialization::FrameSerializer) -> Result<Self, Box<dyn std::error::Error>> {
+        // 注意：这里需要异步调用，但为了保持向后兼容，我们使用阻塞调用
+        // 在实际使用中，建议直接使用序列化器的async方法
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(serializer.deserialize(bytes))
+        })
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    }
+    
+    /// 使用JSON序列化器序列化为字节
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let serializer = crate::common::serialization::factory::json_serializer();
+        self.to_bytes_with_serializer(serializer.as_ref())
+    }
+    
+    /// 使用JSON序列化器从字节反序列化
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        let serializer = crate::common::serialization::factory::json_serializer();
+        Self::from_bytes_with_serializer(bytes, serializer.as_ref())
+    }
+    
+    /// 使用美化JSON序列化器序列化为字节
+    pub fn to_pretty_json_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let serializer = crate::common::serialization::factory::json_pretty_serializer();
+        self.to_bytes_with_serializer(serializer.as_ref())
     }
 
     /// 获取可靠性级别
