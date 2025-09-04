@@ -10,6 +10,7 @@ pub mod compression;
 pub mod messaging;
 pub mod pipeline;
 pub mod system;
+pub mod protobuf;
 
 // 重新导出主要类型
 pub use connections::{

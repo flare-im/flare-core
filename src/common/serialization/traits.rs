@@ -97,70 +97,6 @@ impl SerializationConfig {
     }
 }
 
-/// 序列化统计信息
-#[derive(Debug, Clone, Default)]
-pub struct SerializationStats {
-    /// 序列化操作次数
-    pub serialize_count: u64,
-    /// 反序列化操作次数
-    pub deserialize_count: u64,
-    /// 序列化总字节数
-    pub serialized_bytes: u64,
-    /// 反序列化总字节数
-    pub deserialized_bytes: u64,
-    /// 序列化错误次数
-    pub serialize_errors: u64,
-    /// 反序列化错误次数
-    pub deserialize_errors: u64,
-    /// 平均序列化时间（微秒）
-    pub avg_serialize_time_us: u64,
-    /// 平均反序列化时间（微秒）
-    pub avg_deserialize_time_us: u64,
-}
-
-impl SerializationStats {
-    /// 重置统计信息
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-    
-    /// 获取序列化成功率
-    pub fn serialize_success_rate(&self) -> f64 {
-        if self.serialize_count == 0 {
-            1.0
-        } else {
-            (self.serialize_count - self.serialize_errors) as f64 / self.serialize_count as f64
-        }
-    }
-    
-    /// 获取反序列化成功率
-    pub fn deserialize_success_rate(&self) -> f64 {
-        if self.deserialize_count == 0 {
-            1.0
-        } else {
-            (self.deserialize_count - self.deserialize_errors) as f64 / self.deserialize_count as f64
-        }
-    }
-    
-    /// 获取平均序列化数据大小
-    pub fn avg_serialized_size(&self) -> f64 {
-        if self.serialize_count == 0 {
-            0.0
-        } else {
-            self.serialized_bytes as f64 / self.serialize_count as f64
-        }
-    }
-    
-    /// 获取平均反序列化数据大小
-    pub fn avg_deserialized_size(&self) -> f64 {
-        if self.deserialize_count == 0 {
-            0.0
-        } else {
-            self.deserialized_bytes as f64 / self.deserialize_count as f64
-        }
-    }
-}
-
 /// 消息帧序列化器trait
 /// 
 /// 提供统一的序列化接口，支持不同的序列化格式
@@ -204,56 +140,8 @@ pub trait FrameSerializer: Send + Sync {
         Err(FlareError::general_error("此序列化器不支持配置更新"))
     }
     
-    /// 获取序列化统计信息
-    fn stats(&self) -> SerializationStats {
-        SerializationStats::default()
-    }
-    
-    /// 重置统计信息
-    fn reset_stats(&mut self) {
-        // 默认实现为空
-    }
-    
-    /// 验证数据是否可以反序列化
-    async fn validate(&self, data: &[u8]) -> Result<bool> {
-        match self.deserialize(data).await {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
-    }
-    
-    /// 估算序列化后的大小
-    async fn estimate_size(&self, frame: &Frame) -> Result<usize> {
-        // 默认实现：实际序列化并返回大小
-        let data = self.serialize(frame).await?;
-        Ok(data.len())
-    }
-    
-    /// 批量序列化
-    async fn serialize_batch(&self, frames: &[Frame]) -> Result<Vec<Vec<u8>>> {
-        let mut results = Vec::with_capacity(frames.len());
-        for frame in frames {
-            results.push(self.serialize(frame).await?);
-        }
-        Ok(results)
-    }
-    
-    /// 批量反序列化
-    async fn deserialize_batch(&self, data_vec: &[Vec<u8>]) -> Result<Vec<Frame>> {
-        let mut results = Vec::with_capacity(data_vec.len());
-        for data in data_vec {
-            results.push(self.deserialize(data).await?);
-        }
-        Ok(results)
-    }
-    
     /// 克隆序列化器
     fn clone_box(&self) -> Box<dyn FrameSerializer>;
-    
-    /// 检查是否支持流式处理
-    fn supports_streaming(&self) -> bool {
-        false
-    }
     
     /// 检查是否支持压缩
     fn supports_compression(&self) -> bool {

@@ -4,13 +4,12 @@
 
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
 
 use crate::common::{
     error::{Result, FlareError},
     protocol::Frame,
     serialization::traits::{
-        FrameSerializer, SerializationFormat, SerializationConfig, SerializationStats,
+        FrameSerializer, SerializationFormat, SerializationConfig,
         ConfigurableSerializer, SerializerFeature,
     },
 };
@@ -20,8 +19,6 @@ use crate::common::{
 pub struct BincodeSerializer {
     /// 序列化配置
     config: Arc<RwLock<SerializationConfig>>,
-    /// 统计信息
-    stats: Arc<RwLock<SerializationStats>>,
 }
 
 impl BincodeSerializer {
@@ -29,7 +26,6 @@ impl BincodeSerializer {
     pub fn new() -> Self {
         Self {
             config: Arc::new(RwLock::new(SerializationConfig::default())),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
     
@@ -37,45 +33,6 @@ impl BincodeSerializer {
     pub fn with_config(config: SerializationConfig) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
-        }
-    }
-    
-    /// 更新统计信息
-    fn update_serialize_stats(&self, data_size: usize, duration_us: u64, success: bool) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.serialize_count += 1;
-            if success {
-                stats.serialized_bytes += data_size as u64;
-                // 更新平均时间（使用移动平均）
-                if stats.avg_serialize_time_us == 0 {
-                    stats.avg_serialize_time_us = duration_us;
-                } else {
-                    stats.avg_serialize_time_us = 
-                        (stats.avg_serialize_time_us * 9 + duration_us) / 10;
-                }
-            } else {
-                stats.serialize_errors += 1;
-            }
-        }
-    }
-    
-    /// 更新反序列化统计信息
-    fn update_deserialize_stats(&self, data_size: usize, duration_us: u64, success: bool) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.deserialize_count += 1;
-            if success {
-                stats.deserialized_bytes += data_size as u64;
-                // 更新平均时间（使用移动平均）
-                if stats.avg_deserialize_time_us == 0 {
-                    stats.avg_deserialize_time_us = duration_us;
-                } else {
-                    stats.avg_deserialize_time_us = 
-                        (stats.avg_deserialize_time_us * 9 + duration_us) / 10;
-                }
-            } else {
-                stats.deserialize_errors += 1;
-            }
         }
     }
     
@@ -115,7 +72,6 @@ impl Clone for BincodeSerializer {
         
         Self {
             config: Arc::new(RwLock::new(config)),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
 }
@@ -127,28 +83,16 @@ impl FrameSerializer for BincodeSerializer {
     }
     
     async fn serialize(&self, frame: &Frame) -> Result<Vec<u8>> {
-        let start_time = Instant::now();
-        
-        // Bincode序列化 - 使用现有的Frame::to_bytes()方法
-        // 这应该是最高性能的序列化方式，专为超低延迟优化
-        let result = frame.to_bytes();
-        
-        let duration_us = start_time.elapsed().as_micros() as u64;
+        // Bincode序列化 - 直接使用bincode库
+        let result = bincode::serialize(frame);
         
         match result {
             Ok(data) => {
                 // 检查大小限制
                 self.check_size_limit(data.len())?;
-                
-                // 更新统计信息
-                self.update_serialize_stats(data.len(), duration_us, true);
-                
                 Ok(data)
             }
             Err(e) => {
-                // 更新统计信息
-                self.update_serialize_stats(0, duration_us, false);
-                
                 Err(FlareError::serialization_error(
                     format!("Bincode序列化失败: {}", e)
                 ))
@@ -157,25 +101,15 @@ impl FrameSerializer for BincodeSerializer {
     }
     
     async fn deserialize(&self, data: &[u8]) -> Result<Frame> {
-        let start_time = Instant::now();
-        
         // 检查大小限制
         self.check_size_limit(data.len())?;
         
-        // Bincode反序列化 - 使用现有的Frame::from_bytes()方法
-        let result = Frame::from_bytes(data);
-        let duration_us = start_time.elapsed().as_micros() as u64;
+        // Bincode反序列化 - 直接使用bincode库
+        let result = bincode::deserialize(data);
         
         match result {
-            Ok(frame) => {
-                // 更新统计信息
-                self.update_deserialize_stats(data.len(), duration_us, true);
-                Ok(frame)
-            }
+            Ok(frame) => Ok(frame),
             Err(e) => {
-                // 更新统计信息
-                self.update_deserialize_stats(data.len(), duration_us, false);
-                
                 Err(FlareError::deserialization_failed(
                     format!("Bincode反序列化失败: {}", e)
                 ))
@@ -208,100 +142,6 @@ impl FrameSerializer for BincodeSerializer {
         } else {
             Err(FlareError::general_error("无法获取配置写锁"))
         }
-    }
-    
-    fn stats(&self) -> SerializationStats {
-        self.stats.read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
-    }
-    
-    fn reset_stats(&mut self) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.reset();
-        }
-    }
-    
-    async fn estimate_size(&self, frame: &Frame) -> Result<usize> {
-        // Bincode大小估算 - 实际序列化获取精确大小
-        let data = self.serialize(frame).await?;
-        Ok(data.len())
-    }
-    
-    async fn serialize_batch(&self, frames: &[Frame]) -> Result<Vec<Vec<u8>>> {
-        // Bincode批量序列化优化
-        let mut results = Vec::with_capacity(frames.len());
-        let start_time = Instant::now();
-        
-        for frame in frames {
-            match frame.to_bytes() {
-                Ok(data) => {
-                    self.check_size_limit(data.len())?;
-                    results.push(data);
-                }
-                Err(e) => {
-                    return Err(FlareError::serialization_error(
-                        format!("批量Bincode序列化失败: {}", e)
-                    ));
-                }
-            }
-        }
-        
-        let duration_us = start_time.elapsed().as_micros() as u64;
-        let total_size: usize = results.iter().map(|data| data.len()).sum();
-        
-        // 更新批量统计
-        if let Ok(mut stats) = self.stats.write() {
-            stats.serialize_count += frames.len() as u64;
-            stats.serialized_bytes += total_size as u64;
-            // 更新平均时间
-            let avg_time = duration_us / frames.len() as u64;
-            if stats.avg_serialize_time_us == 0 {
-                stats.avg_serialize_time_us = avg_time;
-            } else {
-                stats.avg_serialize_time_us = 
-                    (stats.avg_serialize_time_us * 9 + avg_time) / 10;
-            }
-        }
-        
-        Ok(results)
-    }
-    
-    async fn deserialize_batch(&self, data_vec: &[Vec<u8>]) -> Result<Vec<Frame>> {
-        // Bincode批量反序列化优化
-        let mut results = Vec::with_capacity(data_vec.len());
-        let start_time = Instant::now();
-        
-        for data in data_vec {
-            self.check_size_limit(data.len())?;
-            match Frame::from_bytes(data) {
-                Ok(frame) => results.push(frame),
-                Err(e) => {
-                    return Err(FlareError::deserialization_failed(
-                        format!("批量Bincode反序列化失败: {}", e)
-                    ));
-                }
-            }
-        }
-        
-        let duration_us = start_time.elapsed().as_micros() as u64;
-        let total_size: usize = data_vec.iter().map(|data| data.len()).sum();
-        
-        // 更新批量统计
-        if let Ok(mut stats) = self.stats.write() {
-            stats.deserialize_count += data_vec.len() as u64;
-            stats.deserialized_bytes += total_size as u64;
-            // 更新平均时间
-            let avg_time = duration_us / data_vec.len() as u64;
-            if stats.avg_deserialize_time_us == 0 {
-                stats.avg_deserialize_time_us = avg_time;
-            } else {
-                stats.avg_deserialize_time_us = 
-                    (stats.avg_deserialize_time_us * 9 + avg_time) / 10;
-            }
-        }
-        
-        Ok(results)
     }
     
     fn clone_box(&self) -> Box<dyn FrameSerializer> {
@@ -396,18 +236,24 @@ mod tests {
             vec![0u8; 1024], // 1KB数据
         );
         
-        // 性能测试 - 批量操作
+        // 性能测试 - 逐个序列化
         let frames = vec![frame; 100];
         let start = std::time::Instant::now();
-        let serialized_batch = serializer.serialize_batch(&frames).await.unwrap();
+        let mut serialized_frames = Vec::new();
+        for frame in &frames {
+            serialized_frames.push(serializer.serialize(frame).await.unwrap());
+        }
         let serialize_duration = start.elapsed();
         
         let start = std::time::Instant::now();
-        let _deserialized_batch = serializer.deserialize_batch(&serialized_batch).await.unwrap();
+        let mut deserialized_frames = Vec::new();
+        for data in &serialized_frames {
+            deserialized_frames.push(serializer.deserialize(data).await.unwrap());
+        }
         let deserialize_duration = start.elapsed();
         
-        println!("Bincode批量序列化100条消息耗时: {:?}", serialize_duration);
-        println!("Bincode批量反序列化100条消息耗时: {:?}", deserialize_duration);
+        println!("Bincode序列化100条消息耗时: {:?}", serialize_duration);
+        println!("Bincode反序列化100条消息耗时: {:?}", deserialize_duration);
         
         // 应该非常快，满足超低延迟要求
         assert!(serialize_duration.as_millis() < 10); // 小于10ms
@@ -436,31 +282,5 @@ mod tests {
         
         // Bincode通常更紧凑
         assert!(bincode_data.len() <= json_data.len());
-    }
-    
-    #[tokio::test]
-    async fn test_bincode_stats_tracking() {
-        let serializer = BincodeSerializer::new();
-        
-        let frame = Frame::new(
-            MessageType::Heartbeat,
-            1,
-            Reliability::BestEffort,
-            Vec::new(),
-        );
-        
-        // 执行多次操作
-        for _ in 0..10 {
-            let data = serializer.serialize(&frame).await.unwrap();
-            let _ = serializer.deserialize(&data).await.unwrap();
-        }
-        
-        let stats = serializer.stats();
-        assert_eq!(stats.serialize_count, 10);
-        assert_eq!(stats.deserialize_count, 10);
-        assert_eq!(stats.serialize_errors, 0);
-        assert_eq!(stats.deserialize_errors, 0);
-        assert!(stats.avg_serialize_time_us > 0);
-        assert!(stats.avg_deserialize_time_us > 0);
     }
 }

@@ -140,8 +140,8 @@ impl ZeroCopyBincodeSerializer {
         let start_time = Instant::now();
         buffer.clear();
         
-        // 直接使用Frame的现有to_bytes()方法，但写入到预分配缓冲区
-        match frame.to_bytes() {
+        // 直接使用bincode库序列化，但写入到预分配缓冲区
+        match bincode::serialize(frame) {
             Ok(data) => {
                 buffer.extend_from_slice(&data);
                 
@@ -276,8 +276,8 @@ impl FrameSerializer for ZeroCopyBincodeSerializer {
     async fn deserialize(&self, data: &[u8]) -> Result<Frame> {
         let start_time = Instant::now();
         
-        // 使用Frame的from_bytes方法进行零拷贝反序列化
-        match Frame::from_bytes(data) {
+        // 直接使用bincode库进行反序列化
+        match bincode::deserialize(data) {
             Ok(frame) => {
                 let duration_us = start_time.elapsed().as_micros() as u64;
                 self.update_deserialize_stats(data.len(), duration_us, true);

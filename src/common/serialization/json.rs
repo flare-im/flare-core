@@ -4,13 +4,12 @@
 
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
 
 use crate::common::{
     error::{Result, FlareError},
     protocol::Frame,
     serialization::traits::{
-        FrameSerializer, SerializationFormat, SerializationConfig, SerializationStats,
+        FrameSerializer, SerializationFormat, SerializationConfig,
         ConfigurableSerializer, SerializerFeature,
     },
 };
@@ -20,8 +19,6 @@ use crate::common::{
 pub struct JsonSerializer {
     /// 序列化配置
     config: Arc<RwLock<SerializationConfig>>,
-    /// 统计信息
-    stats: Arc<RwLock<SerializationStats>>,
 }
 
 impl JsonSerializer {
@@ -29,7 +26,6 @@ impl JsonSerializer {
     pub fn new() -> Self {
         Self {
             config: Arc::new(RwLock::new(SerializationConfig::default())),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
     
@@ -40,7 +36,6 @@ impl JsonSerializer {
         
         Self {
             config: Arc::new(RwLock::new(config)),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
     
@@ -48,7 +43,6 @@ impl JsonSerializer {
     pub fn with_config(config: SerializationConfig) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
     
@@ -67,44 +61,6 @@ impl JsonSerializer {
         self.config.read()
             .map(|config| config.pretty_format)
             .unwrap_or(false)
-    }
-    
-    /// 更新统计信息
-    fn update_serialize_stats(&self, data_size: usize, duration_us: u64, success: bool) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.serialize_count += 1;
-            if success {
-                stats.serialized_bytes += data_size as u64;
-                // 更新平均时间（使用移动平均）
-                if stats.avg_serialize_time_us == 0 {
-                    stats.avg_serialize_time_us = duration_us;
-                } else {
-                    stats.avg_serialize_time_us = 
-                        (stats.avg_serialize_time_us * 9 + duration_us) / 10;
-                }
-            } else {
-                stats.serialize_errors += 1;
-            }
-        }
-    }
-    
-    /// 更新反序列化统计信息
-    fn update_deserialize_stats(&self, data_size: usize, duration_us: u64, success: bool) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.deserialize_count += 1;
-            if success {
-                stats.deserialized_bytes += data_size as u64;
-                // 更新平均时间（使用移动平均）
-                if stats.avg_deserialize_time_us == 0 {
-                    stats.avg_deserialize_time_us = duration_us;
-                } else {
-                    stats.avg_deserialize_time_us = 
-                        (stats.avg_deserialize_time_us * 9 + duration_us) / 10;
-                }
-            } else {
-                stats.deserialize_errors += 1;
-            }
-        }
     }
     
     /// 检查消息大小限制
@@ -145,7 +101,6 @@ impl Clone for JsonSerializer {
         
         Self {
             config: Arc::new(RwLock::new(config)),
-            stats: Arc::new(RwLock::new(SerializationStats::default())),
         }
     }
 }
@@ -157,8 +112,6 @@ impl FrameSerializer for JsonSerializer {
     }
     
     async fn serialize(&self, frame: &Frame) -> Result<Vec<u8>> {
-        let start_time = Instant::now();
-        
         let config = self.config.read()
             .map_err(|_| FlareError::general_error("无法获取配置读锁"))?;
         
@@ -168,22 +121,13 @@ impl FrameSerializer for JsonSerializer {
             serde_json::to_vec(frame)
         };
         
-        let duration_us = start_time.elapsed().as_micros() as u64;
-        
         match result {
             Ok(data) => {
                 // 检查大小限制
                 self.check_size_limit(data.len())?;
-                
-                // 更新统计信息
-                self.update_serialize_stats(data.len(), duration_us, true);
-                
                 Ok(data)
             }
             Err(e) => {
-                // 更新统计信息
-                self.update_serialize_stats(0, duration_us, false);
-                
                 Err(FlareError::serialization_error(
                     format!("JSON序列化失败: {}", e)
                 ))
@@ -192,24 +136,14 @@ impl FrameSerializer for JsonSerializer {
     }
     
     async fn deserialize(&self, data: &[u8]) -> Result<Frame> {
-        let start_time = Instant::now();
-        
         // 检查大小限制
         self.check_size_limit(data.len())?;
         
         let result = serde_json::from_slice(data);
-        let duration_us = start_time.elapsed().as_micros() as u64;
         
         match result {
-            Ok(frame) => {
-                // 更新统计信息
-                self.update_deserialize_stats(data.len(), duration_us, true);
-                Ok(frame)
-            }
+            Ok(frame) => Ok(frame),
             Err(e) => {
-                // 更新统计信息
-                self.update_deserialize_stats(data.len(), duration_us, false);
-                
                 Err(FlareError::deserialization_failed(
                     format!("JSON反序列化失败: {}", e)
                 ))
@@ -242,25 +176,6 @@ impl FrameSerializer for JsonSerializer {
         } else {
             Err(FlareError::general_error("无法获取配置写锁"))
         }
-    }
-    
-    fn stats(&self) -> SerializationStats {
-        self.stats.read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
-    }
-    
-    fn reset_stats(&mut self) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.reset();
-        }
-    }
-    
-    async fn estimate_size(&self, frame: &Frame) -> Result<usize> {
-        // 对于JSON，我们可以做一个粗略估算
-        // 这里简化实现，实际序列化获取准确大小
-        let data = self.serialize(frame).await?;
-        Ok(data.len())
     }
     
     fn clone_box(&self) -> Box<dyn FrameSerializer> {
@@ -361,28 +276,6 @@ mod tests {
         
         // 美化格式应该包含换行符
         assert!(json_str.contains('\n'));
-    }
-    
-    #[tokio::test]
-    async fn test_json_serializer_stats() {
-        let serializer = JsonSerializer::new();
-        
-        let frame = Frame::new(
-            MessageType::Data,
-            1,
-            Reliability::AtLeastOnce,
-            b"test".to_vec(),
-        );
-        
-        // 执行几次序列化操作
-        for _ in 0..3 {
-            let _ = serializer.serialize(&frame).await.unwrap();
-        }
-        
-        let stats = serializer.stats();
-        assert_eq!(stats.serialize_count, 3);
-        assert_eq!(stats.serialize_errors, 0);
-        assert!(stats.serialized_bytes > 0);
     }
     
     #[tokio::test]

@@ -18,8 +18,8 @@ use flare_core::{
 };
 use flare_core::common::{
     connections::{QuicConfig, RawConnectionHandler},
-    serialization::BincodeSerializer,
-    compression::{Lz4Compressor, CompressionConfig},
+    serialization::{ProtobufSerializer, SerializationFormat},
+    compression::{Lz4Compressor},
     pipeline::AsyncMessagePipeline,
     system::CpuAffinityManager,
 };
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 QUIC 超低延迟服务端");
+    info!("启动 QUIC 超低延迟服务端 (使用Protobuf序列化)");
     info!("=== QUIC 超低延迟服务端启动 ===");
     
     // CPU亲和性优化 - 绑定到专用核心
@@ -195,8 +195,8 @@ async fn main() -> Result<()> {
         }
     }
     
-    // 创建超低延迟服务端配置
-    let config = ConnectionConfig::server(
+    // 创建超低延迟服务端配置，使用Protobuf序列化
+    let mut config = ConnectionConfig::server(
         "quic_ultra_low_latency_server".to_string(),
         "127.0.0.1:4433".to_string()
     ).with_type(ConnectionType::Quic)
@@ -208,9 +208,12 @@ async fn main() -> Result<()> {
      })
      .with_heartbeat_monitoring(5000, 10000)  // 5s间隔，10s超时
      .with_tls();
+     
+    // 设置使用Protobuf序列化
+    config.serialization_format = Some(SerializationFormat::Protobuf);
     
-    // 创建超低延迟序列化器和压缩器
-    let serializer = Arc::new(BincodeSerializer::new());
+    // 创建Protobuf序列化器
+    let serializer = Arc::new(ProtobufSerializer::new());
     let compressor = Arc::new(Lz4Compressor::ultra_fast());
     
     // 创建异步消息Pipeline
@@ -225,7 +228,7 @@ async fn main() -> Result<()> {
     // 创建 QUIC 端点
     let endpoint = create_quic_endpoint().await?;
     
-    info!("QUIC服务端监听地址: 127.0.0.1:4433");
+    info!("QUIC服务端监听地址: 127.0.0.1:4433 (使用Protobuf序列化)");
     info!("等待客户端连接...");
     info!("按 Ctrl+C 停止服务端");
     
