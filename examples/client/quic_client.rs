@@ -1,7 +1,7 @@
 //! QUIC 超低延迟客户端示例
 //! 
 //! 演示使用最新优化技术的QUIC客户端：
-//! - 零拷贝Bincode序列化器
+//! - Protobuf二进制序列化器
 //! - 自适应LZ4压缩器  
 //! - 异步消息Pipeline
 //! - 微批处理优化
@@ -16,9 +16,9 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::{
-    connections::{ConnectionFactory, QuicConfig, ConnectionFactoryTrait},
+    connections::{ConnectionFactory, types::QuicConfig, traits::ConnectionFactory as ConnectionFactoryTrait},
     protocol::{MessageType, Reliability},
-    serialization::BincodeSerializer,
+    serialization::{ProtobufSerializer, SerializationFormat},
     compression::{Lz4Compressor, CompressionConfig},
     pipeline::AsyncMessagePipeline,
     system::CpuAffinityManager,
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 QUIC 超低延迟客户端");
+    info!("启动 QUIC 超低延迟客户端 (使用Protobuf序列化)");
     info!("=== QUIC 超低延迟客户端启动 ===");
     
     // CPU亲和性优化 - 绑定到专用核心
@@ -150,8 +150,8 @@ async fn main() -> Result<()> {
         }
     }
     
-    // 创建超低延迟客户端配置
-    let config = ConnectionConfig::client(
+    // 创建超低延迟客户端配置，使用Protobuf序列化
+    let mut config = ConnectionConfig::client(
         "quic_ultra_low_latency_client".to_string(),
         "127.0.0.1:4433".to_string()  // QUIC 使用专门的端口
     ).with_type(ConnectionType::Quic)
@@ -163,9 +163,12 @@ async fn main() -> Result<()> {
      })
      .with_heartbeat(5000, 2000)  // 5s间隔，2s超时
      .with_tls();  // QUIC 强制使用 TLS
+     
+    // 设置使用Protobuf序列化
+    config.serialization_format = Some(SerializationFormat::Protobuf);
     
-    // 创建超低延迟序列化器和压缩器
-    let serializer = Arc::new(BincodeSerializer::new());
+    // 创建Protobuf序列化器
+    let serializer = Arc::new(ProtobufSerializer::new());
     let compressor = Arc::new(Lz4Compressor::ultra_fast());
     
     // 创建异步消息Pipeline
@@ -228,7 +231,7 @@ async fn main() -> Result<()> {
     println!("\n==== QUIC 超低延迟客户端控制台 ====");
     println!("📝 请输入要发送的消息 (输入 'quit' 退出):");
     println!("⚡ 优化特性:");
-    println!("   • 零拷贝Bincode序列化");
+    println!("   • Protobuf二进制序列化");
     println!("   • 自适应LZ4压缩");
     println!("   • 异步Pipeline处理");
     println!("   • 微批处理 (批大小: 2)");

@@ -11,14 +11,16 @@ pub mod server;
 // 重新导出核心类型
 pub use common::{
     error::FlareError,
-    protocol::{Frame, MessageType, ProtocolSelection},
+    protocol::{Frame, MessageType, ProtocolSelection, ProtobufFrame, ProtobufMessageType, ProtobufReliability},
     connections::{
         Connection, ClientConnection, ServerConnection, ConnectionFactory, ConnectionManager,
         ConnectionConfig, ConnectionType, ConnectionRole, ConnectionState,
         ConnectionEvent, DefConnectionEventHandler,
-        QuicConnection, WebSocketConnection,
     },
 };
+
+pub use common::connections::quic::QuicConnection;
+pub use common::connections::websocket::WebSocketConnection;
 
 // // 重新导出协议竞速相关类型
 // pub use client::protocol_racing::{ProtocolRacingManager, ProtocolPriority};

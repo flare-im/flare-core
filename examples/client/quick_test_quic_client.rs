@@ -9,8 +9,9 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::connections::{
-    ConnectionFactory, QuicConfig, ConnectionFactoryTrait
+    ConnectionFactory, types::QuicConfig
 };
+use flare_core::common::connections::traits::ConnectionFactory as ConnectionFactoryTrait;
 use flare_core::common::protocol::{MessageType, Reliability};
 use flare_core::common::serialization::{SerializationFormat};
 use std::sync::Arc;

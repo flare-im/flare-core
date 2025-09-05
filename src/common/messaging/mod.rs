@@ -1,11 +1,10 @@
 //! 消息处理模块
-//!
-//! 提供优先级队列、消息调度等高级消息处理功能
+//! 
+//! 提供消息处理相关的功能，包括消息队列和消息解析器
 
 pub mod priority_queue;
+pub mod message_parser;
 
-pub use priority_queue::{
-    PriorityMessageQueue, PriorityMessage, MessagePriority, QueueStats,
-    create_system_message, create_realtime_message, create_high_priority_message,
-    create_normal_message, create_low_priority_message,
-};
+// 重新导出常用的类型
+pub use priority_queue::PriorityMessageQueue;
+pub use message_parser::MessageParser;

@@ -16,13 +16,14 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::{
-    connections::{ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait},
+    connections::{types::WebSocketConfig},
     protocol::{MessageType, Reliability},
     serialization::BincodeSerializer,
     compression::{Lz4Compressor, CompressionConfig},
     pipeline::AsyncMessagePipeline,
     system::CpuAffinityManager,
 };
+use flare_core::common::connections::traits::ConnectionFactory;
 
 type Result<T> = std::result::Result<T, FlareError>;
 
@@ -171,7 +172,7 @@ async fn main() -> Result<()> {
     info!("连接地址: {}", config.remote_addr);
     
     // 创建连接工厂
-    let factory = ConnectionFactory::new();
+    let factory = flare_core::common::connections::ConnectionFactory::new();
     
     // 创建客户端连接
     let mut client_connection = factory.create_client_connection(config).await?;

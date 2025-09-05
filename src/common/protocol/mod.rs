@@ -1,7 +1,21 @@
 //! 核心协议定义 - 专注于长连接可靠性
+//! Author: Flare Core Team
+//! Description: Core protocol definitions for reliable long-connection communication
+//! This module contains both Serde-based and Protobuf-based message structures
+//! for maximum compatibility and performance.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+// 引入Protobuf生成的代码
+mod flare {
+    pub mod core {
+        include!("flare.core.rs");
+    }
+}
+
+// 重新导出Protobuf生成的结构和枚举
+pub use flare::core::{Frame as ProtobufFrame, MessageType as ProtobufMessageType, Reliability as ProtobufReliability};
 
 /// 消息类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -469,5 +483,38 @@ impl ProtocolTestResult {
         let connection_score = (1000.0 / (self.connection_time_ms as f32 + 1.0)).min(100.0);
 
         latency_score * 0.4 + stability_score * 0.4 + connection_score * 0.2
+    }
+}
+
+/// 在Serde Frame和Protobuf Frame之间转换的工具函数
+impl Frame {
+    /// 将Serde Frame转换为Protobuf Frame
+    pub fn to_protobuf(&self) -> ProtobufFrame {
+        ProtobufFrame {
+            message_type: self.message_type.to_u8() as i32,
+            message_id: self.message_id,
+            reliability: self.reliability.to_u8() as i32,
+            timestamp: self.timestamp,
+            payload: self.payload.clone(),
+            session_id: self.session_id.clone(),
+            priority: self.priority as u32,
+            compression: self.compression.map(|c| c as u32),
+            encrypted: self.encrypted,
+        }
+    }
+
+    /// 从Protobuf Frame创建Serde Frame
+    pub fn from_protobuf(proto_frame: ProtobufFrame) -> Self {
+        Self {
+            message_type: MessageType::from_u8(proto_frame.message_type as u8).unwrap_or(MessageType::Heartbeat),
+            message_id: proto_frame.message_id,
+            reliability: Reliability::from_u8(proto_frame.reliability as u8).unwrap_or(Reliability::BestEffort),
+            timestamp: proto_frame.timestamp,
+            payload: proto_frame.payload,
+            session_id: proto_frame.session_id,
+            priority: proto_frame.priority as u8,
+            compression: proto_frame.compression.map(|c| c as u8),
+            encrypted: proto_frame.encrypted,
+        }
     }
 }

@@ -10,17 +10,17 @@ pub mod compression;
 pub mod messaging;
 pub mod pipeline;
 pub mod system;
-pub mod protobuf;
 
 // 重新导出主要类型
 pub use connections::{
     Connection, ClientConnection, ServerConnection, 
     ConnectionFactory, ConnectionManager,
-    ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, DefConnectionEventHandler ,
-    QuicConnection, WebSocketConnection,
+    ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, DefConnectionEventHandler,
 };
+pub use connections::quic::QuicConnection;
+pub use connections::websocket::WebSocketConnection;
 pub use error::{Result, FlareError};
-pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection};
+pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection, ProtobufFrame, ProtobufMessageType, ProtobufReliability};
 pub use serialization::{
     FrameSerializer, SerializationFormat, SerializationConfig,
     JsonSerializer, SerializerFactory,

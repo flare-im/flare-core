@@ -8,8 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::common::{
     error::{Result, FlareError},
-    protocol::{Frame, MessageType, Reliability},
-    protobuf::flare::core::{self, MessageType as ProtoMessageType, Reliability as ProtoReliability},
+    protocol::{Frame, MessageType, Reliability, ProtobufFrame, ProtobufMessageType, ProtobufReliability},
     serialization::traits::{
         FrameSerializer, SerializationFormat, SerializationConfig,
         ConfigurableSerializer, SerializerFeature,
@@ -61,8 +60,8 @@ impl ProtobufSerializer {
     }
     
     /// 将Frame转换为Protobuf Frame
-    fn frame_to_proto(frame: &Frame) -> core::Frame {
-        core::Frame {
+    fn frame_to_proto(frame: &Frame) -> ProtobufFrame {
+        ProtobufFrame {
             message_type: Self::message_type_to_proto(frame.message_type) as i32,
             message_id: frame.message_id,
             reliability: Self::reliability_to_proto(frame.reliability) as i32,
@@ -76,7 +75,7 @@ impl ProtobufSerializer {
     }
     
     /// 将Protobuf Frame转换为Frame
-    fn proto_to_frame(proto_frame: core::Frame) -> Result<Frame> {
+    fn proto_to_frame(proto_frame: ProtobufFrame) -> Result<Frame> {
         Ok(Frame {
             message_type: Self::proto_to_message_type(proto_frame.message_type)?,
             message_id: proto_frame.message_id,
@@ -91,67 +90,67 @@ impl ProtobufSerializer {
     }
     
     /// 将MessageType转换为Protobuf MessageType
-    fn message_type_to_proto(message_type: MessageType) -> ProtoMessageType {
+    fn message_type_to_proto(message_type: MessageType) -> ProtobufMessageType {
         match message_type {
-            MessageType::Heartbeat => ProtoMessageType::Heartbeat,
-            MessageType::HeartbeatAck => ProtoMessageType::HeartbeatAck,
-            MessageType::Connect => ProtoMessageType::Connect,
-            MessageType::ConnectAck => ProtoMessageType::ConnectAck,
-            MessageType::Disconnect => ProtoMessageType::Disconnect,
-            MessageType::DisconnectAck => ProtoMessageType::DisconnectAck,
-            MessageType::Data => ProtoMessageType::Data,
-            MessageType::DataAck => ProtoMessageType::DataAck,
-            MessageType::Retransmit => ProtoMessageType::Retransmit,
-            MessageType::ProtocolSwitch => ProtoMessageType::ProtocolSwitch,
-            MessageType::ProtocolTest => ProtoMessageType::ProtocolTest,
-            MessageType::Error => ProtoMessageType::Error,
-            MessageType::Notification => ProtoMessageType::Notification,
-            MessageType::CustomEvent => ProtoMessageType::CustomEvent,
-            MessageType::CustomMessage => ProtoMessageType::CustomMessage,
+            MessageType::Heartbeat => ProtobufMessageType::Heartbeat,
+            MessageType::HeartbeatAck => ProtobufMessageType::HeartbeatAck,
+            MessageType::Connect => ProtobufMessageType::Connect,
+            MessageType::ConnectAck => ProtobufMessageType::ConnectAck,
+            MessageType::Disconnect => ProtobufMessageType::Disconnect,
+            MessageType::DisconnectAck => ProtobufMessageType::DisconnectAck,
+            MessageType::Data => ProtobufMessageType::Data,
+            MessageType::DataAck => ProtobufMessageType::DataAck,
+            MessageType::Retransmit => ProtobufMessageType::Retransmit,
+            MessageType::ProtocolSwitch => ProtobufMessageType::ProtocolSwitch,
+            MessageType::ProtocolTest => ProtobufMessageType::ProtocolTest,
+            MessageType::Error => ProtobufMessageType::Error,
+            MessageType::Notification => ProtobufMessageType::Notification,
+            MessageType::CustomEvent => ProtobufMessageType::CustomEvent,
+            MessageType::CustomMessage => ProtobufMessageType::CustomMessage,
         }
     }
     
     /// 将Protobuf MessageType转换为MessageType
     fn proto_to_message_type(proto_type: i32) -> Result<MessageType> {
-        match ProtoMessageType::try_from(proto_type) {
-            Ok(ProtoMessageType::Heartbeat) => Ok(MessageType::Heartbeat),
-            Ok(ProtoMessageType::HeartbeatAck) => Ok(MessageType::HeartbeatAck),
-            Ok(ProtoMessageType::Connect) => Ok(MessageType::Connect),
-            Ok(ProtoMessageType::ConnectAck) => Ok(MessageType::ConnectAck),
-            Ok(ProtoMessageType::Disconnect) => Ok(MessageType::Disconnect),
-            Ok(ProtoMessageType::DisconnectAck) => Ok(MessageType::DisconnectAck),
-            Ok(ProtoMessageType::Data) => Ok(MessageType::Data),
-            Ok(ProtoMessageType::DataAck) => Ok(MessageType::DataAck),
-            Ok(ProtoMessageType::Retransmit) => Ok(MessageType::Retransmit),
-            Ok(ProtoMessageType::ProtocolSwitch) => Ok(MessageType::ProtocolSwitch),
-            Ok(ProtoMessageType::ProtocolTest) => Ok(MessageType::ProtocolTest),
-            Ok(ProtoMessageType::Error) => Ok(MessageType::Error),
-            Ok(ProtoMessageType::Notification) => Ok(MessageType::Notification),
-            Ok(ProtoMessageType::CustomEvent) => Ok(MessageType::CustomEvent),
-            Ok(ProtoMessageType::CustomMessage) => Ok(MessageType::CustomMessage),
-            Ok(ProtoMessageType::Unknown) | Err(_) => Err(FlareError::deserialization_failed(
+        match ProtobufMessageType::try_from(proto_type) {
+            Ok(ProtobufMessageType::Heartbeat) => Ok(MessageType::Heartbeat),
+            Ok(ProtobufMessageType::HeartbeatAck) => Ok(MessageType::HeartbeatAck),
+            Ok(ProtobufMessageType::Connect) => Ok(MessageType::Connect),
+            Ok(ProtobufMessageType::ConnectAck) => Ok(MessageType::ConnectAck),
+            Ok(ProtobufMessageType::Disconnect) => Ok(MessageType::Disconnect),
+            Ok(ProtobufMessageType::DisconnectAck) => Ok(MessageType::DisconnectAck),
+            Ok(ProtobufMessageType::Data) => Ok(MessageType::Data),
+            Ok(ProtobufMessageType::DataAck) => Ok(MessageType::DataAck),
+            Ok(ProtobufMessageType::Retransmit) => Ok(MessageType::Retransmit),
+            Ok(ProtobufMessageType::ProtocolSwitch) => Ok(MessageType::ProtocolSwitch),
+            Ok(ProtobufMessageType::ProtocolTest) => Ok(MessageType::ProtocolTest),
+            Ok(ProtobufMessageType::Error) => Ok(MessageType::Error),
+            Ok(ProtobufMessageType::Notification) => Ok(MessageType::Notification),
+            Ok(ProtobufMessageType::CustomEvent) => Ok(MessageType::CustomEvent),
+            Ok(ProtobufMessageType::CustomMessage) => Ok(MessageType::CustomMessage),
+            Ok(ProtobufMessageType::Unknown) | Err(_) => Err(FlareError::deserialization_failed(
                 "无效的消息类型".to_string()
             )),
         }
     }
     
     /// 将Reliability转换为Protobuf Reliability
-    fn reliability_to_proto(reliability: Reliability) -> ProtoReliability {
+    fn reliability_to_proto(reliability: Reliability) -> ProtobufReliability {
         match reliability {
-            Reliability::BestEffort => ProtoReliability::BestEffort,
-            Reliability::AtLeastOnce => ProtoReliability::AtLeastOnce,
-            Reliability::ExactlyOnce => ProtoReliability::ExactlyOnce,
-            Reliability::Ordered => ProtoReliability::Ordered,
+            Reliability::BestEffort => ProtobufReliability::BestEffort,
+            Reliability::AtLeastOnce => ProtobufReliability::AtLeastOnce,
+            Reliability::ExactlyOnce => ProtobufReliability::ExactlyOnce,
+            Reliability::Ordered => ProtobufReliability::Ordered,
         }
     }
     
     /// 将Protobuf Reliability转换为Reliability
     fn proto_to_reliability(proto_reliability: i32) -> Result<Reliability> {
-        match ProtoReliability::try_from(proto_reliability) {
-            Ok(ProtoReliability::BestEffort) => Ok(Reliability::BestEffort),
-            Ok(ProtoReliability::AtLeastOnce) => Ok(Reliability::AtLeastOnce),
-            Ok(ProtoReliability::ExactlyOnce) => Ok(Reliability::ExactlyOnce),
-            Ok(ProtoReliability::Ordered) => Ok(Reliability::Ordered),
+        match ProtobufReliability::try_from(proto_reliability) {
+            Ok(ProtobufReliability::BestEffort) => Ok(Reliability::BestEffort),
+            Ok(ProtobufReliability::AtLeastOnce) => Ok(Reliability::AtLeastOnce),
+            Ok(ProtobufReliability::ExactlyOnce) => Ok(Reliability::ExactlyOnce),
+            Ok(ProtobufReliability::Ordered) => Ok(Reliability::Ordered),
             Err(_) => Err(FlareError::deserialization_failed(
                 "无效的可靠性级别".to_string()
             )),
@@ -199,14 +198,11 @@ impl FrameSerializer for ProtobufSerializer {
     }
     
     async fn deserialize(&self, data: &[u8]) -> Result<Frame> {
-        // 检查大小限制
-        self.check_size_limit(data.len())?;
-        
         // Protobuf反序列化
-        let proto_frame = core::Frame::decode(data)
+        let proto_frame = ProtobufFrame::decode(data)
             .map_err(|e| FlareError::deserialization_failed(format!("Protobuf反序列化失败: {}", e)))?;
         
-        // 转换为Frame
+        // 将Protobuf Frame转换为Frame
         Self::proto_to_frame(proto_frame)
     }
     

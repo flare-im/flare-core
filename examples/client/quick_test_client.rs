@@ -9,8 +9,9 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::connections::{
-    ConnectionFactory, WebSocketConfig, ConnectionFactoryTrait
+    ConnectionFactory, types::WebSocketConfig
 };
+use flare_core::common::connections::traits::ConnectionFactory as ConnectionFactoryTrait;
 use flare_core::common::protocol::{MessageType, Reliability};
 use std::sync::Arc;
 

@@ -1,13 +1,8 @@
-//! QUIC 超低延迟服务端示例
+//! QUIC Protobuf服务端测试
 //! 
-//! 演示使用最新优化技术的QUIC服务端：
-//! - 零拷贝Bincode序列化器
-//! - 自适应LZ4压缩器  
-//! - 异步消息Pipeline
-//! - 微批处理优化
-//! - CPU亲和性绑定
+//! 专门用于测试QUIC连接中使用Protobuf序列化的服务端
 
-use std::{sync::Arc};
+use std::sync::Arc;
 use tokio::signal;
 use tracing::{info, error, warn};
 
@@ -16,21 +11,17 @@ use flare_core::{
     ConnectionEvent, Frame,
     FlareError,
 };
-use flare_core::common::{
-    connections::{types::QuicConfig, factory::RawConnectionHandler},
-    serialization::{ProtobufSerializer, SerializationFormat},
-    compression::{Lz4Compressor},
-    system::CpuAffinityManager,
+use flare_core::common::connections::{
+    QuicConfig, RawConnectionHandler
 };
+use flare_core::common::serialization::SerializationFormat;
 
 type Result<T> = std::result::Result<T, FlareError>;
 
-/// 简单事件处理器 - 用于更好的消息可见性
+/// 简单事件处理器
 #[derive(Debug)]
 pub struct SimpleEventHandler {
     pub name: String,
-    #[cfg(feature = "debug")]
-    pub connection: std::sync::Arc<tokio::sync::Mutex<Box<dyn flare_core::common::connections::ServerConnection>>>,
 }
 
 #[async_trait::async_trait]
@@ -48,41 +39,22 @@ impl ConnectionEvent for SimpleEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            let message_type = message.get_message_type();
-            match message_type {
-                flare_core::common::protocol::MessageType::HeartbeatAck => {
-                    info!("[{}] 💗 收到心跳确认: {}", self.name, connection_id);
-                }
-                flare_core::common::protocol::MessageType::Heartbeat => {
-                    info!("[{}] ❤️  收到客户端心跳: {}", self.name, connection_id);
-                }
-                _ => {
-                    info!("[{}] 💓 收到其他心跳消息: {} - 类型: {:?}", self.name, connection_id, message_type);
-                }
-            }
+        let payload = message.get_payload();
+        if let Ok(text) = String::from_utf8(payload.to_vec()) {
+            println!("📨 [客户端消息] {}", text);
+            info!("[{}] 📨 收到客户端消息: {} - 内容: '{}'", self.name, connection_id, text);
         } else {
-            let payload = message.get_payload();
-            if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                println!("📨 [客户端消息] {}", text);
-                info!("[{}] 📨 收到客户端消息: {} - 内容: '{}'", self.name, connection_id, text);
-            } else {
-                println!("📦 [客户端消息] 二进制数据 ({} bytes)", payload.len());
-                info!("[{}] 📦 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
-            }
+            println!("📦 [客户端消息] 二进制数据 ({} bytes)", payload.len());
+            info!("[{}] 📦 收到二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
         }
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] ❤️  心跳消息已发送: {} - 类型: {:?}", self.name, connection_id, message.get_message_type());
+        let payload = message.get_payload();
+        if let Ok(text) = String::from_utf8(payload.to_vec()) {
+            info!("[{}] 📤 数据消息已发送 (ID: {}): '{}'", self.name, message.get_message_id(), text);
         } else {
-            let payload = message.get_payload();
-            if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                info!("[{}] 📤 数据消息已发送 (ID: {}): '{}'", self.name, message.get_message_id(), text);
-            } else {
-                info!("[{}] 📦 二进制消息已发送 (ID: {}): {} bytes", self.name, message.get_message_id(), payload.len());
-            }
+            info!("[{}] 📦 二进制消息已发送 (ID: {}): {} bytes", self.name, message.get_message_id(), payload.len());
         }
     }
 
@@ -171,7 +143,6 @@ async fn create_quic_endpoint() -> Result<quinn::Endpoint> {
     Ok(endpoint)
 }
 
-/// QUIC 超低延迟服务端
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 TLS 加密提供程序
@@ -179,42 +150,31 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("无法初始化 TLS 加密提供程序");
     
-    // 初始化日志，指定 info 级别
+    // 初始化日志
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("启动 QUIC 超低延迟服务端 (使用Protobuf序列化)");
-    info!("=== QUIC 超低延迟服务端启动 ===");
+    info!("🚀 启动QUIC Protobuf服务端");
     
-    // CPU亲和性优化 - 绑定到专用核心
-    if let Ok(affinity_mgr) = CpuAffinityManager::new() {
-        if let Err(e) = affinity_mgr.bind_current_thread(1) {
-            info!("CPU亲和性绑定失败: {}, 继续运行", e);
-        } else {
-            info!("✅ 已绑定到CPU核心1，获得专用计算资源");
-        }
-    }
-    
-    // 创建超低延迟服务端配置，使用Protobuf序列化
+    // 创建服务端配置，使用Protobuf序列化
     let mut config = ConnectionConfig::server(
-        "quic_ultra_low_latency_server".to_string(),
+        "quic_protobuf_server".to_string(),
         "127.0.0.1:4433".to_string()
     ).with_type(ConnectionType::Quic)
      .with_quic_config(QuicConfig {
-         max_concurrent_streams: 200,        // 增加并发流数量
-         initial_stream_window: 2097152,     // 2MB窗口
-         connection_window: 8388608,         // 8MB连接窗口
-         congestion_control: "bbr".to_string(), // BBR拥塞控制
+         max_concurrent_streams: 20,
+         initial_stream_window: 65536,
+         connection_window: 262144,
+         congestion_control: "bbr".to_string(),
      })
-     .with_heartbeat_monitoring(5000, 10000)  // 5s间隔，10s超时
+     .with_heartbeat_monitoring(5000, 10000)
      .with_tls();
      
     // 设置使用Protobuf序列化
     config.serialization_format = Some(SerializationFormat::Protobuf);
     
     info!("服务端配置: {:?}", config);
-    info!("监听地址: {}", config.local_addr.as_ref().unwrap());
     
     // 创建 QUIC 端点
     let endpoint = create_quic_endpoint().await?;
@@ -237,21 +197,16 @@ async fn main() -> Result<()> {
                                 let remote_addr = quic_connection.remote_address();
                                 info!("QUIC客户端已连接: {}", remote_addr);
                                 
-                                // 创建Protobuf序列化器
-                                let protobuf_serializer: Arc<Box<dyn flare_core::common::serialization::FrameSerializer>> = 
-                                    Arc::new(Box::new(ProtobufSerializer::new()));
-                                
-                                // 创建事件处理器
+                                // 使用新的SimpleEventHandler来处理和显示消息
                                 let connection_event_handler = Arc::new(SimpleEventHandler::new(
                                     format!("QUIC服务端-{}", remote_addr)
                                 ));
                                 
-                                // 为每个连接创建独立的任务，使用Protobuf序列化器
-                                match RawConnectionHandler::from_quic_with_handler_and_serializer(
+                                // 为每个连接创建独立的任务
+                                match RawConnectionHandler::from_quic_with_handler(
                                     quic_connection, 
                                     connection_config, 
-                                    connection_event_handler as Arc<dyn ConnectionEvent>,
-                                    protobuf_serializer
+                                    Arc::clone(&connection_event_handler) as Arc<dyn ConnectionEvent>
                                 ).await {
                                     Ok(mut server_connection) => {
                                         info!("QUIC 服务端连接已建立: {}", remote_addr);
@@ -265,16 +220,23 @@ async fn main() -> Result<()> {
                                         // 保持连接活跃，等待客户端断开
                                         info!("连接已就绪，等待消息...");
                                         loop {
-                                            tokio::task::yield_now().await; // 使用超低延迟策略
+                                            tokio::task::yield_now().await;
                                             // 检查连接是否还活跃
                                             if !server_connection.is_active().await {
                                                 info!("连接已断开: {}", remote_addr);
                                                 break;
                                             }
                                             
-                                            // 消息已经在后台任务中处理，这里不需要主动接收
+                                            // 处理收到的消息 - 发送回显
+                                            if let Ok(Some(frame)) = server_connection.receive_message().await {
+                                                info!("收到消息，发送回显...");
+                                                if let Err(e) = server_connection.send_message(frame).await {
+                                                    error!("发送回显消息失败: {}", e);
+                                                }
+                                            }
+                                            
                                             // 给系统一个微小的处理时间
-                                            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                                         }
                                     }
                                     Err(e) => {

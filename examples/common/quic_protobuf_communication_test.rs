@@ -1,6 +1,6 @@
-//! QUIC Protobuf序列化测试
+//! QUIC Protobuf通信测试
 //! 
-//! 测试QUIC连接中使用Protobuf序列化的完整流程
+//! 测试QUIC连接中使用Protobuf序列化的完整双向通信流程
 
 use tracing::{info, error, warn};
 use flare_core::{
@@ -24,14 +24,18 @@ pub struct TestEventHandler {
     pub messages_received: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub messages_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub expected_count: usize,
+    pub echo_messages_received: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub expected_echo_count: usize,
 }
 
 impl TestEventHandler {
-    pub fn new(expected_count: usize) -> Self {
+    pub fn new(expected_echo_count: usize) -> Self {
         Self {
             messages_received: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             messages_sent: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            expected_count,
+            expected_count: expected_echo_count, // 只期望接收回显消息
+            echo_messages_received: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_echo_count,
         }
     }
     
@@ -43,8 +47,12 @@ impl TestEventHandler {
         self.messages_sent.load(std::sync::atomic::Ordering::SeqCst)
     }
     
+    pub fn get_echo_received_count(&self) -> usize {
+        self.echo_messages_received.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    
     pub fn is_all_received(&self) -> bool {
-        self.get_received_count() >= self.expected_count
+        self.get_echo_received_count() >= self.expected_echo_count
     }
 }
 
@@ -66,7 +74,13 @@ impl ConnectionEvent for TestEventHandler {
         let count = self.messages_received.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let payload = message.get_payload();
         if let Ok(text) = String::from_utf8(payload.to_vec()) {
-            info!("📩 [QUIC Protobuf测试] 收到消息 {}/{}: '{}'", count, self.expected_count, text);
+            // 检查是否是回显消息（以"ECHO: "开头）
+            if text.starts_with("ECHO: ") {
+                let echo_count = self.echo_messages_received.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                info!("📩 [QUIC Protobuf测试] 收到回显消息 {}/{}: '{}'", echo_count, self.expected_echo_count, text);
+            } else {
+                info!("📩 [QUIC Protobuf测试] 收到普通消息 {}/{}: '{}'", count, self.expected_count, text);
+            }
         } else {
             info!("📦 [QUIC Protobuf测试] 收到二进制消息 {}/{}: {} 字节", count, self.expected_count, payload.len());
         }
@@ -104,7 +118,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    info!("🚀 启动QUIC Protobuf序列化测试");
+    info!("🚀 启动QUIC Protobuf双向通信测试");
     
     // 准备测试消息
     let test_messages = vec![
@@ -139,7 +153,7 @@ async fn main() -> Result<()> {
     let mut client_connection = factory.create_client_connection(config).await?;
     
     // 设置事件处理器
-    let event_handler = Arc::new(TestEventHandler::new(test_messages.len() * 2)); // 发送和接收
+    let event_handler = Arc::new(TestEventHandler::new(test_messages.len())); // 只期望接收回显消息数量
     let event_handler_clone = Arc::clone(&event_handler);
     client_connection.set_connection_event_handler(event_handler_clone as Arc<dyn ConnectionEvent>).await;
     
@@ -181,7 +195,7 @@ async fn main() -> Result<()> {
     // 等待接收回显消息
     info!("⏱️ 等待接收服务端回显消息...");
     let mut wait_count = 0;
-    const MAX_WAIT_MS: u64 = 3000;
+    const MAX_WAIT_MS: u64 = 5000;
     const CHECK_INTERVAL_MS: u64 = 100;
     
     while !event_handler.is_all_received() && wait_count < (MAX_WAIT_MS / CHECK_INTERVAL_MS) {
@@ -189,8 +203,8 @@ async fn main() -> Result<()> {
         wait_count += 1;
         
         if wait_count % 10 == 0 { // 每秒输出一次进度
-            info!("⏱️ 已接收: {}/{} 条消息...", 
-                  event_handler.get_received_count(), test_messages.len());
+            info!("⏱️ 已接收回显消息: {}/{} 条...", 
+                  event_handler.get_echo_received_count(), test_messages.len());
         }
     }
     
@@ -199,7 +213,7 @@ async fn main() -> Result<()> {
     if event_handler.is_all_received() {
         info!("✅ 所有Protobuf消息测试完成！总耗时: {:?}", total_duration);
         info!("📊 发送消息数: {}", event_handler.get_sent_count());
-        info!("📊 接收消息数: {}", event_handler.get_received_count());
+        info!("📊 接收回显消息数: {}", event_handler.get_echo_received_count());
         
         // 计算每秒消息数
         let messages_per_second = (test_messages.len() as f64) / total_duration.as_secs_f64();
@@ -209,13 +223,13 @@ async fn main() -> Result<()> {
         let avg_latency_ms = total_duration.as_millis() as f64 / test_messages.len() as f64;
         info!("📈 Protobuf平均延迟: {:.2}ms", avg_latency_ms);
     } else {
-        warn!("⚠️ 超时！只接收了 {}/{} 条Protobuf消息", 
-              event_handler.get_received_count(), test_messages.len());
+        warn!("⚠️ 超时！只接收了 {}/{} 条Protobuf回显消息", 
+              event_handler.get_echo_received_count(), test_messages.len());
     }
     
     // 等待服务端处理所有消息
-    info!("⏱️ 等待 0.5 秒让服务端处理所有Protobuf消息...");
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    info!("⏱️ 等待 1 秒让服务端处理所有Protobuf消息...");
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     
     // 断开连接
     info!("🔌 断开QUIC连接...");

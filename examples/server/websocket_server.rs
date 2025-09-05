@@ -19,7 +19,7 @@ use flare_core::{
     FlareError,
 };
 use flare_core::common::{
-    connections::{WebSocketConfig, RawConnectionHandler},
+    connections::{types::WebSocketConfig, factory::RawConnectionHandler},
     serialization::BincodeSerializer,
     compression::{Lz4Compressor, CompressionConfig},
     pipeline::AsyncMessagePipeline,
