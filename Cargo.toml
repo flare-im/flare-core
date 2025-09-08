@@ -64,30 +64,6 @@ name = "serialization_without_stats"
 path = "examples/common/serialization_without_stats.rs"
 
 [[example]]
-name = "quic_protobuf_test"
-path = "examples/common/quic_protobuf_test.rs"
-
-[[example]]
-name = "unified_heartbeat_test"
-path = "examples/common/unified_heartbeat_test.rs"
-
-[[example]]
-name = "unified_message_parser_demo"
-path = "examples/common/unified_message_parser_demo.rs"
-
-[[example]]
-name = "quic_protobuf_communication_test"
-path = "examples/common/quic_protobuf_communication_test.rs"
-
-[[example]]
-name = "quic_protobuf_echo_server"
-path = "examples/common/quic_protobuf_echo_server.rs"
-
-[[example]]
-name = "quic_protobuf_echo_client"
-path = "examples/common/quic_protobuf_echo_client.rs"
-
-[[example]]
 name = "quic_protobuf_test_script"
 path = "examples/common/quic_protobuf_test_script.rs"
 

@@ -79,8 +79,8 @@ impl ConnectionEvent for TestEventHandler {
     }
 
     async fn on_heartbeat_timeout(&self, _connection_id: &str) {}
-    async fn on_heartbeat_sent(&self, _connection_id: &str) {}
-    async fn on_heartbeat_received(&self, _connection_id: &str) {}
+    async fn on_heartbeat_ping(&self, _connection_id: &str) {}
+    async fn on_heartbeat_pong(&self, _connection_id: &str) {}
     async fn on_quality_changed(&self, _connection_id: &str, _quality_score: u8) {}
     async fn on_reconnect_started(&self, _connection_id: &str, _attempt: u32) {}
     async fn on_reconnected(&self, _connection_id: &str, _attempt: u32) {}

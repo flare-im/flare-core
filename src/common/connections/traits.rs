@@ -57,6 +57,9 @@ pub trait Connection: Send + Sync {
     
     /// 设置事件处理器（新增方法）
     async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>);
+    
+    /// 发送错误通知消息
+    async fn send_error_notification(&self, error_code: u32, error_message: &str) -> Result<()>;
 }
 
 /// 客户端连接接口

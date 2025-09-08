@@ -5,52 +5,62 @@
 
 use async_trait::async_trait;
 
-use crate::common::protocol::Frame;
+use crate::common::{
+    protocol::Frame,
+    connections::traits::ConnectionStats,
+};
 
 /// 连接事件处理器
 /// 
 /// 处理连接生命周期中的各种事件
 /// 设计目标：简洁易用，提供核心必需的事件回调
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ConnectionEvent: Send + Sync {
-    /// 连接建立事件
+    /// 连接已建立
     async fn on_connected(&self, connection_id: &str);
     
-    /// 连接断开事件
+    /// 连接已断开
     async fn on_disconnected(&self, connection_id: &str, reason: &str);
     
-    /// 连接错误事件
+    /// 连接发生错误
     async fn on_error(&self, connection_id: &str, error: &str);
     
-    /// 消息接收事件
+    /// 收到消息
     async fn on_message_received(&self, connection_id: &str, message: &Frame);
     
-    /// 消息发送事件
+    /// 消息已发送
     async fn on_message_sent(&self, connection_id: &str, message: &Frame);
     
-    /// 心跳超时事件
+    /// 心跳超时
     async fn on_heartbeat_timeout(&self, connection_id: &str);
-    
-    /// 心跳发送事件
-    async fn on_heartbeat_sent(&self, connection_id: &str);
-    
-    /// 心跳接收事件
-    async fn on_heartbeat_received(&self, connection_id: &str);
-    
-    /// 连接质量变化事件
+
+    /// 收到心跳
+    async fn on_heartbeat_ping(&self, connection_id: &str);
+
+    /// 收到心跳响应
+    async fn on_heartbeat_pong(&self, connection_id: &str);
+
+    /// 连接质量变化
     async fn on_quality_changed(&self, connection_id: &str, quality_score: u8);
     
-    /// 重连开始事件
+    /// 开始重连
     async fn on_reconnect_started(&self, connection_id: &str, attempt: u32);
     
-    /// 重连成功事件
+    /// 重连成功
     async fn on_reconnected(&self, connection_id: &str, attempt: u32);
     
-    /// 重连失败事件
+    /// 重连失败
     async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str);
     
-    /// 连接统计更新事件
-    async fn on_statistics_updated(&self, connection_id: &str, stats: &crate::common::connections::traits::ConnectionStats);
+    /// 统计信息更新
+    async fn on_statistics_updated(&self, connection_id: &str, stats: &ConnectionStats);
+    
+    /// 请求发送消息（用于自动心跳响应等场景）
+    async fn on_send_message_request(&self, connection_id: &str, message: Frame) {
+        // 默认实现为空，具体的连接实现应该重写此方法来处理发送请求
+        let _ = connection_id;
+        let _ = message;
+    }
 }
 
 /// 默认连接事件处理器
@@ -85,12 +95,12 @@ impl ConnectionEvent for DefConnectionEventHandler {
         tracing::info!("心跳超时: {}", connection_id);
     }
 
-    async fn on_heartbeat_sent(&self, connection_id: &str) {
-        tracing::info!("心跳已发送: {}", connection_id);
+    async fn on_heartbeat_ping(&self, connection_id: &str) {
+        tracing::info!("收到心跳的ping: {}", connection_id);
     }
 
-    async fn on_heartbeat_received(&self, connection_id: &str) {
-        tracing::info!("收到心跳: {}", connection_id);
+    async fn on_heartbeat_pong(&self, connection_id: &str) {
+        tracing::info!("收到心跳的pong: {}", connection_id);
     }
     
     async fn on_quality_changed(&self, connection_id: &str, quality_score: u8) {

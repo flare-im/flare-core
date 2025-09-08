@@ -262,7 +262,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_json_serializer_pretty() {
-        let mut serializer = JsonSerializer::pretty();
+        let serializer = JsonSerializer::pretty();
         
         let frame = Frame::new(
             MessageType::Heartbeat,
@@ -283,7 +283,7 @@ mod tests {
         let mut config = SerializationConfig::default();
         config.max_message_size = Some(10); // 非常小的限制
         
-        let mut serializer = JsonSerializer::with_config(config);
+        let serializer = JsonSerializer::with_config(config);
         
         let frame = Frame::new(
             MessageType::Data,

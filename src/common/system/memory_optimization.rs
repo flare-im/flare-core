@@ -13,18 +13,16 @@ pub struct AlignedBuffer {
 impl AlignedBuffer {
     /// 创建对齐的缓冲区
     pub fn new(capacity: usize) -> Self {
-        let mut data = Vec::with_capacity(capacity);
-        
         // 确保内存对齐
-        unsafe {
+        let data = unsafe {
             let layout = Layout::from_size_align(capacity, 64).unwrap();
             let ptr = alloc(layout);
             if ptr.is_null() {
                 panic!("内存分配失败");
             }
             
-            data = Vec::from_raw_parts(ptr, 0, capacity);
-        }
+            Vec::from_raw_parts(ptr, 0, capacity)
+        };
         
         Self { data, capacity }
     }

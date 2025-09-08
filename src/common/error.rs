@@ -114,6 +114,7 @@ impl ErrorCode {
             8000 => Some(ErrorCode::SerializationError),
             8001 => Some(ErrorCode::DeserializationError),
             8002 => Some(ErrorCode::EncodingError),
+            8003 => Some(ErrorCode::DeserializationError),
             9000 => Some(ErrorCode::GeneralError),
             9001 => Some(ErrorCode::InvalidParameter),
             9002 => Some(ErrorCode::OperationNotSupported),
@@ -162,7 +163,7 @@ impl ErrorCode {
             ErrorCode::NetworkUnreachable => "NETWORK_UNREACHABLE",
             ErrorCode::NetworkConnectionLost => "NETWORK_CONNECTION_LOST",
             ErrorCode::SerializationError => "SERIALIZATION_ERROR",
-            ErrorCode::DeserializationError => "DESERIALIZATION_ERROR",
+            ErrorCode::DeserializationError => "FRAME_DESERIALIZATION_ERROR",
             ErrorCode::EncodingError => "ENCODING_ERROR",
             ErrorCode::GeneralError => "GENERAL_ERROR",
             ErrorCode::InvalidParameter => "INVALID_PARAMETER",
@@ -589,4 +590,4 @@ mod tests {
         assert_eq!(localized.params.as_ref().unwrap().get("message_id"), Some(&"msg123".to_string()));
         assert_eq!(localized.params.as_ref().unwrap().get("user_id"), Some(&"user456".to_string()));
     }
-} 
+}

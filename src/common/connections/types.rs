@@ -107,6 +107,8 @@ pub struct ConnectionConfig {
     /// 序列化配置（用于配置序列化）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serialization_config: Option<crate::common::serialization::SerializationConfig>,
+    /// 是否自动回复心跳响应
+    pub auto_heartbeat_response: bool,
 }
 
 /// 协议特定配置
@@ -264,26 +266,68 @@ impl ConnectionConfig {
         Ok(())
     }
     
-    /// 创建客户端配置
+    /// 设置是否自动回复心跳响应
+    pub fn with_auto_heartbeat_response(mut self, auto_response: bool) -> Self {
+        self.auto_heartbeat_response = auto_response;
+        self
+    }
+    
+    /// 检查是否启用了自动心跳响应
+    pub fn is_auto_heartbeat_response_enabled(&self) -> bool {
+        self.auto_heartbeat_response
+    }
+    
+    /// 创建客户端连接配置
     pub fn client(id: String, remote_addr: String) -> Self {
         Self {
             id,
-            remote_addr,
+            connection_type: ConnectionType::WebSocket, // 默认WebSocket
             role: ConnectionRole::Client,
-            ..Default::default()
+            remote_addr,
+            local_addr: None,
+            timeout_ms: 30000,
+            heartbeat_interval_ms: 30000,
+            heartbeat_timeout_ms: 10000,
+            max_missed_heartbeats: 3,
+            auto_reconnect: true,
+            max_reconnect_attempts: 3,
+            reconnect_delay_ms: 1000,
+            enable_tls: false,
+            buffer_size: 65536,
+            max_message_size: 1048576,
+            heartbeat_monitor_timeout_ms: 60000,
+            cleanup_interval_ms: 300000,
+            protocol_config: ProtocolConfig::default(),
+            serialization_format: None,
+            serialization_config: None,
+            auto_heartbeat_response: true, // 默认启用自动心跳响应
         }
     }
     
-    /// 创建服务端配置
+    /// 创建服务端连接配置
     pub fn server(id: String, local_addr: String) -> Self {
         Self {
             id,
-            local_addr: Some(local_addr),
+            connection_type: ConnectionType::WebSocket, // 默认WebSocket
             role: ConnectionRole::Server,
-            auto_reconnect: false, // 服务端不需要重连
+            remote_addr: String::new(),
+            local_addr: Some(local_addr),
+            timeout_ms: 30000,
+            heartbeat_interval_ms: 30000,
+            heartbeat_timeout_ms: 10000,
+            max_missed_heartbeats: 3,
+            auto_reconnect: false,
             max_reconnect_attempts: 0,
             reconnect_delay_ms: 0,
-            ..Default::default()
+            enable_tls: false,
+            buffer_size: 65536,
+            max_message_size: 1048576,
+            heartbeat_monitor_timeout_ms: 5000,
+            cleanup_interval_ms: 10000,
+            protocol_config: ProtocolConfig::default(),
+            serialization_format: None,
+            serialization_config: None,
+            auto_heartbeat_response: true, // 默认启用自动心跳响应
         }
     }
     
@@ -536,6 +580,7 @@ impl Default for ConnectionConfig {
             protocol_config: ProtocolConfig::default(),
             serialization_format: Some(crate::common::serialization::SerializationFormat::Json),
             serialization_config: Some(crate::common::serialization::SerializationConfig::default()),
+            auto_heartbeat_response: true,
         }
     }
 }

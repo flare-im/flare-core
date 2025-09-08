@@ -53,9 +53,9 @@ struct ConnectionInfo {
     /// 连接实例
     connection: Arc<Mutex<Box<dyn ClientConnection>>>,
     /// 连接配置
-    config: ConnectionConfig,
+    _config: ConnectionConfig,
     /// 创建时间
-    created_at: Instant,
+    _created_at: Instant,
     /// 最后活跃时间
     last_activity: Instant,
     /// 重连次数
@@ -70,8 +70,8 @@ impl ConnectionInfo {
     fn new(connection: Box<dyn ClientConnection>, config: ConnectionConfig) -> Self {
         Self {
             connection: Arc::new(Mutex::new(connection)),
-            config,
-            created_at: Instant::now(),
+            _config: config,
+            _created_at: Instant::now(),
             last_activity: Instant::now(),
             reconnect_attempts: 0,
             is_reconnecting: false,

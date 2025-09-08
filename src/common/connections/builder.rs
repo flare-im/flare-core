@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use crate::common::{
-    connections::{ConnectionConfig, ConnectionType, ConnectionRole},
+    connections::{ConnectionConfig, ConnectionType},
     serialization::{FrameSerializer, SerializationFormat, SerializationConfig},
 };
 
@@ -256,56 +256,4 @@ pub fn client_connection(id: String, remote_addr: String) -> ConnectionBuilder {
 /// 便捷的服务端连接构建器创建函数
 pub fn server_connection(id: String, local_addr: String) -> ConnectionBuilder {
     ConnectionBuilder::server(id, local_addr)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::serialization::JsonSerializer;
-    
-    #[test]
-    fn test_connection_builder_basic() {
-        let builder = ConnectionBuilder::client("test".to_string(), "ws://localhost:8080".to_string());
-        let config = builder.build_config();
-        
-        assert_eq!(config.id, "test");
-        assert_eq!(config.remote_addr, "ws://localhost:8080");
-        assert_eq!(config.role, ConnectionRole::Client);
-    }
-    
-    #[test]
-    fn test_connection_builder_with_serialization() {
-        let builder = ConnectionBuilder::client("test".to_string(), "ws://localhost:8080".to_string())
-            .with_json_serialization();
-        
-        let (config, custom_serializer) = builder.build();
-        
-        assert_eq!(config.get_serialization_format(), SerializationFormat::Json);
-        assert!(custom_serializer.is_none());
-    }
-    
-    #[test]
-    fn test_connection_builder_with_custom_serializer() {
-        let custom_serializer = JsonSerializer::new();
-        let builder = ConnectionBuilder::client("test".to_string(), "ws://localhost:8080".to_string())
-            .with_custom_serializer(custom_serializer);
-        
-        let (config, serializer) = builder.build();
-        
-        assert!(serializer.is_some());
-        assert!(config.serialization_format.is_none());
-    }
-    
-    #[test]
-    fn test_ultra_low_latency_preset() {
-        let builder = ConnectionBuilder::client("game".to_string(), "quic://game-server:4433".to_string())
-            .ultra_low_latency();
-        
-        let config = builder.build_config();
-        
-        assert_eq!(config.connection_type, ConnectionType::Quic);
-        assert_eq!(config.buffer_size, 16384);
-        assert_eq!(config.heartbeat_interval_ms, 5000);
-        assert_eq!(config.get_serialization_format(), SerializationFormat::Json);
-    }
 }

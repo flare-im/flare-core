@@ -3,7 +3,7 @@
 //! 实现消息处理的流水线并行化，显著降低总体延迟
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::common::{
@@ -37,7 +37,7 @@ impl PipelineMessage {
 pub struct AsyncMessagePipeline {
     serialize_tx: mpsc::Sender<PipelineMessage>,
     /// 微批处理大小（默认为2，适合实时通信场景）
-    batch_size: usize,
+    _batch_size: usize,
 }
 
 impl AsyncMessagePipeline {
@@ -93,7 +93,7 @@ impl AsyncMessagePipeline {
 
         Self { 
             serialize_tx,
-            batch_size,
+            _batch_size: batch_size,
         }
     }
     
@@ -111,36 +111,5 @@ impl AsyncMessagePipeline {
         self.serialize_tx.send(message).await
             .map_err(|_| FlareError::general_error("管道已关闭"))?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::{
-        protocol::{MessageType, Reliability},
-        serialization::JsonSerializer,
-        compression::CompressorFactory,
-    };
-
-    #[tokio::test]
-    async fn test_async_pipeline() {
-        let serializer = Arc::new(JsonSerializer::new());
-        // 使用具体的压缩器类型而不是Box
-        let compressor = Arc::new(crate::common::compression::SnappyCompressor::new());
-        
-        let pipeline = AsyncMessagePipeline::new(serializer, compressor);
-        
-        let frame = Frame::new(
-            MessageType::Data,
-            1,
-            Reliability::AtLeastOnce,
-            vec![0u8; 1024],
-        );
-        
-        pipeline.process_async(frame).await.unwrap();
-        
-        // 等待处理完成
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

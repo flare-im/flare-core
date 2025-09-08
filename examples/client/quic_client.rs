@@ -19,7 +19,7 @@ use flare_core::common::{
     connections::{ConnectionFactory, types::QuicConfig, traits::ConnectionFactory as ConnectionFactoryTrait},
     protocol::{MessageType, Reliability},
     serialization::{ProtobufSerializer, SerializationFormat},
-    compression::{Lz4Compressor, CompressionConfig},
+    compression::{Lz4Compressor},
     pipeline::AsyncMessagePipeline,
     system::CpuAffinityManager,
 };
@@ -93,11 +93,11 @@ impl ConnectionEvent for SimpleEventHandler {
         }
     }
 
-    async fn on_heartbeat_sent(&self, connection_id: &str) {
+    async fn on_heartbeat_ping(&self, connection_id: &str) {
         info!("[{}] 心跳已发送: {}", self.name, connection_id);
     }
 
-    async fn on_heartbeat_received(&self, connection_id: &str) {
+    async fn on_heartbeat_pong(&self, connection_id: &str) {
         info!("[{}] 收到心跳: {}", self.name, connection_id);
     }
 

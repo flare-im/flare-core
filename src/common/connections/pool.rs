@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Mutex};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info};
 
 use crate::common::{
-    error::{Result, FlareError},
+    error::Result,
     connections::{
         ClientConnection, ConnectionConfig, ConnectionState, ConnectionType,
         factory::ConnectionFactory,
@@ -266,7 +266,6 @@ impl ConnectionPool {
         
         let targets = self.config.preconnect_targets.clone();
         let count = self.config.preconnect_count;
-        let config = self.config.clone();
         
         tokio::spawn(async move {
             info!("开始预连接任务，目标: {:?}", targets);
@@ -366,7 +365,7 @@ impl ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::sleep;
+
     
     #[tokio::test]
     async fn test_connection_pool_basic() {
@@ -379,7 +378,7 @@ mod tests {
             health_check_interval: Duration::from_secs(5),
         };
         
-        let pool = ConnectionPool::new(config);
+        let _pool = ConnectionPool::new(config);
         
         // 注意：这个测试需要有实际的服务器运行
         // 在实际环境中测试

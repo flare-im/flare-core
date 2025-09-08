@@ -5,22 +5,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tokio::time::timeout;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, error};
 
 use crate::common::{
     error::{Result, FlareError},
     protocol::Frame,
     connections::{
         traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection, HeartbeatResponseHandler},
-        types::{ConnectionConfig, ConnectionState, ConnectionType, ConnectionRole},
+        types::{ConnectionConfig, ConnectionState},
         event::DefConnectionEventHandler,
     },
     messaging::MessageParser, // 从messaging模块导入
-    serialization::{FrameSerializer, factory::json_serializer},
+    serialization::FrameSerializer,
 };
 
-use quinn::{Connection as QuinnConnection, Endpoint, Connecting};
+use quinn::{Connection as QuinnConnection, Endpoint};
+use crate::common::error::ErrorCode;
 
 /// 跳过服务器证书验证的实现（仅用于演示）
 #[derive(Debug)]
@@ -96,8 +96,6 @@ pub struct QuicConnection {
     connection: Arc<RwLock<Option<QuinnConnection>>>,
     /// 消息接收任务句柄
     receive_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// 心跳响应处理器
-    heartbeat_response_handler: Arc<RwLock<Option<HeartbeatResponseHandler>>>,
     /// 消息发送通道（发送已序列化的数据）
     message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     /// 序列化器
@@ -117,7 +115,7 @@ impl QuicConnection {
         };
         
         // 根据配置创建序列化器
-        let serializer = {
+        let serializer_boxed = {
             let factory = crate::common::serialization::SerializerFactory::new();
             factory.create_with_config(
                 config.get_serialization_format(), 
@@ -139,9 +137,8 @@ impl QuicConnection {
             
             connection: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
-            heartbeat_response_handler: Arc::new(RwLock::new(None)),
             message_sender: Arc::new(RwLock::new(None)),
-            serializer: Arc::new(serializer),
+            serializer: Arc::new(serializer_boxed),
         }
     }
     
@@ -167,7 +164,6 @@ impl QuicConnection {
             
             connection: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
-            heartbeat_response_handler: Arc::new(RwLock::new(None)),
             message_sender: Arc::new(RwLock::new(None)),
             serializer,
         }
@@ -183,8 +179,6 @@ impl QuicConnection {
         *self.connection.write().await = Some(conn);
     }
     
-
-    
     /// 启动消息接收任务
     pub async fn start_receive_task(&mut self) -> Result<()> {
         let id = self.id.clone();
@@ -193,6 +187,7 @@ impl QuicConnection {
         let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
         let connection: Arc<RwLock<Option<QuinnConnection>>> = Arc::clone(&self.connection);
         let serializer = Arc::clone(&self.serializer);
+        let config = self.config.clone(); // 克隆配置
         
         let event_handler = event_handler.read().await.as_ref().cloned().unwrap_or_else(|| {
             Arc::new(DefConnectionEventHandler::default()) as Arc<dyn ConnectionEvent>
@@ -283,14 +278,26 @@ impl QuicConnection {
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
             let connection: Arc<RwLock<Option<QuinnConnection>>> = Arc::clone(&connection);
             let serializer: Arc<Box<dyn FrameSerializer>> = Arc::clone(&serializer);
+            let config = config.clone(); // 使用克隆的配置
+            
+            // 克隆发送通道
+            let message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>> = Arc::clone(&self.message_sender);
             
             // 创建统一消息解析器
-            let message_parser = Arc::new(MessageParser::new(
+            let mut parser = MessageParser::new(
                 id.clone(),
                 Arc::clone(&event_handler),
                 Arc::clone(&stats),
-                serializer,
-            ));
+                serializer.clone(), // 克隆serializer而不是移动
+                config, // 传递配置
+            );
+            
+            // 将消息发送通道设置到消息解析器中
+            if let Some(sender) = &*message_sender.read().await {
+                parser.set_message_sender(sender.clone());
+            }
+            
+            let message_parser = Arc::new(parser);
 
             tokio::spawn(async move {
                 loop {
@@ -315,13 +322,30 @@ impl QuicConnection {
                             let mut buffer = vec![0u8; 1024];
                             match recv.read(&mut buffer).await {
                                 Ok(Some(bytes_read)) => {
-                                    if bytes_read > 0 {
-                                        let data = buffer[..bytes_read].to_vec();
-                                        debug!("收到 QUIC 数据: {} 字节", bytes_read);
-                                        
-                                        // 使用统一消息解析器处理数据
-                                        message_parser.parse_and_handle(data).await;
-                                    }
+                                    let data = buffer[..bytes_read].to_vec();
+                                    // 使用序列化器解析消息
+                                    match serializer.deserialize(&data).await {
+                                        Ok(frame) => {
+                                            debug!("成功解析消息: {:?}", frame.get_message_type());
+                                            // 使用消息解析器处理帧
+                                            message_parser.handle_frame(frame).await;
+                                        },
+                                        Err(e) => {
+                                            error!("消息反序列化失败: {}", e);
+                                            // 直接使用send流发送错误通知给发送方
+                                            let error_frame = Frame::error(ErrorCode::DeserializationError.as_u32(), &format!("消息反序列化失败: {}", e));
+                                            if let Ok(error_data) = serializer.serialize(&error_frame).await {
+                                                if let Err(send_err) = send.write_all(&error_data).await {
+                                                    error!("发送错误通知失败: {}", send_err);
+                                                } else {
+                                                    debug!("已发送序列化错误通知给发送方: {}", id);
+                                                }
+                                            }
+                                            
+                                            // 解析失败，不继续处理消息
+                                            continue;
+                                        }
+                                    };
                                 }
                                 Ok(None) => {
                                     debug!("QUIC 流已关闭");
@@ -352,8 +376,6 @@ impl QuicConnection {
         }
         Ok(())
     }
-    
-
 }
 
 #[async_trait::async_trait]
@@ -400,25 +422,13 @@ impl Connection for QuicConnection {
         if let Some(tx) = &*sender {
             tx.send(heartbeat_data)
                 .map_err(|e| FlareError::message_send_failed(format!("心跳消息发送失败: {}", e)))?;
-            
-            debug!("心跳消息已提交发送: {}", self.id);
-            
-            // 触发心跳发送事件
-            if let Some(handler) = &*self.event_handler.read().await {
-                let handler = Arc::clone(handler);
-                let id = self.id.clone();
-                tokio::spawn(async move {
-                    handler.on_heartbeat_sent(&id).await;
-                });
-            }
-            
             Ok(())
         } else {
             Err(FlareError::connection_failed("消息发送通道不可用"))
         }
     }
     
-    async fn send_heartbeat_response(&self, data: Option<Vec<u8>>) -> Result<()> {
+    async fn send_heartbeat_response(&self, _data: Option<Vec<u8>>) -> Result<()> {
         // 创建心跳确认帧
         let heartbeat_ack_frame = Frame::heartbeat_ack();
         
@@ -443,8 +453,8 @@ impl Connection for QuicConnection {
         }
     }
     
-    async fn set_heartbeat_response_handler(&mut self, handler: Option<HeartbeatResponseHandler>) {
-        *self.heartbeat_response_handler.write().await = handler;
+    async fn set_heartbeat_response_handler(&mut self, _handler: Option<HeartbeatResponseHandler>) {
+        // 心跳响应处理器已移除，此方法为空实现
     }
     
     async fn has_received_heartbeat(&self) -> bool {
@@ -464,6 +474,30 @@ impl Connection for QuicConnection {
     
     async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
         *self.event_handler.write().await = Some(handler);
+    }
+
+    /// 发送错误通知
+    async fn send_error_notification(&self, error_code: u32, error_message: &str) -> Result<()> {
+        // 创建错误帧
+        let error_frame = Frame::error(error_code, error_message);
+        
+        // 先序列化错误消息，确保序列化成功再发送
+        let error_data = self.serializer.serialize(&error_frame).await
+            .map_err(|e| FlareError::serialization_error(format!("错误消息序列化失败: {}", e)))?;
+        
+        // 通过通道发送序列化后的错误数据
+        let sender = self.message_sender.read().await;
+        if let Some(tx) = &*sender {
+            tx.send(error_data)
+                .map_err(|e| FlareError::message_send_failed(format!("错误消息发送失败: {}", e)))?;
+            
+            debug!("错误通知消息已提交发送: {} - 错误码: {}, 错误信息: {}", 
+                   self.id, error_code, error_message);
+            
+            Ok(())
+        } else {
+            Err(FlareError::connection_failed("消息发送通道不可用"))
+        }
     }
 }
 
@@ -506,8 +540,6 @@ impl ClientConnection for QuicConnection {
         // 启动消息接收任务
         self.start_receive_task().await?;
         
-
-        
         *self.state.write().await = ConnectionState::Connected;
         *self.state.write().await = ConnectionState::Ready;
         
@@ -517,7 +549,7 @@ impl ClientConnection for QuicConnection {
         // 触发连接事件
         let id = self.id.clone();
         if let Some(handler) = &*self.event_handler.read().await {
-            let handler = Arc::clone(handler);
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
             tokio::spawn(async move {
                 handler.on_connected(&id).await;
             });
@@ -529,9 +561,6 @@ impl ClientConnection for QuicConnection {
     
     async fn disconnect(&mut self) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
-        
-        // 停止接收任务
-        self.stop_receive_task().await?;
         
         // 停止接收任务
         self.stop_receive_task().await?;
@@ -549,7 +578,7 @@ impl ClientConnection for QuicConnection {
         // 触发断开事件
         let id = self.id.clone();
         if let Some(handler) = &*self.event_handler.read().await {
-            let handler = Arc::clone(handler);
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
             tokio::spawn(async move {
                 handler.on_disconnected(&id, "主动断开").await;
             });
@@ -575,24 +604,6 @@ impl ClientConnection for QuicConnection {
         if let Some(tx) = &*sender {
             tx.send(message_data)
                 .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
-            
-            debug!("QUIC 消息已提交发送: {} - 类型: {:?}", self.id, message.get_message_type());
-            
-            // 触发消息发送事件
-            if let Some(handler) = &*self.event_handler.read().await {
-                let handler = Arc::clone(handler);
-                let id = self.id.clone();
-                let msg_clone = message.clone();
-                tokio::spawn(async move { 
-                    handler.on_message_sent(&id, &msg_clone).await;
-                    
-                    // 如果是心跳消息，触发心跳发送事件
-                    if msg_clone.is_heartbeat() {
-                        handler.on_heartbeat_sent(&id).await;
-                    }
-                });
-            }
-            
             Ok(())
         } else {
             Err(FlareError::connection_failed("消息发送通道不可用"))
@@ -610,18 +621,13 @@ impl ClientConnection for QuicConnection {
         // 等待重连延迟
         tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
         
-        // 等待重连延迟
-        tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
-        
         // 尝试重新连接
         self.connect().await?;
         
-
-        
         // 更新重连次数
         {
-            let mut attempts = self.reconnect_attempts.write().await;
-            *attempts += 1;
+            let mut attempts_guard = self.reconnect_attempts.write().await;
+            *attempts_guard += 1;
         }
         
         // 更新最后活跃时间
@@ -661,12 +667,10 @@ impl ServerConnection for QuicConnection {
         // 更新最后活跃时间
         self.update_last_activity().await;
         
-
-        
         // 触发连接事件
         let id = self.id.clone();
         if let Some(handler) = &*self.event_handler.read().await {
-            let handler = Arc::clone(handler);
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
             tokio::spawn(async move {
                 handler.on_connected(&id).await;
             });
@@ -678,9 +682,6 @@ impl ServerConnection for QuicConnection {
     
     async fn close(&mut self) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
-        
-        // 停止接收任务
-        self.stop_receive_task().await?;
         
         // 停止接收任务
         self.stop_receive_task().await?;
@@ -698,7 +699,7 @@ impl ServerConnection for QuicConnection {
         // 触发断开事件
         let id = self.id.clone();
         if let Some(handler) = &*self.event_handler.read().await {
-            let handler = Arc::clone(handler);
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
             tokio::spawn(async move {
                 handler.on_disconnected(&id, "服务端关闭").await;
             });
@@ -724,24 +725,6 @@ impl ServerConnection for QuicConnection {
         if let Some(tx) = &*sender {
             tx.send(message_data)
                 .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
-            
-            debug!("QUIC 服务端消息已提交发送: {} - 类型: {:?}", self.id, message.get_message_type());
-            
-            // 触发消息发送事件
-            if let Some(handler) = &*self.event_handler.read().await {
-                let handler = Arc::clone(handler);
-                let id = self.id.clone();
-                let msg_clone = message.clone();
-                tokio::spawn(async move { 
-                    handler.on_message_sent(&id, &msg_clone).await;
-                    
-                    // 如果是心跳消息，触发心跳发送事件
-                    if msg_clone.is_heartbeat() {
-                        handler.on_heartbeat_sent(&id).await;
-                    }
-                });
-            }
-            
             Ok(())
         } else {
             Err(FlareError::connection_failed("消息发送通道不可用"))
@@ -758,8 +741,6 @@ impl ServerConnection for QuicConnection {
         // 消息接收由后台任务处理，这里返回 None
         Ok(None)
     }
-    
-
     
     async fn is_healthy(&self) -> bool {
         let state = *self.state.read().await;

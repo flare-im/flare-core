@@ -94,11 +94,11 @@ impl ConnectionEvent for SimpleEventHandler {
         }
     }
 
-    async fn on_heartbeat_sent(&self, connection_id: &str) {
+    async fn on_heartbeat_ping(&self, connection_id: &str) {
         info!("[{}] 心跳已发送: {}", self.name, connection_id);
     }
 
-    async fn on_heartbeat_received(&self, connection_id: &str) {
+    async fn on_heartbeat_pong(&self, connection_id: &str) {
         info!("[{}] 收到心跳: {}", self.name, connection_id);
     }
 
