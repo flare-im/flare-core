@@ -59,7 +59,7 @@ impl ProtobufSerializer {
         ]
     }
     
-    /// 将Frame转换为Protobuf Frame
+    /// 将Serde Frame转换为Protobuf Frame
     fn frame_to_proto(frame: &Frame) -> ProtobufFrame {
         ProtobufFrame {
             message_type: Self::message_type_to_proto(frame.message_type) as i32,
@@ -71,6 +71,7 @@ impl ProtobufSerializer {
             priority: frame.priority as u32,
             compression: frame.compression.map(|c| c as u32),
             encrypted: frame.encrypted,
+            metadata: frame.metadata.clone().unwrap_or_default(),
         }
     }
     
@@ -86,6 +87,11 @@ impl ProtobufSerializer {
             priority: proto_frame.priority as u8,
             compression: proto_frame.compression.map(|c| c as u8),
             encrypted: proto_frame.encrypted,
+            metadata: if proto_frame.metadata.is_empty() {
+                None
+            } else {
+                Some(proto_frame.metadata)
+            },
         })
     }
     

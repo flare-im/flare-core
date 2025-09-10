@@ -68,16 +68,16 @@ pub trait Connection: Send + Sync {
 #[async_trait]
 pub trait ClientConnection: Connection + Send + Sync {
     /// 建立连接
-    async fn connect(&mut self) -> Result<()>;
+    async fn connect(&self) -> Result<()>;
     
     /// 断开连接
-    async fn disconnect(&mut self) -> Result<()>;
+    async fn disconnect(&self) -> Result<()>;
     
     /// 发送消息
-    async fn send_message(&mut self, message: Frame) -> Result<()>;
+    async fn send_message(&self, message: Frame) -> Result<()>;
     
     /// 尝试重连
-    async fn try_reconnect(&mut self) -> Result<()>;
+    async fn try_reconnect(&self) -> Result<()>;
     
     /// 检查是否需要重连
     async fn needs_reconnect(&self) -> bool;
@@ -86,7 +86,7 @@ pub trait ClientConnection: Connection + Send + Sync {
     async fn get_reconnect_attempts(&self) -> u32;
     
     /// 重置重连次数
-    async fn reset_reconnect_attempts(&mut self);
+    async fn reset_reconnect_attempts(&self);
 }
 
 /// 服务端连接接口
@@ -95,16 +95,16 @@ pub trait ClientConnection: Connection + Send + Sync {
 #[async_trait]
 pub trait ServerConnection: Connection + Send + Sync {
     /// 接受连接（从原始连接创建服务端连接）
-    async fn accept(&mut self) -> Result<()>;
+    async fn accept(&self) -> Result<()>;
     
     /// 关闭连接
-    async fn close(&mut self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
     
     /// 发送消息
-    async fn send_message(&mut self, message: Frame) -> Result<()>;
+    async fn send_message(&self, message: Frame) -> Result<()>;
     
     /// 接收消息
-    async fn receive_message(&mut self) -> Result<Option<Frame>>;
+    async fn receive_message(&self) -> Result<Option<Frame>>;
     
     /// 检查连接健康状态
     async fn is_healthy(&self) -> bool;
@@ -175,10 +175,10 @@ pub trait ConnectionFactory: Send + Sync {
 #[async_trait]
 pub trait ServerConnectionManager: Send + Sync {
     /// 添加新连接
-    async fn add_connection(&mut self, connection: Arc<dyn ServerConnection>) -> Result<()>;
+    async fn add_connection(&self, connection: Arc<dyn ServerConnection>) -> Result<()>;
     
     /// 移除连接
-    async fn remove_connection(&mut self, connection_id: &str) -> Result<()>;
+    async fn remove_connection(&self, connection_id: &str) -> Result<()>;
     
     /// 获取连接
     async fn get_connection(&self, connection_id: &str) -> Option<Arc<dyn ServerConnection>>;
@@ -193,7 +193,7 @@ pub trait ServerConnectionManager: Send + Sync {
     async fn broadcast_message(&self, message: Frame) -> Result<usize>;
     
     /// 清理不活跃的连接
-    async fn cleanup_inactive_connections(&mut self, timeout: std::time::Duration) -> usize;
+    async fn cleanup_inactive_connections(&self, timeout: std::time::Duration) -> usize;
     
     /// 获取连接统计信息
     async fn get_connection_stats(&self) -> ServerStats;

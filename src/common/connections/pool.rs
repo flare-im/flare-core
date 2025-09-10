@@ -201,7 +201,7 @@ impl ConnectionPool {
         .with_heartbeat(5000, 2000) // 5s心跳，2s超时
         .with_reconnect(3, 500); // 3次重试，500ms间隔
         
-        let mut connection_box = ConnectionFactoryTrait::create_client_connection(&*self.factory, config).await?;
+        let connection_box = ConnectionFactoryTrait::create_client_connection(&*self.factory, config).await?;
         
         // 建立连接
         connection_box.connect().await?;

@@ -152,7 +152,7 @@ impl ConnectionManager {
         {
             let connections = self.connections.read().await;
             if let Some(conn_info) = connections.get(connection_id) {
-                let mut connection = conn_info.connection.lock().await;
+                let connection = conn_info.connection.lock().await;
                 
                 // 建立连接
                 connection.connect().await?;
@@ -183,7 +183,7 @@ impl ConnectionManager {
         {
             let connections = self.connections.read().await;
             if let Some(conn_info) = connections.get(connection_id) {
-                let mut connection = conn_info.connection.lock().await;
+                let connection = conn_info.connection.lock().await;
                 
                 // 心跳功能已移除，由外部处理
                 info!("心跳功能已移除，无需停止");
@@ -213,7 +213,7 @@ impl ConnectionManager {
         {
             let connections = self.connections.read().await;
             if let Some(conn_info) = connections.get(connection_id) {
-                let mut connection = conn_info.connection.lock().await;
+                let connection = conn_info.connection.lock().await;
                 connection.send_message(message).await?;
             } else {
                 return Err(crate::common::error::FlareError::connection_failed(
@@ -237,7 +237,7 @@ impl ConnectionManager {
         let mut connections = self.connections.write().await;
         
         if let Some(conn_info) = connections.remove(connection_id) {
-            let mut connection = conn_info.connection.lock().await;
+            let connection = conn_info.connection.lock().await;
             
             // 心跳功能已移除，由外部处理
             info!("心跳功能已移除，无需停止");
@@ -274,11 +274,12 @@ impl ConnectionManager {
     pub async fn is_connection_active(&self, connection_id: &str) -> bool {
         let connections = self.connections.read().await;
         
-        connections.get(connection_id)
-            .map(|conn_info| {
-                matches!(conn_info.state, ConnectionState::Connected | ConnectionState::Ready)
-            })
-            .unwrap_or(false)
+        if let Some(conn_info) = connections.get(connection_id) {
+            let connection = conn_info.connection.lock().await;
+            connection.is_active().await
+        } else {
+            false
+        }
     }
     
     /// 获取连接数量
@@ -366,11 +367,20 @@ impl ConnectionManager {
         
         for id in to_remove {
             if let Some(conn_info) = connections.remove(&id) {
-                let mut connection = conn_info.connection.lock().await;
+                let connection = conn_info.connection.lock().await;
                 // 心跳功能已移除，由外部处理
                 let _ = connection.disconnect().await;
                 
                 info!("清理不活跃连接: {}", id);
+                
+                // 触发连接断开事件
+                if let Some(handler) = &*self.event_handler.read().await {
+                    let handler = Arc::clone(handler);
+                    let id_clone = id.clone();
+                    tokio::spawn(async move {
+                        handler.on_disconnected(&id_clone, "连接超时").await;
+                    });
+                }
             }
         }
         

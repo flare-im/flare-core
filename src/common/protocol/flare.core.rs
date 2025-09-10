@@ -30,6 +30,12 @@ pub struct Frame {
     /// Flag indicating whether the payload is encrypted
     #[prost(bool, tag = "9")]
     pub encrypted: bool,
+    /// Metadata key-value pairs (for additional information like platform data)
+    #[prost(map = "string, bytes", tag = "10")]
+    pub metadata: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::vec::Vec<u8>,
+    >,
 }
 /// MessageType defines all possible types of messages in the protocol
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

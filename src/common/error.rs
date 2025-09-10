@@ -292,6 +292,11 @@ impl FlareError {
         FlareError::Localized(LocalizedError::new(ErrorCode::ConnectionTimeout, reason))
     }
     
+    /// 创建超时错误
+    pub fn timeout(reason: impl Into<String>) -> Self {
+        FlareError::Localized(LocalizedError::new(ErrorCode::OperationTimeout, reason))
+    }
+    
     /// 创建认证失败错误
     pub fn authentication_failed(reason: impl Into<String>) -> Self {
         FlareError::Localized(LocalizedError::new(ErrorCode::AuthenticationFailed, reason))

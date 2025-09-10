@@ -182,6 +182,9 @@ pub struct Frame {
     pub compression: Option<u8>,
     /// 加密标志
     pub encrypted: bool,
+    /// 元数据（用于传递额外信息，如平台信息）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 impl Frame {
@@ -202,6 +205,7 @@ impl Frame {
             priority: 0,
             compression: None,
             encrypted: false,
+            metadata: None,
         }
     }
 
@@ -224,6 +228,7 @@ impl Frame {
             priority,
             compression: None,
             encrypted: false,
+            metadata: None,
         }
     }
 
@@ -500,6 +505,7 @@ impl Frame {
             priority: self.priority as u32,
             compression: self.compression.map(|c| c as u32),
             encrypted: self.encrypted,
+            metadata: self.metadata.clone().unwrap_or_default(),
         }
     }
 
@@ -515,6 +521,11 @@ impl Frame {
             priority: proto_frame.priority as u8,
             compression: proto_frame.compression.map(|c| c as u8),
             encrypted: proto_frame.encrypted,
+            metadata: if proto_frame.metadata.is_empty() {
+                None
+            } else {
+                Some(proto_frame.metadata)
+            },
         }
     }
 }

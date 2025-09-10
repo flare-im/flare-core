@@ -36,6 +36,9 @@ message Frame {
   
   // Flag indicating whether the payload is encrypted
   bool encrypted = 9;
+  
+  // Metadata key-value pairs (for additional information like platform data)
+  map<string, bytes> metadata = 10;
 }
 
 // MessageType defines all possible types of messages in the protocol

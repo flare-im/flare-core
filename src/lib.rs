@@ -5,7 +5,7 @@
 //! 2. 客户端协议竞速：智能协议选择和动态切换
 
 pub mod common;
-// pub mod client;
+pub mod client;
 pub mod server;
 
 // 重新导出核心类型
@@ -19,21 +19,26 @@ pub use common::{
     },
 };
 
-pub use common::connections::quic::QuicConnection;
-pub use common::connections::websocket::WebSocketConnection;
+// 重新导出客户端相关类型
+pub use client::{
+    Client,
+    ClientConfig,
+    ProtocolSelection as ClientProtocolSelection,
+};
 
-// // 重新导出协议竞速相关类型
-// pub use client::protocol_racing::{ProtocolRacingManager, ProtocolPriority};
-
-// pub use client::{
-//     FlareClient,
-//     config::ClientConfig,
-// };
-
-// pub use server::{
-//     FlareServer,
-//     config::ServerConfig,
-// };
+// 重新导出服务端相关类型
+pub use server::{
+    Server,
+    ServerConfig,
+    ServerType,
+    service::{MessageHandler, ServerService},
+    service::EchoMessageHandler,
+    quic::QuicServer,
+    websocket::WebSocketServer,
+    ConnectionBasedManager,
+    UserBasedManager,
+    auth::{AuthManager, AuthHandler, SimpleAuthHandler, AuthStatus, AuthInfo},
+};
 
 /// 版本信息
-pub const VERSION: &str = env!("CARGO_PKG_VERSION"); 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

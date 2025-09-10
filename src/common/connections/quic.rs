@@ -181,6 +181,11 @@ impl QuicConnection {
     
     /// 启动消息接收任务
     pub async fn start_receive_task(&mut self) -> Result<()> {
+        self.start_receive_task_internal().await
+    }
+    
+    /// 内部版本的启动消息接收任务，可以在&self上调用
+    async fn start_receive_task_internal(&self) -> Result<()> {
         let id = self.id.clone();
         let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
         let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
@@ -370,7 +375,7 @@ impl QuicConnection {
     }
     
     /// 停止消息接收任务
-    async fn stop_receive_task(&mut self) -> Result<()> {
+    async fn stop_receive_task(&self) -> Result<()> {
         if let Some(task) = self.receive_task.write().await.take() {
             task.abort();
         }
@@ -503,7 +508,7 @@ impl Connection for QuicConnection {
 
 #[async_trait::async_trait]
 impl ClientConnection for QuicConnection {
-    async fn connect(&mut self) -> Result<()> {
+    async fn connect(&self) -> Result<()> {
         *self.state.write().await = ConnectionState::Connecting;
         
         // 解析服务器地址
@@ -538,7 +543,10 @@ impl ClientConnection for QuicConnection {
         *self.connection.write().await = Some(new_conn);
         
         // 启动消息接收任务
-        self.start_receive_task().await?;
+        // 注意：这里我们需要一个可变引用来调用start_receive_task
+        // 由于我们不能在&self方法中调用需要&mut self的方法，我们需要特殊处理
+        // 这里我们直接调用内部实现
+        self.start_receive_task_internal().await?;
         
         *self.state.write().await = ConnectionState::Connected;
         *self.state.write().await = ConnectionState::Ready;
@@ -559,7 +567,7 @@ impl ClientConnection for QuicConnection {
         Ok(())
     }
     
-    async fn disconnect(&mut self) -> Result<()> {
+    async fn disconnect(&self) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
         
         // 停止接收任务
@@ -588,7 +596,7 @@ impl ClientConnection for QuicConnection {
         Ok(())
     }
     
-    async fn send_message(&mut self, message: Frame) -> Result<()> {
+    async fn send_message(&self, message: Frame) -> Result<()> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
@@ -610,7 +618,7 @@ impl ClientConnection for QuicConnection {
         }
     }
     
-    async fn try_reconnect(&mut self) -> Result<()> {
+    async fn try_reconnect(&self) -> Result<()> {
         let attempts = *self.reconnect_attempts.read().await;
         if attempts >= self.config.max_reconnect_attempts {
             return Err(FlareError::connection_failed("超过最大重连次数"));
@@ -642,20 +650,18 @@ impl ClientConnection for QuicConnection {
         matches!(state, ConnectionState::Disconnected | ConnectionState::Failed)
     }
     
-
-    
     async fn get_reconnect_attempts(&self) -> u32 {
         *self.reconnect_attempts.read().await
     }
     
-    async fn reset_reconnect_attempts(&mut self) {
+    async fn reset_reconnect_attempts(&self) {
         *self.reconnect_attempts.write().await = 0;
     }
 }
 
 #[async_trait::async_trait]
 impl ServerConnection for QuicConnection {
-    async fn accept(&mut self) -> Result<()> {
+    async fn accept(&self) -> Result<()> {
         *self.state.write().await = ConnectionState::Connecting;
         
         // 服务端连接需要从外部传入，这里只是标记状态
@@ -680,7 +686,7 @@ impl ServerConnection for QuicConnection {
         Ok(())
     }
     
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
         
         // 停止接收任务
@@ -709,7 +715,7 @@ impl ServerConnection for QuicConnection {
         Ok(())
     }
     
-    async fn send_message(&mut self, message: Frame) -> Result<()> {
+    async fn send_message(&self, message: Frame) -> Result<()> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
@@ -731,7 +737,7 @@ impl ServerConnection for QuicConnection {
         }
     }
     
-    async fn receive_message(&mut self) -> Result<Option<Frame>> {
+    async fn receive_message(&self) -> Result<Option<Frame>> {
         // 检查连接状态
         let state = *self.state.read().await;
         if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
