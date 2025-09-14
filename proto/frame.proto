@@ -58,30 +58,26 @@ enum MessageType {
   DISCONNECT = 5;
   DISCONNECT_ACK = 6;
   
-  // Data transmission and acknowledgment
+  // Data transmission
   DATA = 7;
   DATA_ACK = 8;
+  MESSAGE = 9;
+  MESSAGE_ACK = 10;
+  RESEND = 11;
   
-  // Retransmission of previously sent data
-  RETRANSMIT = 9;
-  
-  // Protocol switching control messages
-  PROTOCOL_SWITCH = 10;
-  
-  // Protocol testing messages
-  PROTOCOL_TEST = 11;
-  
-  // Error reporting messages
+  // Error handling
   ERROR = 12;
-  
-  // Notification messages
   NOTIFICATION = 13;
   
+  // Authentication messages
+  AUTH_REQUEST = 14;
+  AUTH_RESPONSE = 15;
+  
   // Custom event messages (application-defined)
-  CUSTOM_EVENT = 17;
+  CUSTOM_EVENT = 16;
   
   // Custom message types (application-defined)
-  CUSTOM_MESSAGE = 18;
+  CUSTOM_MESSAGE = 17;
 }
 
 // Reliability defines the delivery guarantees for messages

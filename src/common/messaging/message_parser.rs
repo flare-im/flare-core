@@ -11,7 +11,7 @@ use crate::common::{
     connections::{
         event::ConnectionEvent,
         traits::ConnectionStats,
-        types::ConnectionConfig,
+        config::ConnectionConfig,
     },
     serialization::FrameSerializer,
 };
@@ -165,6 +165,7 @@ impl MessageParser {
     /// 1. 更新统计信息
     /// 2. 根据消息类型触发相应的连接事件
     /// 3. 自动回复心跳消息（如果配置启用）
+    /// 4. 处理认证请求和响应消息
     pub async fn handle_frame(&self, frame: Frame) {
         // 更新统计信息
         {

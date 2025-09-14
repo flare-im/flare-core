@@ -41,6 +41,10 @@ impl fmt::Display for SerializationFormat {
 /// 序列化配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializationConfig {
+    /// 序列化方式
+    pub format: SerializationFormat,
+    /// 是否启用加密
+    pub enable_encryption: bool,
     /// 是否启用压缩
     pub enable_compression: bool,
     /// 压缩级别（如果支持）
@@ -56,6 +60,8 @@ pub struct SerializationConfig {
 impl Default for SerializationConfig {
     fn default() -> Self {
         Self {
+            format: SerializationFormat::Json,
+            enable_encryption: false,
             enable_compression: false,
             compression_level: None,
             pretty_format: false,

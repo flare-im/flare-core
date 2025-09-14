@@ -178,7 +178,7 @@ impl ConnectionManager {
     }
     
     /// 断开连接
-    pub async fn disconnect(&mut self, connection_id: &str) -> Result<()> {
+    pub async fn disconnect(&mut self, connection_id: &str, reason: Option<String>) -> Result<()> {
         // 先停止心跳和断开连接
         {
             let connections = self.connections.read().await;
@@ -189,7 +189,7 @@ impl ConnectionManager {
                 info!("心跳功能已移除，无需停止");
                 
                 // 断开连接
-                connection.disconnect().await?;
+                connection.disconnect(reason).await?;
             } else {
                 return Err(crate::common::error::FlareError::connection_failed(
                     "连接不存在"
@@ -233,7 +233,7 @@ impl ConnectionManager {
     }
 
     /// 移除连接
-    pub async fn remove_connection(&mut self, connection_id: &str) -> Result<()> {
+    pub async fn remove_connection(&mut self, connection_id: &str, reason: Option<String>) -> Result<()> {
         let mut connections = self.connections.write().await;
         
         if let Some(conn_info) = connections.remove(connection_id) {
@@ -243,7 +243,7 @@ impl ConnectionManager {
             info!("心跳功能已移除，无需停止");
             
             // 断开连接
-            let _ = connection.disconnect().await;
+            let _ = connection.disconnect(reason).await;
             
             info!("连接已移除: {}", connection_id);
             Ok(())
@@ -273,10 +273,10 @@ impl ConnectionManager {
     /// 检查连接是否活跃
     pub async fn is_connection_active(&self, connection_id: &str) -> bool {
         let connections = self.connections.read().await;
-        
-        if let Some(conn_info) = connections.get(connection_id) {
-            let connection = conn_info.connection.lock().await;
-            connection.is_active().await
+        if let Some(connection) = connections.get(connection_id) {
+            // 使用state字段检查连接状态
+            let state = connection.state;
+            matches!(state, ConnectionState::Connected | ConnectionState::Ready)
         } else {
             false
         }
@@ -353,7 +353,7 @@ impl ConnectionManager {
     }
     
     /// 清理不活跃的连接
-    pub async fn cleanup_inactive_connections(&mut self, timeout: Duration) -> usize {
+    pub async fn cleanup_inactive_connections(&mut self, timeout: Duration, reason: Option<String>) -> usize {
         let mut connections = self.connections.write().await;
         let mut to_remove = Vec::new();
         
@@ -369,7 +369,7 @@ impl ConnectionManager {
             if let Some(conn_info) = connections.remove(&id) {
                 let connection = conn_info.connection.lock().await;
                 // 心跳功能已移除，由外部处理
-                let _ = connection.disconnect().await;
+                let _ = connection.disconnect(reason.clone()).await;
                 
                 info!("清理不活跃连接: {}", id);
                 

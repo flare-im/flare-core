@@ -12,7 +12,11 @@ use crate::common::{
     protocol::{Frame, MessageType, Reliability},
 };
 
-use crate::server::service::MessageHandler;
+// 定义消息处理器trait
+#[async_trait::async_trait]
+pub trait MessageHandler: Send + Sync {
+    async fn handle_message(&self, connection_id: String, message: Frame) -> Result<Option<Frame>>;
+}
 
 /// 消息处理器类型
 #[derive(Debug, Clone, PartialEq)]
@@ -142,12 +146,12 @@ impl MessageHandler for LoggingMessageHandler {
 /// 广播消息处理器
 ///
 /// 将接收到的消息广播到所有连接
-pub struct BroadcastMessageHandler<T: crate::server::manager::traits::ConnectionManager> {
+pub struct BroadcastMessageHandler<T: crate::server::manager::traits::ServerConnectionManager> {
     /// 连接管理器
     connection_manager: Arc<T>,
 }
 
-impl<T: crate::server::manager::traits::ConnectionManager> BroadcastMessageHandler<T> {
+impl<T: crate::server::manager::traits::ServerConnectionManager> BroadcastMessageHandler<T> {
     /// 创建新的广播消息处理器
     pub fn new(connection_manager: Arc<T>) -> Self {
         Self {
@@ -157,7 +161,7 @@ impl<T: crate::server::manager::traits::ConnectionManager> BroadcastMessageHandl
 }
 
 #[async_trait::async_trait]
-impl<T: crate::server::manager::traits::ConnectionManager + 'static> MessageHandler for BroadcastMessageHandler<T> {
+impl<T: crate::server::manager::traits::ServerConnectionManager + 'static> MessageHandler for BroadcastMessageHandler<T> {
     async fn handle_message(&self, connection_id: String, message: Frame) -> Result<Option<Frame>> {
         info!("广播消息 - 来自连接: {}, 消息类型: {:?}, 数据长度: {}", 
               connection_id, 

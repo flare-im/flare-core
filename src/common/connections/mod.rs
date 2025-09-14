@@ -11,10 +11,12 @@ pub mod manager;
 pub mod pool;
 pub mod websocket;
 pub mod quic;
+pub mod enums;
+pub mod config;
 
 // 重新导出常用的类型，保持对外接口稳定
 pub use traits::{Connection, ClientConnection, ServerConnection, ConnectionEvent};
-pub use types::{ConnectionConfig, ConnectionState, ConnectionType, ConnectionRole};
+pub use types::{ConnectionConfig, ConnectionState, Transport, ConnectionRole};
 pub use event::{DefConnectionEventHandler};
 pub use factory::ConnectionFactory;
 pub use builder::ConnectionBuilder;

@@ -15,12 +15,12 @@ pub mod system;
 pub use connections::{
     Connection, ClientConnection, ServerConnection, 
     ConnectionFactory, ConnectionManager,
-    ConnectionType, ConnectionRole, ConnectionState, ConnectionConfig, DefConnectionEventHandler,
+    Transport, ConnectionRole, ConnectionState, ConnectionConfig, DefConnectionEventHandler,
 };
 pub use connections::quic::QuicConnection;
 pub use connections::websocket::WebSocketConnection;
 pub use error::{Result, FlareError};
-pub use protocol::{Frame, MessageType, Reliability, ProtocolSelection, ProtobufFrame, ProtobufMessageType, ProtobufReliability};
+pub use protocol::{Frame, MessageType, Reliability};
 pub use serialization::{
     FrameSerializer, SerializationFormat, SerializationConfig,
     JsonSerializer, SerializerFactory,

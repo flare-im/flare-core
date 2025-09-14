@@ -7,13 +7,14 @@ use std::sync::Arc;
 use crate::common::{
     error::Result,
     connections::{
-        types::{ConnectionConfig, ConnectionType, ConnectionRole},
+        types::{ConnectionConfig, Transport, ConnectionRole},
         traits::{ClientConnection, ServerConnection, ConnectionFactory as ConnectionFactoryTrait, ConnectionEvent},
         quic::QuicConnection,
         websocket::WebSocketConnection,
         builder::ConnectionBuilder,
     },
 };
+use crate::Connection;
 
 /// 连接工厂
 pub struct ConnectionFactory;
@@ -35,24 +36,24 @@ impl ConnectionFactory {
             ));
         }
         
-        match config.connection_type {
-            ConnectionType::Quic => {
+        match config.transport {
+            Transport::Quic => {
                 if let Some(serializer) = custom_serializer {
                     Ok(Box::new(QuicConnection::with_serializer(config, serializer)))
                 } else {
                     Ok(Box::new(QuicConnection::new(config)))
                 }
             }
-            ConnectionType::WebSocket => {
+            Transport::WebSocket => {
                 if let Some(serializer) = custom_serializer {
                     Ok(Box::new(WebSocketConnection::with_serializer(config, serializer)))
                 } else {
                     Ok(Box::new(WebSocketConnection::new(config)))
                 }
             }
-            ConnectionType::Tcp | ConnectionType::Udp => {
+            Transport::Tcp | Transport::Udp => {
                 Err(crate::common::error::FlareError::connection_failed(
-                    format!("{:?} 协议暂未实现", config.connection_type)
+                    format!("{:?} 传输暂未实现", config.transport)
                 ))
             }
         }
@@ -69,24 +70,24 @@ impl ConnectionFactory {
             ));
         }
         
-        match config.connection_type {
-            ConnectionType::Quic => {
+        match config.transport {
+            Transport::Quic => {
                 if let Some(serializer) = custom_serializer {
                     Ok(Box::new(QuicConnection::with_serializer(config, serializer)))
                 } else {
                     Ok(Box::new(QuicConnection::new(config)))
                 }
             }
-            ConnectionType::WebSocket => {
+            Transport::WebSocket => {
                 if let Some(serializer) = custom_serializer {
                     Ok(Box::new(WebSocketConnection::with_serializer(config, serializer)))
                 } else {
                     Ok(Box::new(WebSocketConnection::new(config)))
                 }
             }
-            ConnectionType::Tcp | ConnectionType::Udp => {
+            Transport::Tcp | Transport::Udp => {
                 Err(crate::common::error::FlareError::connection_failed(
-                    format!("{:?} 协议暂未实现", config.connection_type)
+                    format!("{:?} 传输暂未实现", config.transport)
                 ))
             }
         }
@@ -103,16 +104,16 @@ impl ConnectionFactoryTrait for ConnectionFactory {
             ));
         }
         
-        match config.connection_type {
-            ConnectionType::Quic => {
+        match config.transport {
+            Transport::Quic => {
                 Ok(Box::new(QuicConnection::new(config)))
             }
-            ConnectionType::WebSocket => {
+            Transport::WebSocket => {
                 Ok(Box::new(WebSocketConnection::new(config)))
             }
-            ConnectionType::Tcp | ConnectionType::Udp => {
+            Transport::Tcp | Transport::Udp => {
                 Err(crate::common::error::FlareError::connection_failed(
-                    format!("{:?} 协议暂未实现", config.connection_type)
+                    format!("{:?} 传输暂未实现", config.transport)
                 ))
             }
         }
@@ -126,23 +127,23 @@ impl ConnectionFactoryTrait for ConnectionFactory {
             ));
         }
         
-        match config.connection_type {
-            ConnectionType::Quic => {
+        match config.transport {
+            Transport::Quic => {
                 Ok(Box::new(QuicConnection::new(config)))
             }
-            ConnectionType::WebSocket => {
+            Transport::WebSocket => {
                 Ok(Box::new(WebSocketConnection::new(config)))
             }
-            ConnectionType::Tcp | ConnectionType::Udp => {
+            Transport::Tcp | Transport::Udp => {
                 Err(crate::common::error::FlareError::connection_failed(
-                    format!("{:?} 协议暂未实现", config.connection_type)
+                    format!("{:?} 传输暂未实现", config.transport)
                 ))
             }
         }
     }
 
-    fn supported_types(&self) -> Vec<ConnectionType> {
-        vec![ConnectionType::WebSocket, ConnectionType::Quic]
+    fn supported_types(&self) -> Vec<Transport> {
+        vec![Transport::WebSocket, Transport::Quic]
     }
 
     fn supports_config(&self, config: &ConnectionConfig) -> bool {
@@ -186,7 +187,7 @@ impl RawConnectionHandler {
         connection.set_connection(ws_stream).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
@@ -218,7 +219,7 @@ impl RawConnectionHandler {
         connection.set_connection(ws_stream).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
@@ -250,7 +251,7 @@ impl RawConnectionHandler {
         connection.set_connection(ws_stream).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
@@ -270,7 +271,7 @@ impl RawConnectionHandler {
         connection.set_connection(quic_connection).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
@@ -294,7 +295,7 @@ impl RawConnectionHandler {
         connection.set_connection(quic_connection).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
@@ -318,7 +319,7 @@ impl RawConnectionHandler {
         connection.set_connection(quic_connection).await;
         
         // 启动消息接收任务
-        connection.start_receive_task().await
+        connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;

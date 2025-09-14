@@ -11,7 +11,7 @@ use tracing::{debug, info};
 use crate::common::{
     error::Result,
     connections::{
-        ClientConnection, ConnectionConfig, ConnectionState, ConnectionType,
+        ClientConnection, ConnectionConfig, ConnectionState, Transport,
         factory::ConnectionFactory,
         traits::ConnectionFactory as ConnectionFactoryTrait,
     },
@@ -122,7 +122,7 @@ impl ConnectionPool {
     }
     
     /// 获取连接（主要API）
-    pub async fn get_connection(&self, target: &str, conn_type: ConnectionType) -> Result<Arc<dyn ClientConnection>> {
+    pub async fn get_connection(&self, target: &str, conn_type: Transport) -> Result<Arc<dyn ClientConnection>> {
         let start_time = Instant::now();
         
         // 更新统计
@@ -192,14 +192,11 @@ impl ConnectionPool {
     }
     
     /// 创建新连接
-    async fn create_new_connection(&self, target: &str, conn_type: ConnectionType) -> Result<Arc<dyn ClientConnection>> {
+    async fn create_new_connection(&self, target: &str, conn_type: Transport) -> Result<Arc<dyn ClientConnection>> {
         let config = ConnectionConfig::client(
             format!("pool_conn_{}", fastrand::u32(..)),
             target.to_string(),
-        )
-        .with_type(conn_type)
-        .with_heartbeat(5000, 2000) // 5s心跳，2s超时
-        .with_reconnect(3, 500); // 3次重试，500ms间隔
+        );
         
         let connection_box = ConnectionFactoryTrait::create_client_connection(&*self.factory, config).await?;
         
@@ -252,7 +249,7 @@ impl ConnectionPool {
         }
         
         // 检查连接状态
-        match entry.connection.get_state().await {
+        match entry.connection.state() {
             ConnectionState::Connected | ConnectionState::Ready => true,
             _ => false,
         }

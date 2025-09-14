@@ -5,11 +5,9 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 
-use crate::common::{
-    error::Result,
-    protocol::Frame,
-    connections::types::{ConnectionState, ConnectionConfig},
-};
+use crate::{common::{
+    connections::types::{ClientInfo, ConnectionConfig, ConnectionState}, error::Result, protocol::Frame
+}, Platform};
 
 // 重新导出事件处理相关定义，保持对外路径稳定
 pub use super::event::{ConnectionEvent, DefConnectionEventHandler};
@@ -23,43 +21,35 @@ pub type HeartbeatResponseHandler = Box<dyn Fn(Vec<u8>) -> Result<()> + Send + S
 #[async_trait]
 pub trait Connection: Send + Sync {
     /// 获取连接ID
-    fn get_id(&self) -> &str;
+    fn id(&self) -> String;
     
     /// 获取连接状态
-    async fn get_state(&self) -> ConnectionState;
-    
-    /// 检查连接是否活跃
-    async fn is_active(&self) -> bool;
-    
+    fn state(&self) -> ConnectionState;
+
     /// 获取连接配置
-    fn get_config(&self) -> &ConnectionConfig;
+    fn config(&self) -> Arc<ConnectionConfig>;
+
+    /// 检查连接是否活跃
+    fn stats(&self) -> ConnectionStats;
     
     /// 获取最后活跃时间
-    async fn get_last_activity(&self) -> std::time::Instant;
+    fn last_activity_epoch_ms(&self) -> i64;
     
     /// 更新最后活跃时间
-    async fn update_last_activity(&self);
+    fn status(&self) -> ConnectionState;
     
-    /// 发送心跳消息
-    async fn send_heartbeat(&self) -> Result<()>;
-    
-    /// 发送心跳响应
-    async fn send_heartbeat_response(&self, data: Option<Vec<u8>>) -> Result<()>;
-    
-    /// 设置心跳响应处理器
-    async fn set_heartbeat_response_handler(&mut self, handler: Option<HeartbeatResponseHandler>);
-    
-    /// 检查是否收到心跳消息
-    async fn has_received_heartbeat(&self) -> bool;
-    
-    /// 重置心跳状态
-    async fn reset_heartbeat_state(&self);
-    
-    /// 设置事件处理器（新增方法）
-    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>);
+    /// 发送消息
+    async fn send_message(&self, message: Frame) -> Result<()>;
+
+    /// 关闭通道
+    async fn close(&self,reason: Option<String>) -> Result<()>;
+
+    /// 设置事件处理
+    async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>);
     
     /// 发送错误通知消息
     async fn send_error_notification(&self, error_code: u32, error_message: &str) -> Result<()>;
+    
 }
 
 /// 客户端连接接口
@@ -69,24 +59,26 @@ pub trait Connection: Send + Sync {
 pub trait ClientConnection: Connection + Send + Sync {
     /// 建立连接
     async fn connect(&self) -> Result<()>;
-    
+
+    /// 标记认证完成
+    async fn authenticated_complete(&self) -> Result<()>;
+
     /// 断开连接
-    async fn disconnect(&self) -> Result<()>;
-    
-    /// 发送消息
-    async fn send_message(&self, message: Frame) -> Result<()>;
-    
+    async fn disconnect(&self,reason: Option<String>) -> Result<()>;
+
     /// 尝试重连
     async fn try_reconnect(&self) -> Result<()>;
     
     /// 检查是否需要重连
-    async fn needs_reconnect(&self) -> bool;
+    fn needs_reconnect(&self) -> bool;
     
     /// 获取重连次数
-    async fn get_reconnect_attempts(&self) -> u32;
+    fn get_reconnect_attempts(&self) -> u32;
     
     /// 重置重连次数
-    async fn reset_reconnect_attempts(&self);
+    fn reset_reconnect_attempts(&self);
+
+    
 }
 
 /// 服务端连接接口
@@ -96,24 +88,24 @@ pub trait ClientConnection: Connection + Send + Sync {
 pub trait ServerConnection: Connection + Send + Sync {
     /// 接受连接（从原始连接创建服务端连接）
     async fn accept(&self) -> Result<()>;
-    
-    /// 关闭连接
-    async fn close(&self) -> Result<()>;
-    
-    /// 发送消息
-    async fn send_message(&self, message: Frame) -> Result<()>;
-    
-    /// 接收消息
-    async fn receive_message(&self) -> Result<Option<Frame>>;
-    
-    /// 检查连接健康状态
-    async fn is_healthy(&self) -> bool;
+
+    /// 认证
+    async fn authenticate(&self,success:bool,platform: Platform, user_id: String, info: Option<Vec<u8>>,reason: Option<String>) -> Result<()>;
     
     /// 获取客户端信息
-    fn get_client_info(&self) -> Option<String>;
+    fn get_client_info(&self) -> Result<ClientInfo>;
     
-    /// 获取连接统计信息
-    async fn get_connection_stats(&self) -> ConnectionStats;
+    /// 获取用户ID（如果已认证）
+    async fn get_user_id(&self) -> Option<String> {
+        // 默认实现返回None
+        None
+    }
+    
+    /// 设置用户ID
+    async fn set_user_id(&self, user_id: String) {
+        // 默认实现为空，具体实现应该在连接中重写
+        let _ = user_id;
+    }
 }
 
 /// 连接统计信息
@@ -158,58 +150,11 @@ pub trait ConnectionFactory: Send + Sync {
     async fn create_server_connection(&self, config: ConnectionConfig) -> Result<Box<dyn ServerConnection>>;
     
     /// 获取支持的类型
-    fn supported_types(&self) -> Vec<crate::common::connections::types::ConnectionType>;
-    
+    fn supported_types(&self) -> Vec<crate::common::connections::types::Transport>;
+        
     /// 检查配置是否支持
     fn supports_config(&self, config: &ConnectionConfig) -> bool;
     
     /// 克隆工厂
     fn clone_box(&self) -> Box<dyn ConnectionFactory>;
-}
-
-// 原有 ConnectionEventHandler 与 DefaultConnectionEventHandler 已迁移至 event.rs
-
-/// 服务端连接管理器
-/// 
-/// 管理服务端的所有连接，提供统一的连接管理接口
-#[async_trait]
-pub trait ServerConnectionManager: Send + Sync {
-    /// 添加新连接
-    async fn add_connection(&self, connection: Arc<dyn ServerConnection>) -> Result<()>;
-    
-    /// 移除连接
-    async fn remove_connection(&self, connection_id: &str) -> Result<()>;
-    
-    /// 获取连接
-    async fn get_connection(&self, connection_id: &str) -> Option<Arc<dyn ServerConnection>>;
-    
-    /// 获取所有连接
-    async fn get_all_connections(&self) -> Vec<Arc<dyn ServerConnection>>;
-    
-    /// 获取连接数量
-    async fn get_connection_count(&self) -> usize;
-    
-    /// 广播消息到所有连接
-    async fn broadcast_message(&self, message: Frame) -> Result<usize>;
-    
-    /// 清理不活跃的连接
-    async fn cleanup_inactive_connections(&self, timeout: std::time::Duration) -> usize;
-    
-    /// 获取连接统计信息
-    async fn get_connection_stats(&self) -> ServerStats;
-}
-
-/// 服务端统计信息
-#[derive(Debug, Clone)]
-pub struct ServerStats {
-    /// 总连接数
-    pub total_connections: usize,
-    /// 活跃连接数
-    pub active_connections: usize,
-    /// 总消息数
-    pub total_messages: u64,
-    /// 平均连接质量
-    pub average_quality: u8,
-    /// 服务器启动时间
-    pub uptime: std::time::Duration,
 }

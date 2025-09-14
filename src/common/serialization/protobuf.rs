@@ -106,13 +106,15 @@ impl ProtobufSerializer {
             MessageType::DisconnectAck => ProtobufMessageType::DisconnectAck,
             MessageType::Data => ProtobufMessageType::Data,
             MessageType::DataAck => ProtobufMessageType::DataAck,
-            MessageType::Retransmit => ProtobufMessageType::Retransmit,
-            MessageType::ProtocolSwitch => ProtobufMessageType::ProtocolSwitch,
-            MessageType::ProtocolTest => ProtobufMessageType::ProtocolTest,
+            MessageType::Message => ProtobufMessageType::Message,
+            MessageType::MessageAck => ProtobufMessageType::MessageAck,
+            MessageType::Resend => ProtobufMessageType::Resend,
             MessageType::Error => ProtobufMessageType::Error,
             MessageType::Notification => ProtobufMessageType::Notification,
             MessageType::CustomEvent => ProtobufMessageType::CustomEvent,
             MessageType::CustomMessage => ProtobufMessageType::CustomMessage,
+            MessageType::AuthRequest => ProtobufMessageType::AuthRequest,
+            MessageType::AuthResponse => ProtobufMessageType::AuthResponse,
         }
     }
     
@@ -127,13 +129,15 @@ impl ProtobufSerializer {
             Ok(ProtobufMessageType::DisconnectAck) => Ok(MessageType::DisconnectAck),
             Ok(ProtobufMessageType::Data) => Ok(MessageType::Data),
             Ok(ProtobufMessageType::DataAck) => Ok(MessageType::DataAck),
-            Ok(ProtobufMessageType::Retransmit) => Ok(MessageType::Retransmit),
-            Ok(ProtobufMessageType::ProtocolSwitch) => Ok(MessageType::ProtocolSwitch),
-            Ok(ProtobufMessageType::ProtocolTest) => Ok(MessageType::ProtocolTest),
+            Ok(ProtobufMessageType::Message) => Ok(MessageType::Message),
+            Ok(ProtobufMessageType::MessageAck) => Ok(MessageType::MessageAck),
+            Ok(ProtobufMessageType::Resend) => Ok(MessageType::Resend),
             Ok(ProtobufMessageType::Error) => Ok(MessageType::Error),
             Ok(ProtobufMessageType::Notification) => Ok(MessageType::Notification),
             Ok(ProtobufMessageType::CustomEvent) => Ok(MessageType::CustomEvent),
             Ok(ProtobufMessageType::CustomMessage) => Ok(MessageType::CustomMessage),
+            Ok(ProtobufMessageType::AuthRequest) => Ok(MessageType::AuthRequest),
+            Ok(ProtobufMessageType::AuthResponse) => Ok(MessageType::AuthResponse),
             Ok(ProtobufMessageType::Unknown) | Err(_) => Err(FlareError::deserialization_failed(
                 "无效的消息类型".to_string()
             )),

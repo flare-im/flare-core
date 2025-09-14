@@ -8,10 +8,14 @@
 
 ```
 manager/
-├── mod.rs              # 模块入口和重新导出
-├── traits.rs           # 连接管理器接口定义
-├── connection_based.rs # 基于连接的管理器实现
-└── user_based.rs       # 基于用户的管理器实现
+├── mod.rs                    # 模块入口和重新导出
+├── traits.rs                 # 连接管理器接口定义
+├── connection_based.rs       # 基于连接的管理器实现
+├── user_based.rs             # 基于用户的管理器实现
+├── enhanced_connection_manager.rs # 增强的连接管理器实现
+├── user_link_manager.rs      # 用户链接管理器实现
+├── heartbeat_manager.rs      # 心跳管理器实现
+└── message_handler.rs        # 消息处理器实现
 ```
 
 ## 核心接口
@@ -55,6 +59,23 @@ pub trait ConnectionManager: Send + Sync {
     
     /// 检查是否需要清理
     async fn should_cleanup(&self) -> bool;
+    
+    /// 注册到心跳管理器
+    async fn register_heartbeat_manager(&self, heartbeat_manager: Arc<HeartbeatManager<dyn ServerConnection>>);
+    
+    /// 根据用户ID获取连接（可选方法）
+    async fn get_connections_by_user_id(&self, _user_id: &str) -> Vec<Arc<dyn ServerConnection>> {
+        // 默认实现返回空向量
+        Vec::new()
+    }
+    
+    /// 移除用户的所有连接（可选方法）
+    async fn remove_user_connections(&self, _user_id: &str) -> Result<usize> {
+        // 默认实现返回错误
+        Err(crate::common::error::FlareError::general_error(
+            "此连接管理器不支持按用户移除连接".to_string()
+        ))
+    }
 }
 ```
 
@@ -95,6 +116,43 @@ use flare_core::server::UserBasedManager;
 let manager = UserBasedManager::new();
 ```
 
+### 3. EnhancedConnectionManager (增强的连接管理器)
+
+[EnhancedConnectionManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/enhanced_connection_manager.rs#L46-L56) 提供了增强功能的连接管理器，包括连接关闭通知等。
+
+#### 特点：
+- 在移除连接时会通知客户端关闭
+- 提供更完善的连接管理功能
+- 集成心跳管理器
+
+#### 使用示例：
+
+```rust
+use flare_core::server::EnhancedConnectionManager;
+
+let manager = EnhancedConnectionManager::new();
+```
+
+### 4. UserLinkManager (用户链接管理器)
+
+[UserLinkManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/user_link_manager.rs#L111-L126) 提供用户与连接的映射管理，处理认证超时、用户连接绑定等功能。
+
+#### 特点：
+- 管理用户和连接ID的对照关系
+- 处理连接的验证超时
+- 支持平台信息管理
+- 可以将链接和用户ID绑定
+
+#### 使用示例：
+
+```rust
+use flare_core::server::{UserLinkManager, ConnectionBasedManager};
+use std::sync::Arc;
+
+let base_manager = Arc::new(ConnectionBasedManager::new());
+let manager = UserLinkManager::new(base_manager);
+```
+
 ## 与 common 连接的集成
 
 连接管理器使用 common 模块中的连接抽象：
@@ -130,4 +188,6 @@ pub struct ManagerStats {
 
 1. **简单场景**: 使用 [ConnectionBasedManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/connection_based.rs#L47-L56)
 2. **用户维度管理**: 使用 [UserBasedManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/user_based.rs#L65-L77)
-3. **自定义需求**: 实现 [ConnectionManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/traits.rs#L16-L42) trait
+3. **需要连接关闭通知**: 使用 [EnhancedConnectionManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/enhanced_connection_manager.rs#L46-L56)
+4. **复杂用户链接管理**: 使用 [UserLinkManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/user_link_manager.rs#L111-L126)
+5. **自定义需求**: 实现 [ConnectionManager](file:///Users/hg/workspace/rust/flare-core/src/server/manager/traits.rs#L16-L42) trait

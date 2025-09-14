@@ -3,7 +3,7 @@ name = "flare-core"
 version = "0.1.0"
 edition = "2021"
 description = "Flare Core - 高性能、可靠的即时通讯长连接工具包"
-keywords = ["instant-messaging", "long-connection", "reliable", "websocket", "quic", "tls"]
+keywords = [ "websocket", "quic"]
 authors = ["Flare Team"]
 license = "MIT"
 repository = "https://github.com/flare-team/flare-core"
@@ -15,6 +15,7 @@ readme = "README.md"
 name = "test_websocket_client"
 path = "test_websocket_client.rs"
 
+# Common examples
 [[example]]
 name = "quic_client_example"
 path = "examples/common/quic_client_example.rs"
@@ -31,6 +32,80 @@ path = "examples/common/websocket_client_example.rs"
 name = "websocket_server_example"
 path = "examples/common/websocket_server_example.rs"
 
+# Client examples
+[[example]]
+name = "quic_client"
+path = "examples/client/quic_client.rs"
+
+[[example]]
+name = "websocket_client"
+path = "examples/client/websocket_client.rs"
+
+[[example]]
+name = "protocol_race_client"
+path = "examples/client/protocol_race_client.rs"
+
+[[example]]
+name = "enhanced_manager_client"
+path = "examples/client/enhanced_manager_client.rs"
+
+[[example]]
+name = "user_link_manager_client"
+path = "examples/client/user_link_manager_client.rs"
+
+# Server examples
+[[example]]
+name = "quic_server"
+path = "examples/server/quic_server.rs"
+
+[[example]]
+name = "websocket_server"
+path = "examples/server/websocket_server.rs"
+
+[[example]]
+name = "dual_protocol_server"
+path = "examples/server/dual_protocol_server.rs"
+
+[[example]]
+name = "enhanced_manager_server"
+path = "examples/server/enhanced_manager_server.rs"
+
+[[example]]
+name = "user_link_manager_server"
+path = "examples/server/user_link_manager_server.rs"
+
+[[example]]
+name = "user_connection_manager_example"
+path = "examples/server/user_connection_manager_example"
+
+[[example]]
+name = "server_connection_event_example"
+path = "examples/server/server_connection_event_example.rs"
+
+[[example]]
+name = "auth_example"
+path = "examples/server/auth_example.rs"
+
+[[example]]
+name = "auth_server_example"
+path = "examples/server/auth_server_example.rs"
+
+[[example]]
+name = "client_auth_example"
+path = "examples/client/auth_example.rs"
+
+[[example]]
+name = "auth_vs_connect"
+path = "examples/auth_vs_connect.rs"
+
+[[example]]
+name = "connect_with_platform"
+path = "examples/connect_with_platform.rs"
+
+[[example]]
+name = "connection_auth_analysis"
+path = "examples/connection_auth_analysis.md"
+
 [dependencies]
 # 异步运行时（核心功能）
 tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal"] }
@@ -45,7 +120,7 @@ prost-types = "0.13.0"
 
 # 网络相关（默认可用）
 quinn = "0.11.8"
-tokio-tungstenite = { version = "0.27.0", features = ["native-tls"] }
+tokio-tungstenite = "0.27.0"
 
 # TLS（与网络功能配合）
 rustls = { version = "0.23.31", features = ["ring"] }
@@ -76,6 +151,9 @@ flate2 = "1.0.28"
 
 # 随机数生成（测试用）
 fastrand = "2.0"
+
+# UUID生成
+uuid = { version = "1.0", features = ["v4"] }
 
 # 流处理（WebSocket 需要）
 futures-util = "0.3.30"

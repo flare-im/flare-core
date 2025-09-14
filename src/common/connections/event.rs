@@ -54,13 +54,6 @@ pub trait ConnectionEvent: Send + Sync {
     
     /// 统计信息更新
     async fn on_statistics_updated(&self, connection_id: &str, stats: &ConnectionStats);
-    
-    /// 请求发送消息（用于自动心跳响应等场景）
-    async fn on_send_message_request(&self, connection_id: &str, message: Frame) {
-        // 默认实现为空，具体的连接实现应该重写此方法来处理发送请求
-        let _ = connection_id;
-        let _ = message;
-    }
 }
 
 /// 默认连接事件处理器
@@ -123,6 +116,7 @@ impl ConnectionEvent for DefConnectionEventHandler {
         tracing::info!("统计信息更新: {} - 收到: {} - 发送: {} - 质量: {}", 
                      connection_id, stats.messages_received, stats.messages_sent, stats.quality_score);
     }
+
 }
 
 impl Default for DefConnectionEventHandler {

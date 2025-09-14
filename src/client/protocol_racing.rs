@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use crate::common::{
     error::Result,
     connections::{
-        types::{ConnectionConfig, ConnectionType},
+        types::{ConnectionConfig, Transport},
         traits::{ClientConnection, ConnectionFactory as ConnectionFactoryTrait},
         factory::ConnectionFactory,
     },
@@ -18,8 +18,8 @@ use crate::common::{
 pub struct RacingResult {
     /// 获胜的连接
     pub connection: Box<dyn ClientConnection>,
-    /// 获胜的协议类型
-    pub protocol_type: ConnectionType,
+    /// 获胜的传输类型
+    pub protocol_type: Transport,
     /// 连接建立耗时（毫秒）
     pub connect_time_ms: u64,
 }
@@ -63,8 +63,8 @@ impl ProtocolRacer {
     pub async fn race(
         &self,
         base_config: ConnectionConfig,
-        protocol_addresses: std::collections::HashMap<ConnectionType, String>,
-        protocols: Vec<ConnectionType>,
+        protocol_addresses: std::collections::HashMap<Transport, String>,
+        protocols: Vec<Transport>,
     ) -> Result<RacingResult> {
         info!("开始协议竞速，协议数量: {}", protocols.len());
         
@@ -74,7 +74,7 @@ impl ProtocolRacer {
         for protocol in &protocols {
             if let Some(address) = protocol_addresses.get(protocol) {
                 let mut config = base_config.clone();
-                config.connection_type = *protocol;
+                config.transport = *protocol;
                 config.remote_addr = address.clone();
                 
                 protocol_configs.push((config, *protocol));
@@ -137,7 +137,7 @@ impl ProtocolRacer {
                     match task_result {
                         Ok(Ok((connection, protocol_type, connect_time))) => {
                             // 如果是QUIC协议，优先选择
-                            if protocol_type == ConnectionType::Quic {
+                            if protocol_type == Transport::Quic {
                                 info!("QUIC协议获胜，优先选择");
                                 return Ok(RacingResult {
                                     connection,
@@ -191,10 +191,10 @@ impl ProtocolRacer {
     pub async fn race_auto(
         &self, 
         base_config: ConnectionConfig,
-        protocol_addresses: std::collections::HashMap<ConnectionType, String>
+        protocol_addresses: std::collections::HashMap<Transport, String>
     ) -> Result<RacingResult> {
         // 优先级：QUIC > WebSocket
-        let protocols = vec![ConnectionType::Quic, ConnectionType::WebSocket];
+        let protocols = vec![Transport::Quic, Transport::WebSocket];
         self.race(base_config, protocol_addresses, protocols).await
     }
 }

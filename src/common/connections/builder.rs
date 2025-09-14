@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use crate::common::{
-    connections::{ConnectionConfig, ConnectionType},
+    connections::{ConnectionConfig, Transport},
     serialization::{FrameSerializer, SerializationFormat, SerializationConfig},
 };
 
@@ -44,9 +44,10 @@ impl ConnectionBuilder {
         }
     }
     
-    /// 设置连接类型
-    pub fn with_type(mut self, connection_type: ConnectionType) -> Self {
-        self.config.connection_type = connection_type;
+    /// 设置传输类型
+    pub fn with_transport(self, _transport: Transport) -> Self {
+        // 这里应该设置配置中的协议特定配置
+        // 暂时简化处理
         self
     }
     
@@ -70,7 +71,10 @@ impl ConnectionBuilder {
     
     /// 启用TLS
     pub fn with_tls(mut self) -> Self {
-        self.config.enable_tls = true;
+        // TLS配置应该在客户端特定配置中设置
+        if let Some(client_config) = &mut self.config.client_config {
+            client_config.enable_tls = true;
+        }
         self
     }
     
@@ -82,9 +86,12 @@ impl ConnectionBuilder {
     
     /// 启用自动重连
     pub fn with_auto_reconnect(mut self, max_attempts: u32, delay_ms: u64) -> Self {
-        self.config.auto_reconnect = true;
-        self.config.max_reconnect_attempts = max_attempts;
-        self.config.reconnect_delay_ms = delay_ms;
+        // 自动重连配置应该在客户端特定配置中设置
+        if let Some(client_config) = &mut self.config.client_config {
+            client_config.auto_reconnect = true;
+            client_config.max_reconnect_attempts = max_attempts;
+            client_config.reconnect_delay_ms = delay_ms;
+        }
         self
     }
     
@@ -92,7 +99,10 @@ impl ConnectionBuilder {
     
     /// 使用序列化格式（通过工厂创建）
     pub fn with_serialization_format(mut self, format: SerializationFormat) -> Self {
-        self.config.serialization_format = Some(format);
+        self.config.serialization_config = Some(SerializationConfig {
+            format,
+            ..Default::default()
+        });
         self.custom_serializer = None; // 清除自定义序列化器
         self
     }
@@ -106,24 +116,31 @@ impl ConnectionBuilder {
     
     /// 使用JSON序列化
     pub fn with_json_serialization(mut self) -> Self {
-        self.config.serialization_format = Some(SerializationFormat::Json);
-        self.config.serialization_config = Some(SerializationConfig::default());
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Json,
+            ..Default::default()
+        });
         self.custom_serializer = None; // 清除自定义序列化器
         self
     }
     
     /// 使用美化JSON序列化
     pub fn with_pretty_json_serialization(mut self) -> Self {
-        self.config.serialization_format = Some(SerializationFormat::Json);
-        self.config.serialization_config = Some(SerializationConfig::default().with_pretty_format());
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Json,
+            pretty_format: true,
+            ..Default::default()
+        });
         self.custom_serializer = None; // 清除自定义序列化器
         self
     }
     
     /// 使用高性能序列化（Bincode）
     pub fn with_high_performance_serialization(mut self) -> Self {
-        self.config.serialization_format = Some(SerializationFormat::Bincode);
-        self.config.serialization_config = Some(SerializationConfig::default());
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Bincode,
+            ..Default::default()
+        });
         self.custom_serializer = None; // 清除自定义序列化器
         self
     }
@@ -134,7 +151,6 @@ impl ConnectionBuilder {
     pub fn with_serializer(mut self, serializer: Arc<Box<dyn FrameSerializer>>) -> Self {
         self.custom_serializer = Some(serializer);
         // 清除基于配置的序列化设置
-        self.config.serialization_format = None;
         self.config.serialization_config = None;
         self
     }
@@ -143,7 +159,6 @@ impl ConnectionBuilder {
     pub fn with_custom_serializer<T: FrameSerializer + 'static>(mut self, serializer: T) -> Self {
         self.custom_serializer = Some(Arc::new(Box::new(serializer)));
         // 清除基于配置的序列化设置
-        self.config.serialization_format = None;
         self.config.serialization_config = None;
         self
     }
@@ -156,14 +171,14 @@ impl ConnectionBuilder {
         self.config.max_message_size = 512 * 1024; // 512KB
         self.config.heartbeat_interval_ms = 5000; // 5秒
         self.config.heartbeat_timeout_ms = 2000; // 2秒
-        self.config.connection_type = ConnectionType::Quic; // QUIC更适合低延迟
+        self.config.transport = Transport::Quic; // QUIC更适合低延迟
         
         // 使用紧凑JSON序列化，带严格大小限制
-        self.config.serialization_format = Some(SerializationFormat::Json);
-        self.config.serialization_config = Some(
-            SerializationConfig::default()
-                .with_max_size(32 * 1024) // 32KB限制
-        );
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Json,
+            max_message_size: Some(32 * 1024), // 32KB限制
+            ..Default::default()
+        });
         self.custom_serializer = None;
         self
     }
@@ -173,25 +188,27 @@ impl ConnectionBuilder {
         self.config.buffer_size = 1024 * 1024; // 1MB
         self.config.max_message_size = 64 * 1024 * 1024; // 64MB
         self.config.heartbeat_interval_ms = 30000; // 30秒
-        self.config.connection_type = ConnectionType::WebSocket; // WebSocket更适合大数据传输
+        self.config.transport = Transport::WebSocket; // WebSocket更适合大数据传输
         
         // 使用高性能序列化
-        self.config.serialization_format = Some(SerializationFormat::Bincode);
-        self.config.serialization_config = Some(SerializationConfig::default());
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Bincode,
+            ..Default::default()
+        });
         self.custom_serializer = None;
         self
     }
     
     /// 调试友好配置
     pub fn debug_friendly(mut self) -> Self {
-        self.config.connection_type = ConnectionType::WebSocket; // 便于抓包分析
+        self.config.transport = Transport::WebSocket; // 便于抓包分析
         
         // 使用美化JSON，便于调试
-        self.config.serialization_format = Some(SerializationFormat::Json);
-        self.config.serialization_config = Some(
-            SerializationConfig::default()
-                .with_pretty_format()
-        );
+        self.config.serialization_config = Some(SerializationConfig {
+            format: SerializationFormat::Json,
+            pretty_format: true,
+            ..Default::default()
+        });
         self.custom_serializer = None;
         self
     }
@@ -226,7 +243,11 @@ impl ConnectionBuilder {
         if let Some(serializer) = &self.custom_serializer {
             format!("Custom({})", serializer.name())
         } else {
-            let format = self.config.get_serialization_format();
+            let format = if let Some(config) = &self.config.serialization_config {
+                config.format
+            } else {
+                SerializationFormat::Json // 默认值
+            };
             let config = self.config.get_serialization_config();
             if config.pretty_format {
                 format!("{}(Pretty)", format)

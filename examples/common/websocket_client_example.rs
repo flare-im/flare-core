@@ -107,10 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("启动WebSocket客户端示例");
     
-    // 创建WebSocket客户端配置 (连接到8083端口)
+    // 创建WebSocket客户端配置
     let config = ConnectionConfig::client(
         "websocket_client_example".to_string(),
-        "ws://127.0.0.1:8083".to_string()  // WebSocket服务端地址
+        "ws://127.0.0.1:8080".to_string()  // WebSocket服务端地址
     ).with_type(ConnectionType::WebSocket)
      .with_websocket_config(WebSocketConfig {
          subprotocols: vec!["binary".to_string()],

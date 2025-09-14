@@ -11,6 +11,7 @@ use tracing::{info, warn, debug};
 use crate::common::{
     error::Result,
     connections::traits::ServerConnection,
+    connections::enums::Platform, // 使用统一的Platform类型
 };
 
 /// 认证状态
@@ -26,52 +27,7 @@ pub enum AuthStatus {
     Timeout,
 }
 
-/// 平台类型
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Platform {
-    /// iOS平台
-    IOS,
-    /// Android平台
-    Android,
-    /// Web平台
-    Web,
-    /// Windows桌面
-    Windows,
-    /// macOS桌面
-    MacOS,
-    /// Linux桌面
-    Linux,
-    /// 其他平台
-    Other(String),
-}
-
-impl Platform {
-    /// 从字符串创建平台类型
-    pub fn from_str(platform: &str) -> Self {
-        match platform.to_lowercase().as_str() {
-            "ios" => Platform::IOS,
-            "android" => Platform::Android,
-            "web" => Platform::Web,
-            "windows" => Platform::Windows,
-            "macos" => Platform::MacOS,
-            "linux" => Platform::Linux,
-            _ => Platform::Other(platform.to_string()),
-        }
-    }
-    
-    /// 转换为字符串
-    pub fn as_str(&self) -> &str {
-        match self {
-            Platform::IOS => "ios",
-            Platform::Android => "android",
-            Platform::Web => "web",
-            Platform::Windows => "windows",
-            Platform::MacOS => "macos",
-            Platform::Linux => "linux",
-            Platform::Other(s) => s.as_str(),
-        }
-    }
-}
+// 移除重复的Platform定义，使用crate::common::connections::enums::Platform
 
 /// 认证信息
 #[derive(Debug, Clone)]
@@ -203,7 +159,7 @@ impl AuthManager {
 
     /// 添加待认证连接
     pub async fn add_pending_connection(&self, connection: Arc<dyn ServerConnection>) {
-        let connection_id = connection.get_id().to_string();
+        let connection_id = connection.id().to_string(); // 修复：使用id()而不是get_id()
         let auth_info = AuthInfo {
             connection_id: connection_id.clone(),
             status: AuthStatus::Pending,
@@ -217,7 +173,7 @@ impl AuthManager {
 
         let mut pending = self.pending_connections.write().await;
         pending.insert(connection_id, auth_info);
-        debug!("连接已添加到待认证列表: {}", connection.get_id());
+        debug!("连接已添加到待认证列表: {}", connection.id()); // 修复：使用id()而不是get_id()
     }
     
     /// 设置连接的平台信息

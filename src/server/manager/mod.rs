@@ -5,17 +5,17 @@
 //! # 模块结构
 //!
 //! - [traits](traits/index.html): 连接管理器接口定义
-//! - [connection_based](connection_based/index.html): 基于连接的管理器实现
-//! - [user_based](user_based/index.html): 基于用户的管理器实现
-//! - [heartbeat_manager](heartbeat_manager/index.html): 心跳管理器实现
+//! - [connection_manager](connection_manager/index.html): 简单连接管理器实现
+//! - [user_connection_manager](user_connection_manager/index.html): 用户连接管理器实现
 //! - [message_handler](message_handler/index.html): 消息处理器实现
 
 pub mod traits;
-pub mod connection_based;
-pub mod user_based;
-pub mod heartbeat_manager;
+pub mod connection_manager;
+pub mod user_connection_manager;
 pub mod message_handler;
 
-pub use connection_based::ConnectionBasedManager;
-pub use user_based::UserBasedManager;
-pub use heartbeat_manager::HeartbeatManager;
+// 重新导出常用的类型，方便外部使用
+pub use connection_manager::ConnectionManager;
+pub use connection_manager::HeartbeatConfig;
+pub use user_connection_manager::UserConnectionManager;
+pub use crate::common::connections::enums::Platform;

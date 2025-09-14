@@ -17,6 +17,9 @@ mod flare {
 // 重新导出Protobuf生成的结构和枚举
 pub use flare::core::{Frame as ProtobufFrame, MessageType as ProtobufMessageType, Reliability as ProtobufReliability};
 
+use crate::Platform;
+
+
 /// 消息类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageType {
@@ -31,19 +34,22 @@ pub enum MessageType {
     // 数据传输
     Data = 7,
     DataAck = 8,
-    Retransmit = 9,
-    
-    // 协议控制
-    ProtocolSwitch = 10,
-    ProtocolTest = 11,
+    Message = 9,
+    MessageAck = 10,
+    Resend = 11,
     
     // 错误处理
     Error = 12,
     Notification = 13,
     
+    // 认证消息
+    AuthRequest = 14,
+    AuthResponse = 15,
+    
+    
     // 扩展类型
-    CustomEvent = 17,
-    CustomMessage = 18,
+    CustomEvent = 16,
+    CustomMessage = 17,
 }
 
 impl MessageType {
@@ -57,13 +63,15 @@ impl MessageType {
             6 => Some(MessageType::DisconnectAck),
             7 => Some(MessageType::Data),
             8 => Some(MessageType::DataAck),
-            9 => Some(MessageType::Retransmit),
-            10 => Some(MessageType::ProtocolSwitch),
-            11 => Some(MessageType::ProtocolTest),
+            9 => Some(MessageType::Message),
+            10 => Some(MessageType::MessageAck),
+            11 => Some(MessageType::Resend),
             12 => Some(MessageType::Error),
             13 => Some(MessageType::Notification),
-            17 => Some(MessageType::CustomEvent),
-            18 => Some(MessageType::CustomMessage),
+            14 => Some(MessageType::AuthRequest),
+            15 => Some(MessageType::AuthResponse),
+            16 => Some(MessageType::CustomEvent),
+            17 => Some(MessageType::CustomMessage),
             _ => None,
         }
     }
@@ -78,13 +86,15 @@ impl MessageType {
             MessageType::DisconnectAck => 6,
             MessageType::Data => 7,
             MessageType::DataAck => 8,
-            MessageType::Retransmit => 9,
-            MessageType::ProtocolSwitch => 10,
-            MessageType::ProtocolTest => 11,
+            MessageType::Message => 9,
+            MessageType::MessageAck => 10,
+            MessageType::Resend => 11,
             MessageType::Error => 12,
             MessageType::Notification => 13,
-            MessageType::CustomEvent => 17,
-            MessageType::CustomMessage => 18,
+            MessageType::AuthRequest => 14,
+            MessageType::AuthResponse => 15,
+            MessageType::CustomEvent => 16,
+            MessageType::CustomMessage => 17,
         }
     }
 
@@ -96,12 +106,15 @@ impl MessageType {
         matches!(self, 
             MessageType::Connect | MessageType::ConnectAck |
             MessageType::Disconnect | MessageType::DisconnectAck |
-            MessageType::ProtocolSwitch | MessageType::ProtocolTest
+            MessageType::AuthRequest | MessageType::AuthResponse
         )
     }
 
     pub fn is_data(&self) -> bool {
-        matches!(self, MessageType::Data | MessageType::DataAck | MessageType::Retransmit)
+        matches!(self, MessageType::Data | MessageType::DataAck | MessageType::Resend)
+    }
+    pub fn is_message(&self) -> bool {
+        matches!(self, MessageType::Message | MessageType::MessageAck)
     }
 }
 
@@ -116,11 +129,13 @@ impl fmt::Display for MessageType {
             MessageType::DisconnectAck => write!(f, "DisconnectAck"),
             MessageType::Data => write!(f, "Data"),
             MessageType::DataAck => write!(f, "DataAck"),
-            MessageType::Retransmit => write!(f, "Retransmit"),
-            MessageType::ProtocolSwitch => write!(f, "ProtocolSwitch"),
-            MessageType::ProtocolTest => write!(f, "ProtocolTest"),
+            MessageType::Message => write!(f, "Message"),
+            MessageType::MessageAck => write!(f, "MessageAck"),
+            MessageType::Resend => write!(f, "Resend"),
             MessageType::Error => write!(f, "Error"),
             MessageType::Notification => write!(f, "Notification"),
+            MessageType::AuthRequest => write!(f, "AuthRequest"),
+            MessageType::AuthResponse => write!(f, "AuthResponse"),
             MessageType::CustomEvent => write!(f, "CustomEvent"),
             MessageType::CustomMessage => write!(f, "CustomMessage"),
         }
@@ -243,12 +258,43 @@ impl Frame {
     }
 
     /// 创建连接帧
-    pub fn connect(client_id: &str) -> Self {
+    pub fn connect(client_id: &str, platform: Platform) -> Self {
         let payload = serde_json::to_vec(&serde_json::json!({
             "client_id": client_id,
-            "protocol": "auto"
+            "protocol": "auto",
+            "platform": platform.to_string(),
+            "version": env!("CARGO_PKG_VERSION"),
         })).unwrap_or_default();
-        Self::new(MessageType::Connect, 0, Reliability::ExactlyOnce, payload)
+        
+       Self::new(MessageType::Connect, 0, Reliability::ExactlyOnce, payload)
+    }
+    
+    /// 创建链接响应帧
+    pub fn connect_ack(session_id: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session_id": session_id
+        })).unwrap_or_default();
+        Self::new(MessageType::ConnectAck, 0, Reliability::ExactlyOnce, payload)
+    }
+
+    /// 创建认证请求帧
+    pub fn auth_request(user_id: &str, platform: &str, token: &str) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "user_id": user_id,
+            "platform": platform,
+            "token": token
+        })).unwrap_or_default();
+        Self::new(MessageType::AuthRequest, 0, Reliability::ExactlyOnce, payload)
+    }
+
+    /// 创建认证响应帧
+    pub fn auth_response(success: bool, user_info: Option<Vec<u8>>, error_message: Option<String>) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "success": success,
+            "user_info": user_info,
+            "error_message": error_message
+        })).unwrap_or_default();
+        Self::new(MessageType::AuthResponse, 0, Reliability::ExactlyOnce, payload)
     }
 
     /// 创建数据帧
@@ -256,6 +302,41 @@ impl Frame {
         Self::new(MessageType::Data, message_id, Reliability::AtLeastOnce, data)
     }
 
+    /// 创建数据确认帧
+    pub fn data_ack(request_id: u64, success: bool, error_code: Option<u32>, error_message: Option<String>) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "success": success,
+            "error_code": error_code,
+            "error_message": error_message
+        })).unwrap_or_default();
+        Self::new(MessageType::DataAck, request_id, Reliability::AtLeastOnce, payload)
+    }
+
+    /// 创建消息发送帧
+    pub fn message_send(message_id: u64, data: Vec<u8>) -> Self {
+        Self::new(MessageType::Message, message_id, Reliability::AtLeastOnce, data)
+    }
+    
+    /// 创建消息响应帧
+    pub fn message_ack(request_id: u64, success: bool, error_code: Option<u32>, error_message: Option<String>) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "success": success,
+            "error_code": error_code,
+            "error_message": error_message
+        })).unwrap_or_default();
+        Self::new(MessageType::MessageAck, request_id, Reliability::AtLeastOnce, payload)
+    }
+    
+    /// 创建数据响应帧
+    pub fn data_response(request_id: u64, success: bool, error_code: Option<u32>, error_message: Option<String>) -> Self {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "success": success,
+            "error_code": error_code,
+            "error_message": error_message
+        })).unwrap_or_default();
+        Self::new(MessageType::DataAck, request_id, Reliability::AtLeastOnce, payload)
+    }
+    
     /// 创建错误帧
     pub fn error(code: u32, message: &str) -> Self {
         let payload = serde_json::to_vec(&serde_json::json!({
@@ -345,6 +426,31 @@ impl Frame {
         self.message_type == MessageType::Error
     }
 
+    /// 检查是否为认证请求消息
+    pub fn is_auth_request(&self) -> bool {
+        self.message_type == MessageType::AuthRequest
+    }
+
+    /// 检查是否为认证响应消息
+    pub fn is_auth_response(&self) -> bool {
+        self.message_type == MessageType::AuthResponse
+    }
+
+    /// 检查是否为消息发送
+    pub fn is_message_send(&self) -> bool {
+        self.message_type == MessageType::Message
+    }
+    
+    /// 检查是否为消息响应
+    pub fn is_message_response(&self) -> bool {
+        self.message_type == MessageType::MessageAck
+    }
+    
+    /// 检查是否为数据响应
+    pub fn is_data_response(&self) -> bool {
+        self.message_type == MessageType::DataAck
+    }
+    
     /// 获取通知文本
     pub fn notification_text(&self) -> Option<String> {
         if self.message_type == MessageType::Notification {
@@ -361,6 +467,60 @@ impl Frame {
             let code = data["code"].as_u64()? as u32;
             let message = data["message"].as_str()?.to_string();
             Some((code, message))
+        } else {
+            None
+        }
+    }
+
+    /// 获取认证请求数据
+    pub fn get_auth_request_data(&self) -> Option<(String, String, String)> {
+        if self.message_type == MessageType::AuthRequest {
+            let data: serde_json::Value = serde_json::from_slice(&self.payload).ok()?;
+            let user_id = data["user_id"].as_str()?.to_string();
+            let platform = data["platform"].as_str()?.to_string();
+            let token = data["token"].as_str()?.to_string();
+            Some((user_id, platform, token))
+        } else {
+            None
+        }
+    }
+
+    /// 获取认证响应数据
+    pub fn get_auth_response_data(&self) -> Option<(bool, Option<Vec<u8>>, Option<String>)> {
+        if self.message_type == MessageType::AuthResponse {
+            let data: serde_json::Value = serde_json::from_slice(&self.payload).ok()?;
+            let success = data["success"].as_bool()?;
+            let user_info = data["user_info"].as_array().map(|arr| {
+                arr.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect::<Vec<u8>>()
+            });
+            let error_message = data["error_message"].as_str().map(|s| s.to_string());
+            Some((success, user_info, error_message))
+        } else {
+            None
+        }
+    }
+
+    /// 获取数据确认响应数据
+    pub fn get_data_ack_data(&self) -> Option<(bool, Option<u32>, Option<String>)> {
+        if self.message_type == MessageType::DataAck {
+            let data: serde_json::Value = serde_json::from_slice(&self.payload).ok()?;
+            let success = data["success"].as_bool()?;
+            let error_code = data["error_code"].as_u64().map(|v| v as u32);
+            let error_message = data["error_message"].as_str().map(|s| s.to_string());
+            Some((success, error_code, error_message))
+        } else {
+            None
+        }
+    }
+
+    /// 获取消息确认响应数据
+    pub fn get_message_ack_data(&self) -> Option<(bool, Option<u32>, Option<String>)> {
+        if self.message_type == MessageType::MessageAck {
+            let data: serde_json::Value = serde_json::from_slice(&self.payload).ok()?;
+            let success = data["success"].as_bool()?;
+            let error_code = data["error_code"].as_u64().map(|v| v as u32);
+            let error_message = data["error_message"].as_str().map(|s| s.to_string());
+            Some((success, error_code, error_message))
         } else {
             None
         }
@@ -404,7 +564,7 @@ impl Frame {
     }
 
     /// 创建断开连接消息
-    pub fn disconnect(reason: &str) -> Self {
+    pub fn disconnect(reason: String) -> Self {
         let payload = serde_json::to_vec(&serde_json::json!({
             "reason": reason
         })).unwrap_or_default();

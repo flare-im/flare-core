@@ -52,23 +52,22 @@ pub enum MessageType {
     /// Connection termination and acknowledgment
     Disconnect = 5,
     DisconnectAck = 6,
-    /// Data transmission and acknowledgment
+    /// Data transmission
     Data = 7,
     DataAck = 8,
-    /// Retransmission of previously sent data
-    Retransmit = 9,
-    /// Protocol switching control messages
-    ProtocolSwitch = 10,
-    /// Protocol testing messages
-    ProtocolTest = 11,
-    /// Error reporting messages
+    Message = 9,
+    MessageAck = 10,
+    Resend = 11,
+    /// Error handling
     Error = 12,
-    /// Notification messages
     Notification = 13,
+    /// Authentication messages
+    AuthRequest = 14,
+    AuthResponse = 15,
     /// Custom event messages (application-defined)
-    CustomEvent = 17,
+    CustomEvent = 16,
     /// Custom message types (application-defined)
-    CustomMessage = 18,
+    CustomMessage = 17,
 }
 impl MessageType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -86,11 +85,13 @@ impl MessageType {
             Self::DisconnectAck => "DISCONNECT_ACK",
             Self::Data => "DATA",
             Self::DataAck => "DATA_ACK",
-            Self::Retransmit => "RETRANSMIT",
-            Self::ProtocolSwitch => "PROTOCOL_SWITCH",
-            Self::ProtocolTest => "PROTOCOL_TEST",
+            Self::Message => "MESSAGE",
+            Self::MessageAck => "MESSAGE_ACK",
+            Self::Resend => "RESEND",
             Self::Error => "ERROR",
             Self::Notification => "NOTIFICATION",
+            Self::AuthRequest => "AUTH_REQUEST",
+            Self::AuthResponse => "AUTH_RESPONSE",
             Self::CustomEvent => "CUSTOM_EVENT",
             Self::CustomMessage => "CUSTOM_MESSAGE",
         }
@@ -107,11 +108,13 @@ impl MessageType {
             "DISCONNECT_ACK" => Some(Self::DisconnectAck),
             "DATA" => Some(Self::Data),
             "DATA_ACK" => Some(Self::DataAck),
-            "RETRANSMIT" => Some(Self::Retransmit),
-            "PROTOCOL_SWITCH" => Some(Self::ProtocolSwitch),
-            "PROTOCOL_TEST" => Some(Self::ProtocolTest),
+            "MESSAGE" => Some(Self::Message),
+            "MESSAGE_ACK" => Some(Self::MessageAck),
+            "RESEND" => Some(Self::Resend),
             "ERROR" => Some(Self::Error),
             "NOTIFICATION" => Some(Self::Notification),
+            "AUTH_REQUEST" => Some(Self::AuthRequest),
+            "AUTH_RESPONSE" => Some(Self::AuthResponse),
             "CUSTOM_EVENT" => Some(Self::CustomEvent),
             "CUSTOM_MESSAGE" => Some(Self::CustomMessage),
             _ => None,

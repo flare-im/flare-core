@@ -8,26 +8,23 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, error};
 use futures_util::{StreamExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-use crate::common::{
-    error::{Result, FlareError},
-    protocol::Frame,
-    connections::{
-        traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection, HeartbeatResponseHandler},
-        types::{ConnectionConfig, ConnectionState},
-        event::DefConnectionEventHandler,
-    },
-    messaging::MessageParser, // 从messaging模块导入
-    serialization::FrameSerializer,
-};
-
+use tokio_tungstenite::WebSocketStream;
+use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
+    traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection},
+    types::{ConnectionConfig, ConnectionState},
+    event::DefConnectionEventHandler,
+}, messaging::MessageParser, serialization::FrameSerializer, SerializerFactory, SerializationFormat};
+use crate::common::serialization::json_serializer;
+use uuid::Uuid;
+use crate::common::connections::types::ClientInfo;
+use crate::{Platform, Transport};
 
 /// WebSocket 连接实现
 pub struct WebSocketConnection {
     /// 连接ID
     id: String,
     /// 连接配置
-    config: ConnectionConfig,
+    config: Arc<ConnectionConfig>,
     /// 连接状态
     state: Arc<RwLock<ConnectionState>>,
     /// 事件处理器
@@ -43,55 +40,51 @@ pub struct WebSocketConnection {
     connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>>,
     /// 消息接收任务句柄
     receive_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 心跳监控任务句柄
+    heartbeat_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 消息发送任务句柄
+    send_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
     /// 消息发送通道（发送已序列化的数据）
     message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// 消息接收通道（接收已序列化的数据）
+    message_receiver: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>,
     /// 序列化器
-    serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>,
+    serializer: Arc<Box<dyn FrameSerializer>>,
+    /// 用户ID（用于服务端连接）
+    user_id: Arc<RwLock<Option<String>>>,
+    /// 客户端信息（用于服务端连接）
+    client_info: Arc<RwLock<Option<crate::common::connections::types::ClientInfo>>>,
 }
 
 impl WebSocketConnection {
     /// 创建新的 WebSocket 连接（使用配置）
     pub fn new(config: ConnectionConfig) -> Self {
-        let stats = ConnectionStats {
-            established_at: Instant::now(),
-            last_activity: Instant::now(),
-            messages_received: 0,
-            messages_sent: 0,
-            heartbeat_responses: 0,
-            quality_score: 100,
-        };
-        
         // 根据配置创建序列化器
         let serializer = {
-            let factory = crate::common::serialization::SerializerFactory::new();
+            let factory = SerializerFactory::new();
+            let format = config.serialization_config.as_ref().map(|c| c.format).unwrap_or(SerializationFormat::Json);
             factory.create_with_config(
-                config.get_serialization_format(),
+                format,
                 config.get_serialization_config()
             ).unwrap_or_else(|_| {
                 // 如果创建失败，使用默认JSON序列化器
-                crate::common::serialization::factory::json_serializer()
+                json_serializer()
             })
         };
         
-        Self {
-            id: config.id.clone(),
-            config,
-            state: Arc::new(RwLock::new(ConnectionState::Initializing)),
-            event_handler: Arc::new(RwLock::new(None)),
-            last_activity: Arc::new(RwLock::new(Instant::now())),
-            reconnect_attempts: Arc::new(RwLock::new(0)),
-            stats: Arc::new(RwLock::new(stats)),
-            
-            connection: Arc::new(RwLock::new(None)),
-            receive_task: Arc::new(RwLock::new(None)),
-            message_sender: Arc::new(RwLock::new(None)),
-            serializer: Arc::new(serializer),
-        }
+        Self::with_serializer(config, Arc::from(serializer))
     }
     
     /// 创建新的 WebSocket 连接（使用自定义序列化器）
-    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>) -> Self {
+    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn FrameSerializer>>) -> Self {
+        // 如果配置中没有ID，则生成一个UUID
+        let id = if config.id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            config.id.clone()
+        };
+
         let stats = ConnectionStats {
             established_at: Instant::now(),
             last_activity: Instant::now(),
@@ -100,84 +93,113 @@ impl WebSocketConnection {
             heartbeat_responses: 0,
             quality_score: 100,
         };
-        
+
+        // 创建消息发送通道
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
         Self {
-            id: config.id.clone(),
-            config,
+            id,
+            config: Arc::new(config),
             state: Arc::new(RwLock::new(ConnectionState::Initializing)),
             event_handler: Arc::new(RwLock::new(None)),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             reconnect_attempts: Arc::new(RwLock::new(0)),
             stats: Arc::new(RwLock::new(stats)),
-            
+
             connection: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
-            message_sender: Arc::new(RwLock::new(None)),
+            heartbeat_task: Arc::new(RwLock::new(None)),
+            send_task: Arc::new(RwLock::new(None)),
+            message_sender: Arc::new(RwLock::new(Some(tx))),
+            message_receiver: Arc::new(RwLock::new(Some(rx))),
             serializer,
+            user_id: Arc::new(RwLock::new(None)),
+            client_info: Arc::new(RwLock::new(None)),
         }
     }
+
     
-    /// 设置事件处理器（公开方法）
-    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
-        *self.event_handler.write().await = Some(handler);
+    /// 更新最后活跃时间
+    async fn update_last_activity(&self) {
+        let mut last_activity = self.last_activity.write().await;
+        *last_activity = Instant::now();
+        
+        let mut stats = self.stats.write().await;
+        stats.last_activity = *last_activity;
     }
-    
-    /// 获取事件处理器是否已设置
-    pub async fn has_event_handler(&self) -> bool {
-        self.event_handler.read().await.is_some()
-    }
+
     
     /// 设置 WebSocket 流（用于服务端连接）
-    pub async fn set_connection(&mut self, stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) {
+    pub async fn set_connection(&mut self, stream: WebSocketStream<tokio::net::TcpStream>) {
         *self.connection.write().await = Some(stream);
     }
-    
-    /// 启动消息处理任务（分离发送和接收）
-    pub async fn start_receive_task(&mut self) -> Result<()> {
-        self.start_receive_task_internal().await
+
+    /// 内部版本的启动消息处理任务，可以在&self上调用
+    pub async fn start_task(&self) -> Result<()> {
+        // 启动心跳监控任务
+        self.start_heartbeat_task_internal().await?;
+        
+        // 启动发送任务
+        self.start_send_task_internal().await?;
+        
+        // 启动接收任务
+        self.start_message_receive_task_internal().await?;
+        
+        Ok(())
     }
     
-    /// 内部版本的启动消息处理任务，可以在&self上调用
-    async fn start_receive_task_internal(&self) -> Result<()> {
+    /// 启动心跳监控任务
+    async fn start_heartbeat_task_internal(&self) -> Result<()> {
         let id = self.id.clone();
-        let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&self.connection);
         let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
         let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
         let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
         let state: Arc<RwLock<ConnectionState>> = Arc::clone(&self.state);
-        let serializer = Arc::clone(&self.serializer);
-        let config = self.config.clone(); // 克隆配置
-        
-        // 克隆事件处理器或使用默认处理器
-        let event_handler_clone = event_handler.read().await.as_ref().cloned().unwrap_or_else(|| {
-            Arc::new(DefConnectionEventHandler::default()) as Arc<dyn ConnectionEvent>
-        });
-        
-        // 创建消息发送通道（发送已序列化的数据）
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        *self.message_sender.write().await = Some(tx);
+        let config = self.config.clone();
         
         // 启动心跳监控任务
-        let _heartbeat_monitor_task = {
+        let heartbeat_task = {
             let id = id.clone();
             let event_handler = Arc::clone(&event_handler);
             let last_activity = Arc::clone(&last_activity);
             let stats = Arc::clone(&stats);
-            let heartbeat_interval = Duration::from_millis(self.config.heartbeat_interval_ms);
-            let heartbeat_timeout = Duration::from_millis(self.config.heartbeat_monitor_timeout_ms);
+            let heartbeat_interval = Duration::from_millis(config.heartbeat_interval_ms);
+            
+            // 根据角色选择心跳超时配置
+            let heartbeat_timeout = if config.role == crate::common::connections::types::ConnectionRole::Client {
+                Duration::from_millis(config.heartbeat_timeout_ms)
+            } else {
+                // 服务端使用服务端特定配置
+                if let Some(server_config) = &config.server_config {
+                    Duration::from_millis(server_config.heartbeat_monitor_timeout_ms)
+                } else {
+                    Duration::from_millis(config.heartbeat_timeout_ms) // 回退到默认值
+                }
+            };
             
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(heartbeat_interval);
                 let mut last_quality_score = 100u8;
+                let mut consecutive_timeouts = 0u32;
                 
                 loop {
                     interval.tick().await;
+                    
+                    // 检查连接状态
+                    {
+                        let current_state = *state.read().await;
+                        if matches!(current_state, ConnectionState::Disconnected | ConnectionState::Failed) {
+                            debug!("连接已断开，停止心跳监控: {}", id);
+                            break;
+                        }
+                    }
                     
                     let last_act = *last_activity.read().await;
                     let elapsed = last_act.elapsed();
                     
                     // 检查心跳超时
                     if elapsed > heartbeat_timeout {
+                        consecutive_timeouts += 1;
                         if let Some(handler) = &*event_handler.read().await {
                             let handler = std::sync::Arc::clone(handler);
                             let id_clone = id.clone();
@@ -185,6 +207,14 @@ impl WebSocketConnection {
                                 handler.on_heartbeat_timeout(&id_clone).await;
                             });
                         }
+                        
+                        // 如果连续超时次数过多，可能需要断开连接
+                        if consecutive_timeouts > 3 {
+                            error!("连接连续心跳超时，可能需要断开: {}", id);
+                        }
+                    } else {
+                        // 重置连续超时计数
+                        consecutive_timeouts = 0;
                     }
 
                     // 计算连接质量（基于活跃度）
@@ -228,18 +258,46 @@ impl WebSocketConnection {
             })
         };
         
+        // 保存心跳任务句柄
+        *self.heartbeat_task.write().await = Some(heartbeat_task);
+        Ok(())
+    }
+    
+    /// 启动消息发送任务
+    async fn start_send_task_internal(&self) -> Result<()> {
+        let id = self.id.clone();
+        let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&self.connection);
+        let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
+        let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
+        let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
+        let state: Arc<RwLock<ConnectionState>> = Arc::clone(&self.state);
+        
+        // 获取消息接收通道
+        let mut message_receiver = self.message_receiver.write().await.take()
+            .ok_or_else(|| FlareError::general_error("消息接收通道不可用".to_string()))?;
+        
         // 启动发送任务
-        let _send_task = {
+        let send_task = {
             let id = id.clone();
             let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&connection);
             let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&event_handler);
             let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&stats);
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
+            let state: Arc<RwLock<ConnectionState>> = Arc::clone(&state);
             
             tokio::spawn(async move {
                 loop {
+                    // 检查连接状态
+                    {
+                        let current_state = *state.read().await;
+                        if matches!(current_state, ConnectionState::Disconnected | ConnectionState::Failed) {
+                            debug!("连接已断开，停止发送任务: {}", id);
+                            break;
+                        }
+                    }
+                    
                     // 等待发送消息
-                    if let Some(message_data) = rx.recv().await {
+                    if let Some(message_data) = message_receiver.recv().await {
                         let data_len = message_data.len();
                         info!("准备发送消息数据: {} - 长度: {}", id, data_len);
                         
@@ -288,6 +346,27 @@ impl WebSocketConnection {
             })
         };
         
+        // 保存发送任务句柄
+        *self.send_task.write().await = Some(send_task);
+        Ok(())
+    }
+    
+    /// 启动消息接收任务
+    async fn start_message_receive_task_internal(&self) -> Result<()> {
+        let id = self.id.clone();
+        let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&self.connection);
+        let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
+        let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
+        let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
+        let state: Arc<RwLock<ConnectionState>> = Arc::clone(&self.state);
+        let serializer = Arc::clone(&self.serializer);
+        let config = self.config.clone(); // 克隆配置
+        
+        // 克隆事件处理器或使用默认处理器
+        let event_handler_clone = event_handler.read().await.as_ref().cloned().unwrap_or_else(|| {
+            Arc::new(DefConnectionEventHandler::default()) as Arc<dyn ConnectionEvent>
+        });
+        
         // 启动接收任务
         let receive_task = {
             let id = id.clone();
@@ -306,7 +385,7 @@ impl WebSocketConnection {
                 Arc::clone(&event_handler_clone),
                 Arc::clone(&stats),
                 serializer.clone(), // 克隆serializer而不是移动
-                config, // 传递配置
+                (*config).clone(), // 传递配置
             );
             
             // 将消息发送通道设置到消息解析器中
@@ -318,15 +397,6 @@ impl WebSocketConnection {
             
             tokio::spawn(async move {
                 loop {
-                    // 检查连接状态
-                    {
-                        let current_state = *state.read().await;
-                        if !matches!(current_state, ConnectionState::Connected | ConnectionState::Ready) {
-                            debug!("连接状态不正确，退出接收任务: {} - 状态: {:?}", id, current_state);
-                            break;
-                        }
-                    }
-                    
                     // 读取 WebSocket 消息
                     {
                         let mut conn_guard = connection.write().await;
@@ -430,411 +500,68 @@ impl WebSocketConnection {
         *self.receive_task.write().await = Some(receive_task);
         Ok(())
     }
+
     
-    /// 停止消息接收任务
-    async fn stop_receive_task(&self) -> Result<()> {
+    /// 停止所有任务
+    async fn stop_all_tasks(&self) -> Result<()> {
+        // 停止接收任务
         if let Some(task) = self.receive_task.write().await.take() {
             task.abort();
         }
+        
+        // 停止发送任务
+        if let Some(task) = self.send_task.write().await.take() {
+            task.abort();
+        }
+        
+        // 停止心跳任务
+        if let Some(task) = self.heartbeat_task.write().await.take() {
+            task.abort();
+        }
+        
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl Connection for WebSocketConnection {
-    fn get_id(&self) -> &str {
-        &self.id
+    fn id(&self) -> String {
+        self.id.clone()
     }
     
-    async fn get_state(&self) -> ConnectionState {
-        *self.state.read().await
-    }
-    
-    async fn is_active(&self) -> bool {
-        let state = *self.state.read().await;
-        matches!(state, ConnectionState::Connected | ConnectionState::Ready)
-    }
-    
-    fn get_config(&self) -> &ConnectionConfig {
-        &self.config
-    }
-    
-    async fn get_last_activity(&self) -> Instant {
-        *self.last_activity.read().await
-    }
-    
-    async fn update_last_activity(&self) {
-        let mut last_activity = self.last_activity.write().await;
-        *last_activity = Instant::now();
-        
-        let mut stats = self.stats.write().await;
-        stats.last_activity = *last_activity;
-    }
-    
-    async fn send_heartbeat(&self) -> Result<()> {
-        debug!("心跳发送请求: {}", self.id);
-        
-        // 创建心跳消息
-        let heartbeat_frame = Frame::heartbeat();
-        
-        // 先序列化心跳消息
-        let heartbeat_data = self.serializer.serialize(&heartbeat_frame).await
-            .map_err(|e| FlareError::serialization_error(format!("心跳消息序列化失败: {}", e)))?;
-        
-        // 通过消息发送通道发送序列化后的心跳数据
-        let sender = self.message_sender.read().await;
-        if let Some(tx) = &*sender {
-            tx.send(heartbeat_data)
-                .map_err(|e| FlareError::message_send_failed(format!("心跳消息发送失败: {}", e)))?;
-        }
-        
-        // 更新统计和活跃时间
-        {
-            let mut stats = self.stats.write().await;
-            stats.heartbeat_responses += 1;
-            stats.last_activity = Instant::now();
-        }
-        
-        let mut last_activity = self.last_activity.write().await;
-        *last_activity = Instant::now();
-        
-        debug!("心跳发送成功: {}", self.id);
-        Ok(())
-    }
-    
-    async fn send_heartbeat_response(&self, data: Option<Vec<u8>>) -> Result<()> {
-        debug!("心跳响应发送请求: {} - 数据: {:?}", self.id, data);
-        
-        // 创建心跳响应消息
-        let heartbeat_ack_frame = Frame::heartbeat_ack();
-        
-        // 先序列化心跳响应消息
-        let response_data = self.serializer.serialize(&heartbeat_ack_frame).await
-            .map_err(|e| FlareError::serialization_error(format!("心跳确认消息序列化失败: {}", e)))?;
-        
-        // 通过消息发送通道发送序列化后的心跳响应数据
-        let sender = self.message_sender.read().await;
-        if let Some(tx) = &*sender {
-            tx.send(response_data)
-                .map_err(|e| FlareError::message_send_failed(format!("心跳响应消息发送失败: {}", e)))?;
-        }
-        
-        // 更新活跃时间
-        let mut last_activity = self.last_activity.write().await;
-        *last_activity = Instant::now();
-        
-        debug!("心跳响应发送成功: {}", self.id);
-        Ok(())
-    }
-    
-    async fn set_heartbeat_response_handler(&mut self, _handler: Option<HeartbeatResponseHandler>) {
-        // 心跳响应处理器已移除，此方法为空实现
-    }
-    
-    async fn has_received_heartbeat(&self) -> bool {
-        // 检查最后活跃时间是否在心跳间隔内
-        let last_activity = *self.last_activity.read().await;
-        let heartbeat_interval = Duration::from_millis(self.config.heartbeat_interval_ms);
-        last_activity.elapsed() < heartbeat_interval
-    }
-    
-    async fn reset_heartbeat_state(&self) {
-        let mut last_activity = self.last_activity.write().await;
-        *last_activity = Instant::now();
-        
-        let mut stats = self.stats.write().await;
-        stats.last_activity = *last_activity;
-    }
-    
-    async fn set_connection_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
-        *self.event_handler.write().await = Some(handler);
-    }
-    
-    async fn send_error_notification(&self, error_code: u32, error_message: &str) -> Result<()> {
-        // 记录错误日志
-        error!("发送错误通知: 连接 {} - 错误码: {}, 错误信息: {}", 
-               self.id, error_code, error_message);
-        
-        // 创建错误帧
-        let error_frame = Frame::error(error_code, error_message);
-        
-        // 先序列化错误消息，确保序列化成功再发送
-        let error_data = self.serializer.serialize(&error_frame).await
-            .map_err(|e| {
-                error!("错误消息序列化失败: {}", e);
-                FlareError::serialization_error(format!("错误消息序列化失败: {}", e))
-            })?;
-        
-        // 通过通道发送序列化后的错误数据
-        let sender = self.message_sender.read().await;
-        if let Some(tx) = &*sender {
-            match tx.send(error_data) {
-                Ok(()) => {
-                    debug!("错误通知消息已提交发送: {} - 错误码: {}, 错误信息: {}", 
-                           self.id, error_code, error_message);
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("错误消息发送失败: {}", e);
-                    Err(FlareError::message_send_failed(format!("错误消息发送失败: {}", e)))
-                }
-            }
+    fn state(&self) -> ConnectionState {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_read
+        if let Ok(state) = self.state.try_read() {
+            *state
         } else {
-            error!("消息发送通道不可用");
-            Err(FlareError::connection_failed("消息发送通道不可用"))
+            ConnectionState::Error
         }
     }
-}
 
-#[async_trait::async_trait]
-impl ClientConnection for WebSocketConnection {
-    async fn connect(&self) -> Result<()> {
-        *self.state.write().await = ConnectionState::Connecting;
-        
-        // 解析 WebSocket URL
-        let url = url::Url::parse(&self.config.remote_addr)
-            .map_err(|e| FlareError::connection_failed(format!("无效的 WebSocket URL: {}", e)))?;
-        
-        // 建立 TCP 连接
-        let host = url.host_str().ok_or_else(|| {
-            FlareError::connection_failed("URL 中缺少主机名".to_string())
-        })?;
-        
-        let port = url.port().unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
-        let addr = format!("{}:{}", host, port);
-        
-        let tcp_stream = tokio::net::TcpStream::connect(&addr).await
-            .map_err(|e| FlareError::connection_failed(format!("TCP 连接失败: {}", e)))?;
-        
-        // 根据协议选择连接方式
-        let ws_stream = if url.scheme() == "wss" {
-            // 使用 TLS（暂时跳过，因为需要正确的 TLS 配置）
-            debug!("TLS WebSocket 连接暂时跳过");
-            return Err(FlareError::connection_failed("TLS WebSocket 连接暂未实现".to_string()));
-        } else {
-            // 不使用 TLS - 使用简化的连接方式
-            let (ws_stream, _) = tokio_tungstenite::client_async(&self.config.remote_addr, tcp_stream).await
-                .map_err(|e| FlareError::connection_failed(format!("WebSocket 握手失败: {}", e)))?;
-            
-            ws_stream
-        };
-        
-        // 保存流
-        *self.connection.write().await = Some(ws_stream);
-        
-        // 启动消息接收任务
-        self.start_receive_task_internal().await?;
-        
-        *self.state.write().await = ConnectionState::Connected;
-        *self.state.write().await = ConnectionState::Ready;
-        
-        // 更新最后活跃时间
-        self.update_last_activity().await;
-        
-        // 触发连接事件
-        let id = self.id.clone();
-        if let Some(handler) = &*self.event_handler.read().await {
-            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-            tokio::spawn(async move {
-                handler.on_connected(&id).await;
-            });
-        }
-        
-        info!("WebSocket 连接已建立: {}", self.id);
-        Ok(())
+    fn config(&self) -> Arc<ConnectionConfig> {
+        Arc::clone(&self.config)
     }
-    
-    async fn disconnect(&self) -> Result<()> {
-        *self.state.write().await = ConnectionState::Disconnecting;
-        
-        // 停止接收任务
-        self.stop_receive_task().await?;
-        
-        // 清理流
-        *self.connection.write().await = None;
-        
-        *self.state.write().await = ConnectionState::Disconnected;
-        
-        // 触发断开事件
-        let id = self.id.clone();
-        if let Some(handler) = &*self.event_handler.read().await {
-            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-            tokio::spawn(async move {
-                handler.on_disconnected(&id, "主动断开").await;
-            });
-        }
-        
-        info!("WebSocket 连接已断开: {}", self.id);
-        Ok(())
-    }
-    
-    async fn send_message(&self, message: Frame) -> Result<()> {
-        // 检查连接状态
-        let state = *self.state.read().await;
-        if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
-            return Err(FlareError::connection_failed("连接未就绪"));
-        }
-        
-        // 先序列化消息，确保序列化成功再发送
-        let message_data = self.serializer.serialize(&message).await
-            .map_err(|e| FlareError::serialization_error(format!("消息序列化失败: {}", e)))?;
-        
-        // 通过通道发送序列化后的数据
-        let sender = self.message_sender.read().await;
-        if let Some(tx) = &*sender {
-            let message_type = message.get_message_type();
-            tx.send(message_data)
-                .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
-            
-            debug!("WebSocket 消息已提交发送: {} - 类型: {:?}", self.id, message_type);
-            
-            // 触发消息发送事件
-            if let Some(handler) = &*self.event_handler.read().await {
-                let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-                let id = self.id.clone();
-                let msg_clone = message.clone();
-                tokio::spawn(async move { 
-                    handler.on_message_sent(&id, &msg_clone).await;
-                });
-            }
-            
-            Ok(())
-        } else {
-            Err(FlareError::connection_failed("消息发送通道不可用"))
-        }
-    }
-    
-    async fn try_reconnect(&self) -> Result<()> {
-        let attempts = *self.reconnect_attempts.read().await;
-        if attempts >= self.config.max_reconnect_attempts {
-            // 触发重连失败事件
-            if let Some(handler) = &*self.event_handler.read().await {
-                let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-                let id = self.id.clone();
-                let error_msg = format!("超过最大重连次数: {}", self.config.max_reconnect_attempts);
-                tokio::spawn(async move {
-                    handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
-                });
-            }
-            return Err(FlareError::connection_failed("超过最大重连次数"));
-        }
-        
-        *self.state.write().await = ConnectionState::Reconnecting;
-        
-        // 触发重连开始事件
-        if let Some(handler) = &*self.event_handler.read().await {
-            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-            let id = self.id.clone();
-            tokio::spawn(async move {
-                handler.on_reconnect_started(&id, attempts + 1).await;
-            });
-        }
-        
-        // 等待重连延迟
-        tokio::time::sleep(Duration::from_millis(self.config.reconnect_delay_ms)).await;
-        
-        // 尝试重新连接
-        match self.connect().await {
-            Ok(_) => {
-                // 更新重连次数
-                {
-                    let mut attempts_guard = self.reconnect_attempts.write().await;
-                    *attempts_guard += 1;
-                }
-                
-                // 更新最后活跃时间
-                self.update_last_activity().await;
-                
-                // 触发重连成功事件
-                if let Some(handler) = &*self.event_handler.read().await {
-                    let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-                    let id = self.id.clone();
-                    tokio::spawn(async move {
-                        handler.on_reconnected(&id, attempts + 1).await;
-                    });
-                }
-                
-                info!("WebSocket 重连成功: {} (第 {} 次)", self.id, attempts + 1);
-                Ok(())
-            }
-            Err(e) => {
-                // 触发重连失败事件
-                if let Some(handler) = &*self.event_handler.read().await {
-                    let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-                    let id = self.id.clone();
-                    let error_msg = e.to_string();
-                    tokio::spawn(async move {
-                        handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
-                    });
-                }
-                Err(e)
-            }
-        }
-    }
-    
-    async fn needs_reconnect(&self) -> bool {
-        let state = *self.state.read().await;
-        matches!(state, ConnectionState::Disconnected | ConnectionState::Failed)
-    }
-    
-    async fn get_reconnect_attempts(&self) -> u32 {
-        *self.reconnect_attempts.read().await
-    }
-    
-    async fn reset_reconnect_attempts(&self) {
-        *self.reconnect_attempts.write().await = 0;
-    }
-}
 
-#[async_trait::async_trait]
-impl ServerConnection for WebSocketConnection {
-    async fn accept(&self) -> Result<()> {
-        *self.state.write().await = ConnectionState::Connecting;
-        
-        // 服务端连接需要从外部传入，这里只是标记状态
-        // 实际的连接建立应该在 RawConnectionHandler 中处理
-        
-        *self.state.write().await = ConnectionState::Connected;
-        *self.state.write().await = ConnectionState::Ready;
-        
-        // 更新最后活跃时间
-        self.update_last_activity().await;
-        
-        // 触发连接事件
-        let id = self.id.clone();
-        if let Some(handler) = &*self.event_handler.read().await {
-            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-            tokio::spawn(async move {
-                handler.on_connected(&id).await;
-            });
+    fn stats(&self) -> ConnectionStats {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_read
+        if let Ok(stats) = self.stats.try_read() {
+            stats.clone()
+        } else {
+            ConnectionStats::default()
         }
-        
-        info!("WebSocket 服务端连接已接受: {}", self.id);
-        Ok(())
     }
     
-    async fn close(&self) -> Result<()> {
-        *self.state.write().await = ConnectionState::Disconnecting;
-        
-        // 停止接收任务
-        self.stop_receive_task().await?;
-        
-        // 清理流
-        *self.connection.write().await = None;
-        
-        *self.state.write().await = ConnectionState::Disconnected;
-        
-        // 触发断开事件
-        let id = self.id.clone();
-        if let Some(handler) = &*self.event_handler.read().await {
-            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
-            tokio::spawn(async move {
-                handler.on_disconnected(&id, "服务端关闭").await;
-            });
+    fn last_activity_epoch_ms(&self) -> i64 {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_read
+        if let Ok(last_activity) = self.last_activity.try_read() {
+            last_activity.elapsed().as_millis() as i64
+        } else {
+            0
         }
-        
-        info!("WebSocket 服务端连接已关闭: {}", self.id);
-        Ok(())
+    }
+    
+    fn status(&self) -> ConnectionState {
+        self.state()
     }
     
     async fn send_message(&self, message: Frame) -> Result<()> {
@@ -872,32 +599,339 @@ impl ServerConnection for WebSocketConnection {
             Err(FlareError::connection_failed("消息发送通道不可用"))
         }
     }
-    
-    async fn receive_message(&self) -> Result<Option<Frame>> {
-        // 检查连接状态
-        let state = *self.state.read().await;
-        if !matches!(state, ConnectionState::Connected | ConnectionState::Ready) {
-            return Err(FlareError::connection_failed("连接未就绪"));
+
+    async fn close(&self, reason: Option<String>) -> Result<()> {
+        *self.state.write().await = ConnectionState::Disconnecting;
+        // 通过自定义消息先通知客户端，方便统一处理
+        self.send_message(Frame::disconnect(reason.clone().unwrap_or_else(|| "主动断开".into()))).await?;
+        // 关闭 WebSocket 连接
+        if let Some(mut connection) = self.connection.write().await.take() {
+            // 发送关闭帧，使用标准的关闭代码1000表示正常关闭
+            let close_frame = tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: reason.clone().unwrap_or_else(|| "主动断开".into()).into(),
+            };
+            
+            // 发送关闭帧
+            let _ = connection.close(Some(close_frame)).await;
         }
         
-        // 消息接收由后台任务处理，这里返回 None
-        Ok(None)
-    }
-    
-    async fn is_healthy(&self) -> bool {
-        let state = *self.state.read().await;
-        let last_activity = *self.last_activity.read().await;
-        let timeout = Duration::from_millis(self.config.heartbeat_monitor_timeout_ms);
+        // 清理连接
+        *self.connection.write().await = None;
         
-        matches!(state, ConnectionState::Connected | ConnectionState::Ready) 
-            && last_activity.elapsed() < timeout
+        *self.state.write().await = ConnectionState::Disconnected;
+        
+        // 触发断开事件
+        let id = self.id.clone();
+        let disconnect_reason = reason.clone().unwrap_or_else(|| "主动断开".to_string());
+        if let Some(handler) = &*self.event_handler.read().await {
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+            tokio::spawn(async move {
+                handler.on_disconnected(&id, &disconnect_reason).await;
+            });
+        }
+        // 停止所有任务
+        self.stop_all_tasks().await?;
+        debug!("WebSocket 连接已断开: {} - 原因: {}", self.id, reason.unwrap_or_else(|| "主动断开".to_string()));
+        Ok(())
+    }
+
+    async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
+        *self.event_handler.write().await = Some(handler);
     }
     
-    fn get_client_info(&self) -> Option<String> {
-        Some(format!("WebSocket Client - {}", self.id))
-    }
-    
-    async fn get_connection_stats(&self) -> ConnectionStats {
-        self.stats.read().await.clone()
+    async fn send_error_notification(&self, error_code: u32, error_message: &str) -> Result<()> {
+        // 记录错误日志
+        debug!("发送错误通知: 连接 {} - 错误码: {}, 错误信息: {}",
+               self.id, error_code, error_message);
+        
+        // 创建错误帧
+        let error_frame = Frame::error(error_code, error_message);
+        
+        // 先序列化错误消息，确保序列化成功再发送
+        let error_data = self.serializer.serialize(&error_frame).await
+            .map_err(|e| {
+                error!("错误消息序列化失败: {}", e);
+                FlareError::serialization_error(format!("错误消息序列化失败: {}", e))
+            })?;
+        
+        // 通过通道发送序列化后的错误数据
+        let sender = self.message_sender.read().await;
+        if let Some(tx) = &*sender {
+            match tx.send(error_data) {
+                Ok(()) => {
+                    debug!("错误通知消息已提交发送: {} - 错误码: {}, 错误信息: {}", 
+                           self.id, error_code, error_message);
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("错误消息发送失败: {}", e);
+                    Err(FlareError::message_send_failed(format!("错误消息发送失败: {}", e)))
+                }
+            }
+        } else {
+            error!("消息发送通道不可用");
+            Err(FlareError::connection_failed("消息发送通道不可用"))
+        }
     }
 }
+/// 
+#[async_trait::async_trait]
+impl ClientConnection for WebSocketConnection {
+    async fn connect(&self) -> Result<()> {
+        *self.state.write().await = ConnectionState::Connecting;
+        
+        // 解析 WebSocket URL
+        url::Url::parse(&self.config.remote_addr)
+            .map_err(|e| FlareError::connection_failed(format!("无效的 WebSocket URL: {}", e)))?;
+
+        let addr = &self.config.remote_addr;
+        
+        let tcp_stream = tokio::net::TcpStream::connect(&addr).await
+            .map_err(|e| FlareError::connection_failed(format!("TCP 连接失败: {}", e)))?;
+        
+        // 根据协议选择连接方式
+        let (ws_stream, _) = tokio_tungstenite::client_async(&self.config.remote_addr, tcp_stream).await
+            .map_err(|e| FlareError::connection_failed(format!("WebSocket 握手失败: {}", e)))?;
+        
+        // 保存流
+        *self.connection.write().await = Some(ws_stream);
+        
+        // 启动消息接收任务
+        self.start_task().await?;
+        
+        *self.state.write().await = ConnectionState::Connected;
+        
+        // 更新最后活跃时间
+        self.update_last_activity().await;
+        
+        // 触发连接事件
+        let id = self.id.clone();
+        if let Some(handler) = &*self.event_handler.read().await {
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+            tokio::spawn(async move {
+                handler.on_connected(&id).await;
+            });
+        }
+        let platform = self.config.client_config.as_ref()
+            .and_then(|c| c.platform.clone())
+            .unwrap_or(Platform::Web);
+        // 发送链接消息
+        self.send_message(Frame::connect(self.config.id.clone().as_str(), platform)).await?;
+        debug!("WebSocket 连接已建立: {}", self.id);
+        Ok(())
+    }
+    
+    async fn authenticated_complete(&self)-> Result<()> {
+       *self.state.write().await = ConnectionState::Ready;    
+       debug!("WebSocket 认证完成: {}", self.id);
+       Ok(())
+    }
+    
+    async fn disconnect(&self,reason: Option<String>) -> Result<()> {
+        Connection::close(self, Option::from(reason.clone().unwrap_or_else(|| "客户端主动断开".into()))).await
+    }
+    
+    
+    async fn try_reconnect(&self) -> Result<()> {
+        // 获取客户端特定配置
+        let client_config = if let Some(config) = &self.config.client_config {
+            config.clone()
+        } else {
+            // 如果没有客户端配置，使用默认值
+            crate::common::connections::types::ClientSpecificConfig::default()
+        };
+        
+        let attempts = *self.reconnect_attempts.read().await;
+        if attempts >= client_config.max_reconnect_attempts {
+            // 触发重连失败事件
+            if let Some(handler) = &*self.event_handler.read().await {
+                let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+                let id = self.id.clone();
+                let error_msg = format!("超过最大重连次数: {}", client_config.max_reconnect_attempts);
+                tokio::spawn(async move {
+                    handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
+                });
+            }
+            return Err(FlareError::connection_failed("超过最大重连次数"));
+        }
+        
+        *self.state.write().await = ConnectionState::Reconnecting;
+        
+        // 触发重连开始事件
+        if let Some(handler) = &*self.event_handler.read().await {
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+            let id = self.id.clone();
+            tokio::spawn(async move {
+                handler.on_reconnect_started(&id, attempts + 1).await;
+            });
+        }
+        
+        // 等待重连延迟
+        tokio::time::sleep(Duration::from_millis(client_config.reconnect_delay_ms)).await;
+        
+        // 尝试重新连接
+        match self.connect().await {
+            Ok(_) => {
+                // 更新重连次数
+                {
+                    let mut attempts_guard = self.reconnect_attempts.write().await;
+                    *attempts_guard += 1;
+                }
+                
+                // 更新最后活跃时间
+                self.update_last_activity().await;
+                
+                // 触发重连成功事件
+                if let Some(handler) = &*self.event_handler.read().await {
+                    let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+                    let id = self.id.clone();
+                    tokio::spawn(async move {
+                        handler.on_reconnected(&id, attempts + 1).await;
+                    });
+                }
+
+                debug!("WebSocket 重连成功: {} (第 {} 次)", self.id, attempts + 1);
+                Ok(())
+            }
+            Err(e) => {
+                // 触发重连失败事件
+                if let Some(handler) = &*self.event_handler.read().await {
+                    let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+                    let id = self.id.clone();
+                    let error_msg = e.to_string();
+                    tokio::spawn(async move {
+                        handler.on_reconnect_failed(&id, attempts + 1, &error_msg).await;
+                    });
+                }
+                Err(e)
+            }
+        }
+    }
+    
+    fn needs_reconnect(&self) -> bool {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_read
+        if let Ok(state) = self.state.try_read() {
+            matches!(*state, ConnectionState::Disconnected | ConnectionState::Failed)
+        } else {
+            false
+        }
+    }
+    
+    fn get_reconnect_attempts(&self) -> u32 {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_read
+        if let Ok(attempts) = self.reconnect_attempts.try_read() {
+            *attempts
+        } else {
+            0
+        }
+    }
+    
+    fn reset_reconnect_attempts(&self) {
+        // 注意：这个方法需要是同步的，所以我们需要使用try_write
+        if let Ok(mut attempts) = self.reconnect_attempts.try_write() {
+            *attempts = 0;
+        }
+    }
+
+   
+}
+
+#[async_trait::async_trait]
+impl ServerConnection for WebSocketConnection {
+    async fn accept(&self) -> Result<()> {
+        // 检查连接是否已经初始化
+        {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Initializing {
+                return Err(FlareError::connection_failed("连接状态不正确，应为初始化状态"));
+            }
+        }
+        
+        *self.state.write().await = ConnectionState::Connecting;
+        
+        // 检查基础配置是否完成
+        if self.config.id.is_empty() {
+            return Err(FlareError::connection_failed("连接ID未设置"));
+        }
+        
+        if self.config.remote_addr.is_empty() {
+            return Err(FlareError::connection_failed("远程地址未设置"));
+        }
+        
+        // 检查WebSocket连接是否已设置
+        {
+            let connection = self.connection.read().await;
+            if connection.is_none() {
+                return Err(FlareError::connection_failed("WebSocket连接未设置"));
+            }
+        }
+        
+        // 启动必要的任务
+        self.start_task().await?;
+        
+        *self.state.write().await = ConnectionState::Connected;
+        
+        // 更新最后活跃时间
+        self.update_last_activity().await;
+        
+        // 触发连接事件
+        let id = self.id.clone();
+        if let Some(handler) = &*self.event_handler.read().await {
+            let handler: Arc<dyn ConnectionEvent> = Arc::clone(handler);
+            tokio::spawn(async move {
+                handler.on_connected(&id).await;
+            });
+        }
+        // 发送connect响应消息
+        self.send_message(Frame::connect_ack(self.config.id.clone().as_str())).await?;
+
+        info!("WebSocket 服务端连接已接受: {}", self.id);
+        Ok(())
+    }
+    async fn authenticate(&self,success:bool,platform: Platform, user_id: String, info: Option<Vec<u8>>,reason: Option<String>) -> Result<()> {
+        let mut frame = Frame::auth_response(false, None, Option::from(reason.clone().unwrap_or_else(|| "认证失败".to_string())));
+        if success {
+            // 设置用户ID
+            *self.user_id.write().await = Some(user_id);
+
+            let client_info = ClientInfo {
+                transport: Transport::WebSocket,
+                address: self.config.remote_addr.clone(), // 实际应该从info中解析
+                platform, // 实际应该从info中解析
+            };
+            *self.client_info.write().await = Some(client_info);
+            frame = Frame::auth_response(true, info,reason.clone());
+            *self.state.write().await = ConnectionState::Ready;
+        }
+        // 发送认证结果
+        self.send_message(frame).await?;
+        Ok(())
+    }
+    
+    fn get_client_info(&self) -> Result<ClientInfo> {
+        if let Ok(client_info) = self.client_info.try_read() {
+            if let Some(info) = &*client_info {
+                Ok((*info).clone())
+            } else {
+                Err(FlareError::general_error("客户端信息未设置".to_string()))
+            }
+        } else {
+            Err(FlareError::general_error("无法获取客户端信息".to_string()))
+        }
+    }
+    
+    async fn get_user_id(&self) -> Option<String> {
+        if let Some(user_id) = &*self.user_id.read().await {
+            Some(user_id.clone())
+        } else {
+            None
+        }
+    }
+    
+    async fn set_user_id(&self, user_id: String) {
+        let mut user_id_lock = self.user_id.write().await;
+        *user_id_lock = Some(user_id);
+    }
+}
+

@@ -12,7 +12,7 @@ use crate::common::{
     error::Result,
     protocol::Frame,
     connections::{
-        types::{ConnectionConfig, ConnectionType, ConnectionState},
+        types::{ConnectionConfig, Transport, ConnectionState},
         traits::{ClientConnection, ConnectionFactory as ConnectionFactoryTrait},
         factory::ConnectionFactory,
     },
@@ -100,11 +100,11 @@ impl Client {
             }
             ProtocolSelection::QuicOnly => {
                 info!("使用QUIC协议连接");
-                self.connect_single_protocol(base_config, ConnectionType::Quic).await?
+                self.connect_single_protocol(base_config, Transport::Quic).await?
             }
             ProtocolSelection::WebSocketOnly => {
                 info!("使用WebSocket协议连接");
-                self.connect_single_protocol(base_config, ConnectionType::WebSocket).await?
+                self.connect_single_protocol(base_config, Transport::WebSocket).await?
             }
         };
         
@@ -136,7 +136,7 @@ impl Client {
         }
         
         if let Some(connection) = self.connection.write().await.take() {
-            if let Err(e) = connection.disconnect().await {
+            if let Err(e) = connection.disconnect(None).await {
                 warn!("断开连接时发生错误: {}", e);
             }
         }
@@ -280,7 +280,7 @@ impl Client {
         
         // 获取连接并发送心跳
         if let Some(connection) = &*self.connection.read().await {
-            connection.send_heartbeat().await
+            connection.send_message(Frame::heartbeat()).await
         } else {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()
@@ -319,16 +319,16 @@ impl Client {
         );
         
         // 设置连接参数
-        config.connection_type = self.config.connection_type;
-        config.auto_reconnect = self.config.enable_auto_reconnect;
-        config.max_reconnect_attempts = self.config.max_reconnect_attempts;
-        config.reconnect_delay_ms = self.config.reconnect_delay_ms;
-        config.heartbeat_interval_ms = self.config.heartbeat_interval_ms;
-        config.heartbeat_timeout_ms = self.config.heartbeat_monitor_timeout_ms;
-        config.auto_heartbeat_response = self.config.enable_auto_heartbeat_response;
+        config.transport = self.config.transport;
+        // 这些参数现在在客户端特定配置中设置
+        // config.auto_reconnect = self.config.enable_auto_reconnect;
+        // config.max_reconnect_attempts = self.config.max_reconnect_attempts;
+        // config.reconnect_delay_ms = self.config.reconnect_delay_ms;
+        // config.heartbeat_interval_ms = self.config.heartbeat_interval_ms;
+        // config.heartbeat_timeout_ms = self.config.heartbeat_monitor_timeout_ms;
+        // config.auto_heartbeat_response = self.config.enable_auto_heartbeat_response;
         
         // 设置序列化配置
-        config.serialization_format = Some(self.config.serialization_format.clone());
         config.serialization_config = Some(self.config.serialization_config.clone());
         
         config
@@ -339,7 +339,7 @@ impl Client {
         info!("使用协议竞速连接");
         
         let racer = ProtocolRacer::new(5000); // 5秒超时
-        let protocols = vec![ConnectionType::Quic, ConnectionType::WebSocket];
+        let protocols = vec![Transport::Quic, Transport::WebSocket];
         
         match racer.race(base_config, self.config.server_addresses.clone(), protocols).await {
             Ok(result) => {
@@ -357,7 +357,7 @@ impl Client {
     async fn connect_single_protocol(
         &self, 
         mut base_config: ConnectionConfig, 
-        protocol_type: ConnectionType
+        protocol_type: Transport
     ) -> Result<Box<dyn ClientConnection>> {
         info!("使用单一协议连接: {:?}", protocol_type);
         
@@ -366,7 +366,7 @@ impl Client {
             base_config.remote_addr = address.clone();
         }
         
-        base_config.connection_type = protocol_type;
+        base_config.transport = protocol_type;
         
         let factory = ConnectionFactory::new();
         let connection = factory.create_client_connection(base_config).await?;
