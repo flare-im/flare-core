@@ -26,6 +26,12 @@ pub struct WebSocketClientEventHandler {
     pub name: String,
 }
 
+impl WebSocketClientEventHandler {
+    pub fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
 #[async_trait::async_trait]
 impl ConnectionEvent for WebSocketClientEventHandler {
     async fn on_connected(&self, connection_id: &str) {
@@ -40,12 +46,26 @@ impl ConnectionEvent for WebSocketClientEventHandler {
         error!("[{}] WebSocket连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
 
-    async fn on_message_received(&self, connection_id: &str, _message: &flare_core::common::protocol::Frame) {
-        info!("[{}] 收到WebSocket服务器消息: {}", self.name, connection_id);
+    async fn on_message_received(&self, connection_id: &str, message: &flare_core::common::protocol::Frame) {
+        // 获取消息内容长度
+        let content_length = match &message.command {
+            flare_core::common::protocol::commands::Command::Message(msg_cmd) => {
+                match msg_cmd {
+                    flare_core::common::protocol::commands::MessageCmd::Send(send_cmd) => send_cmd.data.len(),
+                    flare_core::common::protocol::commands::MessageCmd::Data(data_cmd) => data_cmd.data.len(),
+                    _ => 0,
+                }
+            },
+            _ => 0,
+        };
+        
+        info!("[{}] 收到WebSocket服务器消息: {} - 类型: {} - 内容长度: {}", 
+              self.name, connection_id, message.get_command_type_str(), content_length);
     }
 
-    async fn on_message_sent(&self, connection_id: &str, _message: &flare_core::common::protocol::Frame) {
-        info!("[{}] WebSocket数据消息已发送: {}", self.name, connection_id);
+    async fn on_message_sent(&self, connection_id: &str, message: &flare_core::common::protocol::Frame) {
+        info!("[{}] WebSocket数据消息已发送: {} - 类型: {}", 
+              self.name, connection_id, message.get_command_type_str());
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {
@@ -79,12 +99,6 @@ impl ConnectionEvent for WebSocketClientEventHandler {
     async fn on_statistics_updated(&self, connection_id: &str, stats: &flare_core::common::connections::traits::ConnectionStats) {
         info!("[{}] WebSocket统计信息更新: {} - 收到消息: {} - 发送消息: {}", 
              self.name, connection_id, stats.messages_received, stats.messages_sent);
-    }
-}
-
-impl WebSocketClientEventHandler {
-    pub fn new(name: String) -> Self {
-        Self { name }
     }
 }
 
@@ -171,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("测试消息已发送");
     
     // 等待一段时间以接收响应
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     
     // 断开连接
     info!("正在断开连接...");

@@ -16,8 +16,9 @@ use flare_core::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
-    tracing_subscriber::fmt::init();
-    
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     // 创建服务端配置
     let config = ServerConfig::new()
         .with_local_addr("127.0.0.1:8080".to_string())
@@ -37,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("按 Ctrl+C 停止服务端");
     
     // 运行一段时间
-    sleep(Duration::from_secs(60)).await;
+    sleep(Duration::from_secs(600)).await;
     
     // 停止服务端
     server.stop().await;

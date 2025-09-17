@@ -4,16 +4,13 @@
 
 use std::sync::Arc;
 
-use crate::common::{
-    error::Result,
-    connections::{
-        types::{ConnectionConfig, Transport, ConnectionRole},
-        traits::{ClientConnection, ServerConnection, ConnectionFactory as ConnectionFactoryTrait, ConnectionEvent},
-        quic::QuicConnection,
-        websocket::WebSocketConnection,
-        builder::ConnectionBuilder,
-    },
-};
+use crate::common::{error::Result, connections::{
+    types::{ConnectionConfig, Transport, ConnectionRole},
+    traits::{ClientConnection, ServerConnection, ConnectionFactory as ConnectionFactoryTrait, ConnectionEvent},
+    quic::QuicConnection,
+    websocket::WebSocketConnection,
+    builder::ConnectionBuilder,
+}, FrameSerializer};
 use crate::Connection;
 
 /// 连接工厂
@@ -25,51 +22,14 @@ impl ConnectionFactory {
         Self
     }
     
-    /// 从构建器创建客户端连接
-    pub async fn create_client_from_builder(&self, builder: ConnectionBuilder) -> Result<Box<dyn ClientConnection>> {
+    /// 从构建器创建连接（根据配置自动判断是客户端还是服务端）
+    pub async fn create_from_builder(&self, builder: ConnectionBuilder) -> Result<Box<dyn Connection>> {
         let (config, custom_serializer) = builder.build();
-        
-        // 确保是客户端配置
-        if config.role != ConnectionRole::Client {
-            return Err(crate::common::error::FlareError::connection_failed(
-                "只能为客户端角色创建客户端连接"
-            ));
-        }
-        
-        match config.transport {
-            Transport::Quic => {
-                if let Some(serializer) = custom_serializer {
-                    Ok(Box::new(QuicConnection::with_serializer(config, serializer)))
-                } else {
-                    Ok(Box::new(QuicConnection::new(config)))
-                }
-            }
-            Transport::WebSocket => {
-                if let Some(serializer) = custom_serializer {
-                    Ok(Box::new(WebSocketConnection::with_serializer(config, serializer)))
-                } else {
-                    Ok(Box::new(WebSocketConnection::new(config)))
-                }
-            }
-            Transport::Tcp | Transport::Udp => {
-                Err(crate::common::error::FlareError::connection_failed(
-                    format!("{:?} 传输暂未实现", config.transport)
-                ))
-            }
-        }
+        self.create(config, custom_serializer).await
     }
-    
-    /// 从构建器创建服务端连接
-    pub async fn create_server_from_builder(&self, builder: ConnectionBuilder) -> Result<Box<dyn ServerConnection>> {
-        let (config, custom_serializer) = builder.build();
-        
-        // 确保是服务端配置
-        if config.role != ConnectionRole::Server {
-            return Err(crate::common::error::FlareError::connection_failed(
-                "只能为服务端角色创建服务端连接"
-            ));
-        }
-        
+
+    /// 从配置创建连接（根据配置自动判断是客户端还是服务端）
+    pub async fn create(&self, config: ConnectionConfig, custom_serializer: Option<Arc<Box<dyn FrameSerializer>>>) -> Result<Box<dyn Connection>> {
         match config.transport {
             Transport::Quic => {
                 if let Some(serializer) = custom_serializer {
@@ -103,7 +63,7 @@ impl ConnectionFactoryTrait for ConnectionFactory {
                 "只能为客户端角色创建客户端连接"
             ));
         }
-        
+
         match config.transport {
             Transport::Quic => {
                 Ok(Box::new(QuicConnection::new(config)))
@@ -186,7 +146,7 @@ impl RawConnectionHandler {
         // 设置 WebSocket 流到连接中
         connection.set_connection(ws_stream).await;
         
-        // 启动消息接收任务
+        // 启动消息处理任务
         connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
@@ -199,7 +159,7 @@ impl RawConnectionHandler {
     pub async fn from_websocket_with_handler(
         tcp_stream: tokio::net::TcpStream,
         config: ConnectionConfig,
-        handler: std::sync::Arc<dyn ConnectionEvent>,
+        handler: Arc<dyn ConnectionEvent>,
     ) -> Result<Box<dyn ServerConnection>> {
         use tokio_tungstenite::accept_async;
         
@@ -218,7 +178,7 @@ impl RawConnectionHandler {
         // 设置 WebSocket 流到连接中
         connection.set_connection(ws_stream).await;
         
-        // 启动消息接收任务
+        // 启动消息处理任务
         connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
@@ -231,8 +191,8 @@ impl RawConnectionHandler {
     pub async fn from_websocket_with_handler_arc(
         tcp_stream: tokio::net::TcpStream,
         config: ConnectionConfig,
-        handler: std::sync::Arc<dyn ConnectionEvent>,
-    ) -> Result<std::sync::Arc<dyn ServerConnection>> {
+        handler: Arc<dyn ConnectionEvent>,
+    ) -> Result<Arc<dyn ServerConnection>> {
         use tokio_tungstenite::accept_async;
         
         // 接受 WebSocket 握手
@@ -250,11 +210,8 @@ impl RawConnectionHandler {
         // 设置 WebSocket 流到连接中
         connection.set_connection(ws_stream).await;
         
-        // 启动消息接收任务
-        connection.start_task().await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(
-                format!("启动消息接收任务失败: {}", e)
-            ))?;
+        // 注意：不在这里启动任务，而是在accept方法中启动
+        // 这样可以确保任务在正确的时机启动
         
         Ok(Arc::new(connection))
     }
@@ -270,12 +227,6 @@ impl RawConnectionHandler {
         // 设置 QUIC 连接到连接中
         connection.set_connection(quic_connection).await;
         
-        // 启动消息接收任务
-        connection.start_task().await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(
-                format!("启动消息接收任务失败: {}", e)
-            ))?;
-        
         Ok(Box::new(connection))
     }
     
@@ -283,7 +234,7 @@ impl RawConnectionHandler {
     pub async fn from_quic_with_handler(
         quic_connection: quinn::Connection,
         config: ConnectionConfig,
-        handler: std::sync::Arc<dyn ConnectionEvent>,
+        handler: Arc<dyn ConnectionEvent>,
     ) -> Result<Box<dyn ServerConnection>> {
         // 创建 QUIC 连接
         let mut connection = QuicConnection::new(config);
@@ -293,13 +244,7 @@ impl RawConnectionHandler {
         
         // 设置 QUIC 连接到连接中
         connection.set_connection(quic_connection).await;
-        
-        // 启动消息接收任务
-        connection.start_task().await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(
-                format!("启动消息接收任务失败: {}", e)
-            ))?;
-        
+
         Ok(Box::new(connection))
     }
     
@@ -307,8 +252,8 @@ impl RawConnectionHandler {
     pub async fn from_quic_with_handler_arc(
         quic_connection: quinn::Connection,
         config: ConnectionConfig,
-        handler: std::sync::Arc<dyn ConnectionEvent>,
-    ) -> Result<std::sync::Arc<dyn ServerConnection>> {
+        handler: Arc<dyn ConnectionEvent>,
+    ) -> Result<Arc<dyn ServerConnection>> {
         // 创建 QUIC 连接
         let mut connection = QuicConnection::new(config);
         
@@ -318,12 +263,12 @@ impl RawConnectionHandler {
         // 设置 QUIC 连接到连接中
         connection.set_connection(quic_connection).await;
         
-        // 启动消息接收任务
+        // 启动消息处理任务
         connection.start_task().await
             .map_err(|e| crate::common::error::FlareError::connection_failed(
                 format!("启动消息接收任务失败: {}", e)
             ))?;
-        
+
         Ok(Arc::new(connection))
     }
 }

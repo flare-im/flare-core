@@ -134,6 +134,14 @@ path = "examples/connect_with_platform.rs"
 name = "connection_auth_analysis"
 path = "examples/connection_auth_analysis.md"
 
+[[example]]
+name = "websocket_message_test"
+path = "examples/common/websocket_message_test.rs"
+
+[[example]]
+name = "websocket_client_test"
+path = "examples/common/websocket_client_test.rs"
+
 [dependencies]
 # 异步运行时（核心功能）
 tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal"] }

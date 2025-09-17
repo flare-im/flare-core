@@ -11,6 +11,7 @@ use crate::common::{
     error::Result,
 };
 use crate::ConnectionEvent;
+use crate::common::connections::traits::{ServerConnection};
 use super::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ConnectionEventHandler};
 
 /// WebSocket 服务端实现
@@ -109,6 +110,9 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
                                 addr.to_string(),
                             );
                             
+                            // 设置远程地址为客户端地址
+                            connection_config.remote_addr = addr.to_string();
+                            
                             // 设置默认使用protobuf序列化
                             connection_config = connection_config.with_serialization_config(
                                 crate::common::serialization::SerializationConfig {
@@ -121,14 +125,20 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
                             match crate::common::connections::factory::RawConnectionHandler::from_websocket_with_handler_arc(
                                 tcp_stream, 
                                 connection_config, 
-                                connection_event_handler,
+                                connection_event_handler.clone(),  // 克隆事件处理器
                             ).await {
-                                Ok(connection_arc) => {
-                                    let connection_id = connection_arc.id().to_string();
+                                Ok(connection) => {  // 注意：这里改为connection，不再使用mut
+                                    let connection_id = connection.id().to_string();
                                     debug!("WebSocket 服务端连接已建立: {} (ID: {})", addr, connection_id);
                                     
+                                    // 启动连接任务
+                                    if let Err(e) = connection.accept().await {
+                                        error!("接受WebSocket连接失败: {} - {}", addr, e);
+                                        return;
+                                    }
+                                    
                                     // 将连接添加到连接管理器
-                                    if let Err(e) = connection_manager.add_connection(connection_arc.clone()).await {
+                                    if let Err(e) = connection_manager.add_connection(connection).await {
                                         error!("添加连接到管理器失败: {}", e);
                                         return;
                                     }

@@ -7,19 +7,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, error};
 
-use crate::common::{
-    error::{Result, FlareError},
-    protocol::Frame,
-    connections::{
-        traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection},
-        types::{ConnectionConfig, ConnectionState},
-        event::DefConnectionEventHandler,
-    },
-    messaging::MessageParser,
-    serialization::FrameSerializer,
-    serialization::SerializerFactory,
-    serialization::factory::json_serializer,
-};
+use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
+    traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection},
+    types::{ConnectionConfig, ConnectionState},
+    event::DefConnectionEventHandler,
+}, messaging::MessageParser, serialization::FrameSerializer, serialization::SerializerFactory, serialization::factory::json_serializer, SerializationFormat};
 
 use quinn::{Connection as QuinnConnection, Endpoint};
 use crate::common::error::ErrorCode;
@@ -109,7 +101,7 @@ pub struct QuicConnection {
     /// 消息接收通道（接收已序列化的数据）
     message_receiver: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>,
     /// 序列化器
-    serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>,
+    serializer: Arc<Box<dyn FrameSerializer>>,
     /// 用户ID（用于服务端连接）
     user_id: Arc<RwLock<Option<String>>>,
     /// 客户端信息（用于服务端连接）
@@ -122,7 +114,7 @@ impl QuicConnection {
         // 根据配置创建序列化器
         let serializer = {
             let factory = SerializerFactory::new();
-            let format = config.serialization_config.as_ref().map(|c| c.format).unwrap_or(crate::common::serialization::SerializationFormat::Json);
+            let format = config.serialization_config.as_ref().map(|c| c.format).unwrap_or(SerializationFormat::Json);
             factory.create_with_config(
                 format,
                 config.get_serialization_config()
@@ -136,7 +128,7 @@ impl QuicConnection {
     }
     
     /// 创建新的 QUIC 连接（使用自定义序列化器）
-    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn crate::common::serialization::FrameSerializer>>) -> Self {
+    pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn FrameSerializer>>) -> Self {
         // 如果配置中没有ID，则生成一个UUID
         let id = if config.id.is_empty() {
             uuid::Uuid::new_v4().to_string()
@@ -491,33 +483,11 @@ impl QuicConnection {
                                 match recv.read(&mut buffer).await {
                                     Ok(Some(bytes_read)) => {
                                         let data = buffer[..bytes_read].to_vec();
-                                        // 使用序列化器解析消息
-                                        match serializer.deserialize(&data).await {
-                                            Ok(frame) => {
-                                                debug!("成功解析消息: {:?}", frame.get_command_type_str());
-                                                // 使用消息解析器处理帧
-                                                message_parser.handle_frame(frame).await;
-                                            },
-                                            Err(e) => {
-                                                error!("消息反序列化失败: {}", e);
-                                                // 直接使用send流发送错误通知给发送方
-                                                let error_frame = Frame::error(
-                                                    format!("deserialization_error_{}", fastrand::u64(..)),
-                                                    format!("消息反序列化失败: {}", e)
-                                                );
-                                                if let Ok(error_data) = serializer.serialize(&error_frame).await {
-                                                    if let Err(send_err) = send.write_all(&error_data).await {
-                                                        error!("发送错误通知失败: {}", send_err);
-                                                    } else {
-                                                        debug!("已发送序列化错误通知给发送方: {}", id);
-                                                    }
-                                                }
-                                                
-                                                // 解析失败，不继续处理消息
-                                                continue;
-                                            }
-                                        };
-                                    }
+                                        // 使用消息解析器处理数据，确保事件被正确触发
+                                        if let Err(e) = message_parser.parse_and_handle(data).await {
+                                            error!("消息处理失败: {}", e);
+                                        }
+                                    },
                                     Ok(None) => {
                                         debug!("QUIC 流已关闭");
                                         break;

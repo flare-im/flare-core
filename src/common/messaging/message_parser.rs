@@ -4,7 +4,7 @@
 //! 并触发相应的连接事件。
 
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::common::{
     protocol::Frame,
@@ -213,6 +213,7 @@ impl MessageParser {
                     ControlCmd::Disconnect(_) => {
                         // 触发断开连接事件
                         handler.on_disconnected(&id, "收到断开连接消息").await;
+                        
                     },
                     ControlCmd::AuthRequest(_) => {
                         // 认证请求事件在on_message_received中处理
@@ -233,6 +234,7 @@ impl MessageParser {
                 }
             },
             Command::Message(_) | Command::Notification(_) | Command::Event(_) => {
+                info!("收到消息 {:?}", frame_clone);
                 // 消息、通知和事件类命令统一触发消息接收事件
                 handler.on_message_received(&id, &frame_clone).await;
             }

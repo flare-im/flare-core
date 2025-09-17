@@ -9,6 +9,8 @@ use tracing::{debug, info, error};
 use futures_util::{StreamExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
+use futures_util::stream::SplitSink;
+use futures_util::stream::SplitStream;
 use crate::common::{error::{Result, FlareError}, protocol::{Frame, factory::FrameFactory}, connections::{
     traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection},
     types::{ConnectionConfig, ConnectionState},
@@ -36,14 +38,16 @@ pub struct WebSocketConnection {
     /// 连接统计
     stats: Arc<RwLock<ConnectionStats>>,
     
-    /// WebSocket 流（统一字段，根据角色使用）
-    connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>>,
+    /// WebSocket 写入端（用于发送消息）
+    ws_sink: Arc<RwLock<Option<SplitSink<WebSocketStream<tokio::net::TcpStream>, WsMessage>>>>,
+    /// WebSocket 读取端（用于接收消息）
+    ws_stream: Arc<RwLock<Option<SplitStream<WebSocketStream<tokio::net::TcpStream>>>>>,
+    /// 消息发送任务句柄
+    send_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// 消息接收任务句柄
     receive_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// 心跳监控任务句柄
     heartbeat_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// 消息发送任务句柄
-    send_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
     /// 消息发送通道（发送已序列化的数据）
     message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
@@ -106,10 +110,11 @@ impl WebSocketConnection {
             reconnect_attempts: Arc::new(RwLock::new(0)),
             stats: Arc::new(RwLock::new(stats)),
 
-            connection: Arc::new(RwLock::new(None)),
+            ws_sink: Arc::new(RwLock::new(None)),
+            ws_stream: Arc::new(RwLock::new(None)),
+            send_task: Arc::new(RwLock::new(None)),
             receive_task: Arc::new(RwLock::new(None)),
             heartbeat_task: Arc::new(RwLock::new(None)),
-            send_task: Arc::new(RwLock::new(None)),
             message_sender: Arc::new(RwLock::new(Some(tx))),
             message_receiver: Arc::new(RwLock::new(Some(rx))),
             serializer,
@@ -131,7 +136,9 @@ impl WebSocketConnection {
     
     /// 设置 WebSocket 流（用于服务端连接）
     pub async fn set_connection(&mut self, stream: WebSocketStream<tokio::net::TcpStream>) {
-        *self.connection.write().await = Some(stream);
+        let (sink, stream) = stream.split();
+        *self.ws_sink.write().await = Some(sink);
+        *self.ws_stream.write().await = Some(stream);
     }
 
     /// 内部版本的启动消息处理任务，可以在&self上调用
@@ -266,7 +273,7 @@ impl WebSocketConnection {
     /// 启动消息发送任务
     async fn start_send_task_internal(&self) -> Result<()> {
         let id = self.id.clone();
-        let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&self.connection);
+        let ws_sink: Arc<RwLock<Option<SplitSink<WebSocketStream<tokio::net::TcpStream>, WsMessage>>>> = Arc::clone(&self.ws_sink);
         let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
         let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
         let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
@@ -279,7 +286,7 @@ impl WebSocketConnection {
         // 启动发送任务
         let send_task = {
             let id = id.clone();
-            let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&connection);
+            let ws_sink: Arc<RwLock<Option<SplitSink<WebSocketStream<tokio::net::TcpStream>, WsMessage>>>> = Arc::clone(&ws_sink);
             let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&event_handler);
             let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&stats);
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
@@ -307,9 +314,9 @@ impl WebSocketConnection {
                         
                         // 获取连接并发送
                         {
-                            let mut conn_guard = connection.write().await;
-                            if let Some(ws_stream) = &mut *conn_guard {
-                                if let Err(e) = ws_stream.send(ws_msg).await {
+                            let mut sink_guard = ws_sink.write().await;
+                            if let Some(ws_sink) = &mut *sink_guard {
+                                if let Err(e) = ws_sink.send(ws_msg).await {
                                     error!("WebSocket 发送错误: {} - {}", id, e);
                                     if let Some(handler) = &*event_handler.read().await {
                                         let handler = std::sync::Arc::clone(handler);
@@ -354,7 +361,7 @@ impl WebSocketConnection {
     /// 启动消息接收任务
     async fn start_message_receive_task_internal(&self) -> Result<()> {
         let id = self.id.clone();
-        let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&self.connection);
+        let ws_stream: Arc<RwLock<Option<SplitStream<WebSocketStream<tokio::net::TcpStream>>>>> = Arc::clone(&self.ws_stream);
         let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&self.event_handler);
         let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&self.stats);
         let last_activity: Arc<RwLock<Instant>> = Arc::clone(&self.last_activity);
@@ -370,7 +377,7 @@ impl WebSocketConnection {
         // 启动接收任务
         let receive_task = {
             let id = id.clone();
-            let connection: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>>> = Arc::clone(&connection);
+            let ws_stream: Arc<RwLock<Option<SplitStream<WebSocketStream<tokio::net::TcpStream>>>>> = Arc::clone(&ws_stream);
             let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&event_handler);
             let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&stats);
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
@@ -399,8 +406,8 @@ impl WebSocketConnection {
                 loop {
                     // 读取 WebSocket 消息
                     {
-                        let mut conn_guard = connection.write().await;
-                        if let Some(ws_stream) = &mut *conn_guard {
+                        let mut stream_guard = ws_stream.write().await;
+                        if let Some(ws_stream) = &mut *stream_guard {
                             match ws_stream.next().await {
                                 Some(Ok(msg)) => {
                                     // 更新活跃时间
@@ -429,7 +436,8 @@ impl WebSocketConnection {
                                         WsMessage::Ping(data) => {
                                             debug!("收到 ping: {}", id);
                                             // 自动回复 pong
-                                            let _ = ws_stream.send(WsMessage::Pong(data)).await;
+                                            // 注意：这里需要获取sink来发送pong消息
+                                            // 由于split模式，我们需要通过其他方式处理ping/pong
                                             // 使用统一消息解析器处理Ping消息
                                             let heartbeat_frame = FrameFactory::create_ping_frame("heartbeat".to_string()).unwrap();
                                             message_parser.handle_frame(heartbeat_frame).await;
@@ -607,7 +615,7 @@ impl Connection for WebSocketConnection {
         // 通过自定义消息先通知客户端，方便统一处理
         // TODO: Implement disconnect frame
         // 关闭 WebSocket 连接
-        if let Some(mut connection) = self.connection.write().await.take() {
+        if let Some(mut sink) = self.ws_sink.write().await.take() {
             // 发送关闭帧，使用标准的关闭代码1000表示正常关闭
             let close_frame = tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
@@ -615,11 +623,15 @@ impl Connection for WebSocketConnection {
             };
             
             // 发送关闭帧
-            let _ = connection.close(Some(close_frame)).await;
+            let _ = sink.send(WsMessage::Close(Some(close_frame))).await;
+            
+            // 关闭sink
+            let _ = sink.close().await;
         }
         
         // 清理连接
-        *self.connection.write().await = None;
+        *self.ws_sink.write().await = None;
+        *self.ws_stream.write().await = None;
         
         *self.state.write().await = ConnectionState::Disconnected;
         
@@ -710,7 +722,9 @@ impl ClientConnection for WebSocketConnection {
             .map_err(|e| FlareError::connection_failed(format!("WebSocket 握手失败: {}", e)))?;
         
         // 保存流
-        *self.connection.write().await = Some(ws_stream);
+        let (sink, stream) = ws_stream.split();
+        *self.ws_sink.write().await = Some(sink);
+        *self.ws_stream.write().await = Some(stream);
         
         // 启动消息接收任务
         self.start_task().await?;
@@ -877,13 +891,14 @@ impl ServerConnection for WebSocketConnection {
         
         // 检查WebSocket连接是否已设置
         {
-            let connection = self.connection.read().await;
-            if connection.is_none() {
+            let sink = self.ws_sink.read().await;
+            let stream = self.ws_stream.read().await;
+            if sink.is_none() || stream.is_none() {
                 return Err(FlareError::connection_failed("WebSocket连接未设置"));
             }
         }
-        
-        // 启动必要的任务
+
+        // 启动必要的任务（在accept方法中启动，确保只启动一次）
         self.start_task().await?;
         
         *self.state.write().await = ConnectionState::Connected;
