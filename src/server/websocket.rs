@@ -12,7 +12,7 @@ use crate::common::{
 };
 use crate::ConnectionEvent;
 use crate::common::connections::traits::{ServerConnection};
-use super::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ConnectionEventHandler};
+use crate::server::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ServerEventAdapter};
 
 /// WebSocket 服务端实现
 ///
@@ -28,8 +28,8 @@ pub struct WebSocketServer<T: ServerConnectionManager> {
     connection_manager: Arc<T>,
     /// 服务句柄
     server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// 服务端事件处理器
-    event_handler: Arc<ConnectionEventHandler>,
+    /// 服务端事件适配器
+    event_handler: Arc<ServerEventAdapter>,
 }
 
 impl<T: ServerConnectionManager + 'static> WebSocketServer<T> {
@@ -46,7 +46,7 @@ impl<T: ServerConnectionManager + 'static> WebSocketServer<T> {
     pub fn new(
         config: ServerConfig,
         connection_manager: Arc<T>,
-        event_handler: Arc<ConnectionEventHandler>,
+        event_handler: Arc<ServerEventAdapter>,
     ) -> Self {
         Self {
             config,

@@ -7,7 +7,7 @@ use crate::common::{
     error::Result,
 };
 
-use super::{manager::traits::ServerConnectionManager, event::ServerEvent, ConnectionEventHandler};
+use crate::server::{manager::traits::ServerConnectionManager, event::ServerEvent, ServerEventAdapter};
 
 /// 服务器配置
 #[derive(Debug, Clone)]
@@ -144,7 +144,7 @@ impl<T: ServerConnectionManager + 'static> ServerImpl<T> {
         self.is_running.store(true, Ordering::Relaxed);
         info!("服务器启动中...");
         
-        let event_handler = ConnectionEventHandler::new(Arc::clone(&self.event_handler));    
+        let event_handler = ServerEventAdapter::new(Arc::clone(&self.event_handler));    
         // 根据配置启动相应的服务
         if let Some(addr) = &self.config.local_addr {
             self.start_websocket_server(addr, Arc::from(event_handler)).await?;
@@ -183,7 +183,7 @@ impl<T: ServerConnectionManager + 'static> ServerImpl<T> {
     }
     
     /// 启动WebSocket服务
-    async fn start_websocket_server(&self, addr: &str,event_handler:Arc<ConnectionEventHandler>) -> Result<()> {
+    async fn start_websocket_server(&self, addr: &str,event_handler:Arc<ServerEventAdapter>) -> Result<()> {
         info!("正在启动WebSocket服务: {}", addr);
         
         // 创建WebSocket服务

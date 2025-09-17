@@ -11,7 +11,7 @@ use crate::common::{
 };
 use crate::common::connections::factory::RawConnectionHandler;
 use crate::ConnectionEvent;
-use super::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ConnectionEventHandler};
+use crate::server::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ServerEventAdapter};
 
 /// QUIC 服务端实现
 ///
@@ -29,8 +29,8 @@ pub struct QuicServer<T: ServerConnectionManager> {
     server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// QUIC端点
     endpoint: Arc<RwLock<Option<quinn::Endpoint>>>,
-    /// 服务端事件处理器
-    event_handler: Arc<ConnectionEventHandler>,
+    /// 服务端事件适配器
+    event_handler: Arc<ServerEventAdapter>,
 }
 
 impl<T: ServerConnectionManager + 'static> QuicServer<T> {
@@ -47,7 +47,7 @@ impl<T: ServerConnectionManager + 'static> QuicServer<T> {
     pub fn new(
         config: ServerConfig,
         connection_manager: Arc<T>,
-        event_handler: Arc<ConnectionEventHandler>,
+        event_handler: Arc<ServerEventAdapter>,
     ) -> Self {
         Self {
             config,

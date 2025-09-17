@@ -5,14 +5,16 @@ use crate::common::connections::traits::ConnectionStats;
 use crate::server::ServerEvent;
 use crate::common::protocol::commands::{Command, ControlCmd, MessageCmd, NotificationCmd, EventCmd};
 
-/// 连接事件处理器
-pub struct ConnectionEventHandler {
+/// 服务端事件适配器
+/// 
+/// 专门用于适配服务端事件处理的模块，未来可扩展以适配其他服务端功能
+pub struct ServerEventAdapter {
     /// 服务端事件处理器
     server_event_handler: Arc<dyn ServerEvent>,
 }
 
-impl ConnectionEventHandler {
-    /// 创建新的连接事件处理器
+impl ServerEventAdapter {
+    /// 创建新的服务端事件适配器
     pub fn new(server_event_handler: Arc<dyn ServerEvent>) -> Self {
         Self {
             server_event_handler,
@@ -25,7 +27,7 @@ impl ConnectionEventHandler {
     }
     
     /// 消息处理器
-    async fn message_handler(&self, _connection_id: &str, message: &Frame) {
+    async fn handle_message(&self, _connection_id: &str, message: &Frame) {
         // 根据消息中的命令类型进行处理
         // 注意：已经在message_parser中处理过的命令（如心跳、连接、断开连接等）这里只打印日志
         match &message.command {
@@ -143,11 +145,23 @@ impl ConnectionEventHandler {
             }
         }
     }
+    
+    // 未来可以在这里添加其他适配方法
+    // 例如：
+    // - 用户管理适配
+    // - 连接管理适配
+    // - 消息路由适配
+    // - 认证授权适配
+    // - 统计信息适配
+    //
+    // 示例方法签名（未实现）：
+    // pub async fn adapt_user_management(&self, user_id: &str) -> Result<()> { ... }
+    // pub async fn adapt_connection_management(&self, connection_id: &str) -> Result<()> { ... }
 }
 
 /// 连接事件处理器实现
 #[async_trait]
-impl ConnectionEvent for ConnectionEventHandler {
+impl ConnectionEvent for ServerEventAdapter {
     async fn on_connected(&self, connection_id: &str) {
         self.server_event_handler.on_connected(connection_id).await;
     }
@@ -161,7 +175,7 @@ impl ConnectionEvent for ConnectionEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        self.message_handler(connection_id, message).await;
+        self.handle_message(connection_id, message).await;
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {

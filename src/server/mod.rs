@@ -7,7 +7,7 @@ pub mod server;
 pub mod websocket;
 pub mod quic;
 pub mod event;
-mod handlers;
+mod adapter;
 
 // 重新导出常用的类型，方便外部使用
 pub use manager::{
@@ -22,6 +22,6 @@ pub use event::{
     DefServerEventHandler,
 };
 // 服务端处理器
-pub use handlers::{
-    ConnectionEventHandler,
+pub use adapter::{
+    ServerEventAdapter,
 };
