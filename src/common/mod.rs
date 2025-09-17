@@ -20,7 +20,7 @@ pub use connections::{
 pub use connections::quic::QuicConnection;
 pub use connections::websocket::WebSocketConnection;
 pub use error::{Result, FlareError};
-pub use protocol::{Frame, MessageType, Reliability};
+pub use protocol::{Frame, Reliability, ProtocolSelection};
 pub use serialization::{
     FrameSerializer, SerializationFormat, SerializationConfig,
     JsonSerializer, SerializerFactory,

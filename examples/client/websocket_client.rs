@@ -12,11 +12,12 @@ use flare_core::{
         connections::{
             factory::ConnectionFactory,
             traits::{ConnectionFactory as ConnectionFactoryTrait, ConnectionEvent},
-            types::{ConnectionConfig, ConnectionType, WebSocketConfig},
+            types::{ConnectionConfig, Transport, WebSocketConfig},
         },
-        protocol::{Frame, MessageType, Reliability},
-        serialization::SerializationFormat,
+        protocol::{Reliability},
+        serialization::{SerializationFormat, SerializationConfig},
     },
+    common::protocol::factory::FrameFactory,
 };
 
 /// WebSocket客户端事件处理器
@@ -39,25 +40,12 @@ impl ConnectionEvent for WebSocketClientEventHandler {
         error!("[{}] WebSocket连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
 
-    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] 收到WebSocket心跳消息: {}", self.name, connection_id);
-        } else {
-            let payload = message.get_payload();
-            if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                info!("[{}] 收到WebSocket服务器消息: {} - 内容: {}", self.name, connection_id, text);
-            } else {
-                info!("[{}] 收到WebSocket二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
-            }
-        }
+    async fn on_message_received(&self, connection_id: &str, _message: &flare_core::common::protocol::Frame) {
+        info!("[{}] 收到WebSocket服务器消息: {}", self.name, connection_id);
     }
 
-    async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] WebSocket心跳消息已发送: {}", self.name, connection_id);
-        } else {
-            info!("[{}] WebSocket数据消息已发送: {}", self.name, connection_id);
-        }
+    async fn on_message_sent(&self, connection_id: &str, _message: &flare_core::common::protocol::Frame) {
+        info!("[{}] WebSocket数据消息已发送: {}", self.name, connection_id);
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {
@@ -110,17 +98,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("启动WebSocket客户端示例");
     
     // 创建WebSocket客户端配置
-    let config = ConnectionConfig::client(
+    let mut config = ConnectionConfig::client(
         "websocket_client".to_string(),  // 更新为websocket_client
-        "ws://127.0.0.1:8083".to_string()  // WebSocket服务端地址 (修改为8083端口)
-    ).with_type(ConnectionType::WebSocket)
-     .with_websocket_config(WebSocketConfig {
+        "ws://127.0.0.1:8080".to_string()  // WebSocket服务端地址 (修改为8080端口)
+    );
+    
+    // 设置传输类型为WebSocket
+    config.transport = Transport::WebSocket;
+    
+    // 设置WebSocket配置
+    config.protocol_config.websocket = WebSocketConfig {
          subprotocols: vec!["binary".to_string()],
          extensions: vec![],
          compression_threshold: Some(128),
-     })
+    };
+    
+    // 设置心跳和序列化
+    config = config
      .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
-     .with_serialization_format(SerializationFormat::Protobuf); // 使用Protobuf序列化
+     .with_serialization_config(SerializationConfig {
+         format: SerializationFormat::Protobuf,  // 使用Protobuf序列化
+         ..Default::default()
+     });
     
     info!("WebSocket客户端配置: {:?}", config);
     info!("连接地址: {}", config.remote_addr);
@@ -133,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 设置事件处理器
     let event_handler = Arc::new(WebSocketClientEventHandler::new("WebSocket客户端".to_string()));
-    client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEvent>).await;
+    client_connection.set_event_handler(event_handler).await;
     
     // 建立连接
     info!("正在连接WebSocket服务端...");
@@ -144,9 +143,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 发送认证消息（简化示例，实际应用中应该使用真实的认证数据）
     info!("发送认证消息...");
-    let auth_message = Frame::connect(
-        "websocket_client",  // 更新为websocket_client
-    );
+    let message_id = FrameFactory::generate_message_id();
+    let auth_message = FrameFactory::create_connect_frame(
+        message_id,
+        "websocket_client".to_string(),
+        "websocket".to_string(),
+        "web".to_string(),
+        "1.0.0".to_string(),
+    )?;
     
     client_connection.send_message(auth_message).await?;
     info!("认证消息已发送");
@@ -156,12 +160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 发送测试消息
     info!("发送测试消息...");
-    let test_message = Frame::new(
-        MessageType::Data,
-        1,
-        Reliability::AtLeastOnce,
+    let message_id = FrameFactory::generate_message_id();
+    let test_message = FrameFactory::create_message_frame(
+        message_id,
         "Hello from WebSocket client!".as_bytes().to_vec(),
-    );
+        Reliability::AtLeastOnce,
+    )?;
     
     client_connection.send_message(test_message).await?;
     info!("测试消息已发送");
@@ -171,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 断开连接
     info!("正在断开连接...");
-    client_connection.disconnect().await?;
+    client_connection.disconnect(Some("Client disconnect".to_string())).await?;
     info!("连接已断开");
     
     Ok(())

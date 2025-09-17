@@ -72,11 +72,11 @@ impl ConnectionEvent for DefServerEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        tracing::info!("服务端: 收到消息: {} - 类型: {:?}", connection_id, message.get_message_type());
+        tracing::info!("服务端: 收到消息: {} - 类型: {}", connection_id, message.get_command_type_str());
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        tracing::info!("服务端: 发送消息: {} - 类型: {:?}", connection_id, message.get_message_type());
+        tracing::info!("服务端: 发送消息: {} - 类型: {}", connection_id, message.get_command_type_str());
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {
@@ -146,13 +146,13 @@ impl ServerEvent for DefServerEventHandler {
     }
     
     async fn on_user_message(&self, connection_id: &str, user_id: &str, message: &Frame) -> Result<()>  {
-        tracing::info!("服务端: 收到用户消息: 连接={} 用户={} 类型={:?}", connection_id, user_id, message.get_message_type());
+        tracing::info!("服务端: 收到用户消息: 连接={} 用户={} 类型={}", connection_id, user_id, message.get_command_type_str());
         // 默认返回true，表示继续处理消息
         Ok(())
     }
     
     async fn on_request(&self, connection_id: &str, user_id: &str, message: &Frame) -> Result<()> {
-        tracing::info!("服务端: 收到请求: 连接={} 用户={} 类型={:?}", connection_id, user_id, message.get_message_type());
+        tracing::info!("服务端: 收到请求: 连接={} 用户={} 类型={}", connection_id, user_id, message.get_command_type_str());
         Ok(())
     }
     

@@ -15,7 +15,7 @@ use crate::common::{
         types::{ConnectionConfig, ConnectionState},
         event::DefConnectionEventHandler,
     },
-    messaging::MessageParser, // 从messaging模块导入
+    messaging::MessageParser,
     serialization::FrameSerializer,
     serialization::SerializerFactory,
     serialization::factory::json_serializer,
@@ -448,10 +448,10 @@ impl QuicConnection {
         let receive_task = {
             let id = id.clone();
             let connection: Arc<RwLock<Option<QuinnConnection>>> = Arc::clone(&connection);
-            let event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&event_handler);
+            let _event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>> = Arc::clone(&event_handler);
             let stats: Arc<RwLock<ConnectionStats>> = Arc::clone(&stats);
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
-            let state: Arc<RwLock<ConnectionState>> = Arc::clone(&state);
+            let _state: Arc<RwLock<ConnectionState>> = Arc::clone(&state);
             let serializer: Arc<Box<dyn FrameSerializer>> = Arc::clone(&serializer);
             let config = config.clone(); // 使用克隆的配置
             let message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>> = Arc::clone(&self.message_sender); // 克隆发送通道
@@ -494,14 +494,17 @@ impl QuicConnection {
                                         // 使用序列化器解析消息
                                         match serializer.deserialize(&data).await {
                                             Ok(frame) => {
-                                                debug!("成功解析消息: {:?}", frame.get_message_type());
+                                                debug!("成功解析消息: {:?}", frame.get_command_type_str());
                                                 // 使用消息解析器处理帧
                                                 message_parser.handle_frame(frame).await;
                                             },
                                             Err(e) => {
                                                 error!("消息反序列化失败: {}", e);
                                                 // 直接使用send流发送错误通知给发送方
-                                                let error_frame = Frame::error(ErrorCode::DeserializationError.as_u32(), &format!("消息反序列化失败: {}", e));
+                                                let error_frame = Frame::error(
+                                                    format!("deserialization_error_{}", fastrand::u64(..)),
+                                                    format!("消息反序列化失败: {}", e)
+                                                );
                                                 if let Ok(error_data) = serializer.serialize(&error_frame).await {
                                                     if let Err(send_err) = send.write_all(&error_data).await {
                                                         error!("发送错误通知失败: {}", send_err);
@@ -615,7 +618,7 @@ impl Connection for QuicConnection {
         // 通过通道发送序列化后的数据（与客户端一样）
         let sender = self.message_sender.read().await;
         if let Some(tx) = &*sender {
-            let message_type = message.get_message_type();
+            let message_type = message.get_command_type_str();
             tx.send(message_data)
                 .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
             
@@ -640,7 +643,7 @@ impl Connection for QuicConnection {
     async fn close(&self, reason: Option<String>) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
         // 通过自定义消息先通知客户端，方便统一处理
-        self.send_message(Frame::disconnect(reason.clone().unwrap_or_else(|| "主动断开".into()))).await?;
+        // TODO: Implement disconnect frame
         // 关闭 QUIC 连接
         if let Some(conn) = &*self.connection.read().await {
             conn.close(0u32.into(), b"connection closed");
@@ -676,7 +679,10 @@ impl Connection for QuicConnection {
                self.id, error_code, error_message);
         
         // 创建错误帧
-        let error_frame = Frame::error(error_code, error_message);
+        let error_frame = Frame::error(
+            format!("error_{}", fastrand::u64(..)),
+            format!("{}: {}", error_code, error_message)
+        );
         
         // 先序列化错误消息，确保序列化成功再发送
         let error_data = self.serializer.serialize(&error_frame).await
@@ -771,7 +777,9 @@ impl ClientConnection for QuicConnection {
             .and_then(|c| c.platform.clone())
             .unwrap_or(Platform::Web);
         // 发送链接消息
-        self.send_message(Frame::connect(self.config.id.clone().as_str(), platform)).await?;
+        let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+        let frame = crate::common::protocol::factory::FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+        self.send_message(frame).await?;
         
         info!("QUIC 连接已建立: {}", self.id);
         Ok(())
@@ -936,14 +944,27 @@ impl ServerConnection for QuicConnection {
             });
         }
         // 发送connect响应消息
-        self.send_message(Frame::connect_ack(self.config.id.clone().as_str())).await?;
+        let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+        let mut frame = crate::common::protocol::Frame::new(
+            crate::common::protocol::commands::Command::Control(crate::common::protocol::commands::ControlCmd::Pong),
+            message_id.clone(),
+            crate::common::protocol::Reliability::BestEffort
+        );
+        self.send_message(frame).await?;
 
         info!("QUIC 服务端连接已接受: {}", self.id);
         Ok(())
     }
 
     async fn authenticate(&self,success:bool,platform: Platform, user_id: String, info: Option<Vec<u8>>,reason: Option<String>) -> Result<()> {
-        let mut frame = Frame::auth_response(false, None, Option::from(reason.clone().unwrap_or_else(|| "认证失败".to_string())));
+        let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+        let mut frame = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
+            message_id.clone(),
+            false,
+            0,
+            None,
+            Some(reason.clone().unwrap_or_else(|| "认证失败".to_string()))
+        ).unwrap();
         if success {
             // 设置用户ID
             *self.user_id.write().await = Some(user_id);
@@ -954,7 +975,14 @@ impl ServerConnection for QuicConnection {
                 platform, // 实际应该从info中解析
             };
             *self.client_info.write().await = Some(client_info);
-            frame = Frame::auth_response(true, info,reason.clone());
+            let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+            frame = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
+                message_id.clone(),
+                true,
+                0,
+                info,
+                reason.clone()
+            ).unwrap();
             *self.state.write().await = ConnectionState::Ready;
         }
         // 发送认证结果

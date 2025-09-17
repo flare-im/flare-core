@@ -12,7 +12,6 @@
 pub mod traits;
 pub mod connection_manager;
 pub mod user_connection_manager;
-pub mod message_handler;
 
 // 重新导出常用的类型，方便外部使用
 pub use connection_manager::ConnectionManager;

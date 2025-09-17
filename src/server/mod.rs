@@ -7,9 +7,6 @@ pub mod server;
 pub mod websocket;
 pub mod quic;
 pub mod event;
-pub mod auth;
-pub mod auth_handler;
-pub mod auth_event_handler;
 mod handlers;
 
 // 重新导出常用的类型，方便外部使用

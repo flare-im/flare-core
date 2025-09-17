@@ -380,18 +380,27 @@ pub struct BufferPoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{MessageType, Reliability};
+    use crate::common::protocol::{Frame, Reliability};
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     #[tokio::test]
     async fn test_zero_copy_serialization() {
         let serializer = ZeroCopyBincodeSerializer::new();
         
-        let frame = Frame::new(
-            MessageType::Data,
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let mut frame = Frame::new(
+            None, // 暂时没有命令
             1,
             Reliability::AtLeastOnce,
-            vec![1, 2, 3, 4, 5],
+            timestamp,
         );
+        
+        // 添加测试数据到元数据中
+        frame.add_metadata("test_data".to_string(), vec![1, 2, 3, 4, 5]);
         
         // 测试序列化
         let serialized = serializer.serialize(&frame).await.unwrap();
@@ -399,18 +408,35 @@ mod tests {
         
         // 测试反序列化
         let deserialized = serializer.deserialize(&serialized).await.unwrap();
-        assert_eq!(deserialized.get_message_type(), frame.get_message_type());
-        assert_eq!(deserialized.get_payload(), frame.get_payload());
+        assert_eq!(deserialized.message_id, frame.message_id);
+        assert_eq!(deserialized.reliability, frame.reliability);
     }
     
     #[tokio::test]
     async fn test_batch_serialization() {
         let serializer = ZeroCopyBincodeSerializer::new();
         
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
         let frames = vec![
-            Frame::new(MessageType::Data, 1, Reliability::AtLeastOnce, vec![1, 2, 3]),
-            Frame::new(MessageType::Data, 2, Reliability::AtLeastOnce, vec![4, 5, 6]),
-            Frame::new(MessageType::Data, 3, Reliability::AtLeastOnce, vec![7, 8, 9]),
+            {
+                let mut frame = Frame::new(None, 1, Reliability::AtLeastOnce, timestamp);
+                frame.add_metadata("data".to_string(), vec![1, 2, 3]);
+                frame
+            },
+            {
+                let mut frame = Frame::new(None, 2, Reliability::AtLeastOnce, timestamp);
+                frame.add_metadata("data".to_string(), vec![4, 5, 6]);
+                frame
+            },
+            {
+                let mut frame = Frame::new(None, 3, Reliability::AtLeastOnce, timestamp);
+                frame.add_metadata("data".to_string(), vec![7, 8, 9]);
+                frame
+            },
         ];
         
         let results = serializer.serialize_batch(&frames).unwrap();
@@ -419,19 +445,28 @@ mod tests {
         // 测试每个结果都能正确反序列化
         for (i, data) in results.iter().enumerate() {
             let deserialized = serializer.deserialize(data).await.unwrap();
-            assert_eq!(deserialized.get_message_id(), frames[i].get_message_id());
+            assert_eq!(deserialized.message_id, frames[i].message_id);
         }
     }
     
     #[tokio::test]
     async fn test_performance() {
         let serializer = ZeroCopyBincodeSerializer::new();
-        let frame = Frame::new(
-            MessageType::Data,
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let mut frame = Frame::new(
+            None, // 暂时没有命令
             1,
             Reliability::AtLeastOnce,
-            vec![0u8; 1024], // 1KB数据
+            timestamp,
         );
+        
+        // 添加1KB数据到元数据中
+        frame.add_metadata("data".to_string(), vec![0u8; 1024]);
         
         let iterations = 1000;
         let start = std::time::Instant::now();

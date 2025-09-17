@@ -38,7 +38,7 @@ pub struct Client {
     /// 序列化器
     serializer: Arc<RwLock<Option<Arc<dyn FrameSerializer>>>>,
     /// 等待响应的请求（message_id -> 回调）
-    pending_requests: Arc<Mutex<HashMap<u64, (RequestCallback, std::time::Instant)>>>,
+    pending_requests: Arc<Mutex<HashMap<String, (RequestCallback, std::time::Instant)>>>,
     /// 请求超时时间（毫秒）
     request_timeout_ms: u64,
 }
@@ -154,7 +154,7 @@ impl Client {
     /// # 返回值
     /// 返回操作结果
     pub async fn send_message(&self, message: Frame) -> Result<()> {
-        debug!("发送消息: {:?}", message.get_message_type());
+        debug!("发送消息: {:?}", message.get_command_type_str());
         
         // 检查连接状态
         let current_state = *self.state.read().await;
@@ -204,7 +204,7 @@ impl Client {
     /// # 返回值
     /// 返回响应消息帧或错误
     pub async fn send_request(&self, request: Frame) -> Result<Frame> {
-        debug!("发送请求: {:?}", request.get_message_type());
+        debug!("发送请求: {:?}", request.get_command_type_str());
         
         // 检查连接状态
         let current_state = *self.state.read().await;
@@ -219,9 +219,10 @@ impl Client {
         
         // 记录请求ID和回调
         let request_id = request.get_message_id();
+        let request_id_clone = request_id.clone();
         {
             let mut pending = self.pending_requests.lock().await;
-            pending.insert(request_id, (sender, std::time::Instant::now()));
+            pending.insert(request_id_clone, (sender, std::time::Instant::now()));
         }
         
         // 发送请求
@@ -280,7 +281,7 @@ impl Client {
         
         // 获取连接并发送心跳
         if let Some(connection) = &*self.connection.read().await {
-            connection.send_message(Frame::heartbeat()).await
+            connection.send_message(Frame::heartbeat("heartbeat".to_string())).await
         } else {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()

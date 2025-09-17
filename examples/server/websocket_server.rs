@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use flare_core::{
     server::{
-        server::{Server, ServerConfig},
+        server::{ServerImpl, ServerConfig},
         ConnectionManager,
-        manager::message_handler::EchoMessageHandler,
     },
 };
 
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection_manager = Arc::new(ConnectionManager::new());
     
     // 创建服务端实例
-    let server = Server::new(config, connection_manager);
+    let server: ServerImpl<ConnectionManager> = ServerImpl::new(config, connection_manager);
     
     // 启动服务端
     server.start().await?;

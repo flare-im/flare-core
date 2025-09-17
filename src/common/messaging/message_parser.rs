@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::common::{
-    protocol::{Frame, MessageType},
+    protocol::Frame,
     connections::{
         event::ConnectionEvent,
         traits::ConnectionStats,
@@ -15,6 +15,7 @@ use crate::common::{
     },
     serialization::FrameSerializer,
 };
+use crate::common::protocol::commands::{Command, ControlCmd};
 
 /// 消息解析器
 /// 
@@ -115,7 +116,7 @@ impl MessageParser {
         // 使用序列化器解析消息
         match self.serializer.deserialize(&data).await {
             Ok(frame) => {
-                debug!("成功解析消息: {:?}", frame.get_message_type());
+                debug!("成功解析消息: {}", frame.get_command_type_str());
                 // 处理解析后的帧
                 self.handle_frame(frame).await;
                 Ok(())
@@ -123,7 +124,8 @@ impl MessageParser {
             Err(e) => {
                 error!("消息反序列化失败: {}", e);
                 // 发送错误通知给发送方
-                let error_frame = Frame::error(crate::common::error::ErrorCode::DeserializationError.as_u32(), &format!("消息反序列化失败: {}", e));
+                let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+                let error_frame = crate::common::protocol::Frame::error(message_id, format!("消息反序列化失败: {}", e));
                 match self.serializer.serialize(&error_frame).await {
                     Ok(error_data) => {
                         // 如果有消息发送通道，直接发送错误消息
@@ -151,7 +153,12 @@ impl MessageParser {
     /// 统一处理心跳响应的发送逻辑
     async fn auto_respond_heartbeat(&self) {
         // 创建心跳响应帧
-        let heartbeat_ack_frame = Frame::heartbeat_ack();
+        let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+        let heartbeat_ack_frame = crate::common::protocol::Frame::new(
+            crate::common::protocol::commands::Command::Control(crate::common::protocol::commands::ControlCmd::Pong),
+            message_id.clone(),
+            crate::common::protocol::Reliability::BestEffort
+        );
         
         // 使用send_message方法发送心跳响应
         if let Err(e) = self.send_message(heartbeat_ack_frame).await {
@@ -172,52 +179,63 @@ impl MessageParser {
             let mut stats = self.stats.write().await;
             stats.messages_received += 1;
         }
-
+        
         // 克隆需要的变量
         let handler = Arc::clone(&self.event_handler);
         let id = self.connection_id.clone();
         let frame_clone = frame.clone();
-
-        // 触发消息接收事件
-        tokio::spawn(async move {
-            // 根据消息类型触发特定的事件处理方法
-            match frame_clone.get_message_type() {
-                // 心跳请求消息处理
-                MessageType::Heartbeat => {
-                    handler.on_heartbeat_ping(&id).await;
-                }
-                // 心跳响应消息处理
-                MessageType::HeartbeatAck => {
-                    handler.on_heartbeat_pong(&id).await;
-                }
-                
-                // 错误消息处理
-                MessageType::Error => {
-                    if let Some((code, message)) = frame_clone.get_error() {
-                        handler.on_error(&id, &format!("远程错误 {} - {}", code, message)).await;
+        
+        // 根据消息类型触发特定的事件处理方法
+        match &frame_clone.command {
+            Command::Control(control_cmd) => {
+                match control_cmd {
+                    ControlCmd::Ping => {
+                        // 触发心跳请求事件
+                        handler.on_heartbeat_ping(&id).await;
+                        
+                        // 如果启用了自动回复心跳，则自动回复
+                        if self.config.is_auto_heartbeat_response_enabled() {
+                            self.auto_respond_heartbeat().await;
+                        }
+                    },
+                    ControlCmd::Pong => {
+                        // 触发心跳响应事件
+                        handler.on_heartbeat_pong(&id).await;
+                    },
+                    ControlCmd::Error(error_cmd) => {
+                        // 触发错误事件
+                        handler.on_error(&id, &format!("远程错误 {} - {}", error_cmd.status, error_cmd.message)).await;
+                    },
+                    ControlCmd::Connect(_) => {
+                        // 触发连接事件
+                        handler.on_connected(&id).await;
+                    },
+                    ControlCmd::Disconnect(_) => {
+                        // 触发断开连接事件
+                        handler.on_disconnected(&id, "收到断开连接消息").await;
+                    },
+                    ControlCmd::AuthRequest(_) => {
+                        // 认证请求事件在on_message_received中处理
+                        handler.on_message_received(&id, &frame_clone).await;
+                    },
+                    ControlCmd::AuthResponse(_) => {
+                        // 认证响应事件在on_message_received中处理
+                        handler.on_message_received(&id, &frame_clone).await;
+                    },
+                    ControlCmd::ConnectAck(_) => {
+                        // 连接确认事件在on_message_received中处理
+                        handler.on_message_received(&id, &frame_clone).await;
+                    },
+                    ControlCmd::Custom(_) => {
+                        // 自定义命令事件在on_message_received中处理
+                        handler.on_message_received(&id, &frame_clone).await;
                     }
                 }
-                // 连接消息处理
-                MessageType::ConnectAck=>{
-                    handler.on_connected(&id).await;
-                }
-                // 断开连接消息处理
-                MessageType::Disconnect => {
-                    handler.on_disconnected(&id, "断开").await;
-                }
-                // 未知消息类型，只触发通用的消息接收事件（已经在前面触发了）
-                _ => {
-                    // 通用的消息接收事件已经在函数开始时触发
-                   handler.on_message_received(&id, &frame_clone).await;
-                }
+            },
+            Command::Message(_) | Command::Notification(_) | Command::Event(_) => {
+                // 消息、通知和事件类命令统一触发消息接收事件
+                handler.on_message_received(&id, &frame_clone).await;
             }
-        });
-        
-        // 如果是心跳请求且启用了自动回复，则自动回复心跳响应
-        if frame.get_message_type() == MessageType::Heartbeat && self.config.is_auto_heartbeat_response_enabled() {
-            debug!("自动回复心跳响应: {}", self.connection_id);
-            self.auto_respond_heartbeat().await;
         }
     }
-
 }

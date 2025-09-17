@@ -190,42 +190,53 @@ impl ConfigurableSerializer for MessagePackSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{Frame, MessageType, Reliability};
+    use crate::common::protocol::factory::FrameFactory;
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     #[tokio::test]
     async fn test_msgpack_serializer_basic() {
         let serializer = MessagePackSerializer::new();
         
-        let frame = Frame::new(
-            MessageType::Data,
-            12345,
-            Reliability::AtLeastOnce,
-            b"test message".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+        
+        // 添加测试数据到元数据中
+        let mut frame_with_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_metadata, "test_data".to_string(), b"test message".to_vec());
         
         // 测试序列化
-        let serialized = serializer.serialize(&frame).await.unwrap();
+        let serialized = serializer.serialize(&frame_with_metadata).await.unwrap();
         assert!(!serialized.is_empty());
         
         // 测试反序列化
         let deserialized = serializer.deserialize(&serialized).await.unwrap();
-        assert_eq!(deserialized.get_message_id(), frame.get_message_id());
-        assert_eq!(deserialized.get_message_type(), frame.get_message_type());
+        assert_eq!(deserialized.message_id, frame_with_metadata.message_id);
+        assert_eq!(deserialized.reliability, frame_with_metadata.reliability);
     }
     
     #[tokio::test]
     async fn test_msgpack_size_estimate() {
         let serializer = MessagePackSerializer::new();
         
-        let frame = Frame::new(
-            MessageType::Data,
-            1,
-            Reliability::AtLeastOnce,
-            b"test message for size estimation".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+        
+        // 添加测试数据到元数据中
+        let mut frame_with_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_metadata, "test_data".to_string(), b"test message for size estimation".to_vec());
         
         // 直接序列化获取实际大小
-        let actual_data = serializer.serialize(&frame).await.unwrap();
+        let actual_data = serializer.serialize(&frame_with_metadata).await.unwrap();
         let actual_size = actual_data.len();
         
         // 验证序列化成功并获得了数据

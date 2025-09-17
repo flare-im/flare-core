@@ -577,11 +577,14 @@ impl UserConnectionManager {
             ).await?;
             
             // 发送认证成功响应消息
-            let auth_response = Frame::auth_response(
+            let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+            let auth_response = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
+                message_id, // message_id
                 true,  // success
+                0,  // status
                 None,  // user_info
                 None   // error_message
-            );
+            ).unwrap();
             
             if let Err(e) = connection.send_message(auth_response).await {
                 warn!("发送认证成功响应失败: {} - 错误: {}", connection_id, e);

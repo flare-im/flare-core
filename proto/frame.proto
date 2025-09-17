@@ -7,14 +7,17 @@ syntax = "proto3";
 // Package definition for the Flare core messaging system
 package flare.core;
 
+// Import commands
+import "commands.proto";
+
 // Frame represents a unified message structure for all communication
-// It contains all necessary metadata and the actual payload
+// It contains all necessary metadata and the actual command
 message Frame {
-  // Type of the message (e.g., heartbeat, data, control)
-  MessageType message_type = 1;
+  // The actual command
+  flare.core.commands.Command command = 1;
   
   // Unique identifier for the message (used for acknowledgment and deduplication)
-  uint64 message_id = 2;
+  string message_id = 2;
   
   // Reliability level of the message (best effort, at least once, exactly once, ordered)
   Reliability reliability = 3;
@@ -22,62 +25,20 @@ message Frame {
   // Timestamp when the message was created (milliseconds since Unix epoch)
   uint64 timestamp = 4;
   
-  // Actual message payload as bytes (can be serialized data of any format)
-  bytes payload = 5;
-  
   // Optional session identifier for grouping related messages
-  optional string session_id = 6;
+  optional string session_id = 5;
   
   // Message priority level (0-255, higher values indicate higher priority)
-  uint32 priority = 7;
+  uint32 priority = 6;
   
   // Optional compression algorithm identifier (if payload is compressed)
-  optional uint32 compression = 8;
+  optional uint32 compression = 7;
   
   // Flag indicating whether the payload is encrypted
-  bool encrypted = 9;
+  bool encrypted = 8;
   
   // Metadata key-value pairs (for additional information like platform data)
-  map<string, bytes> metadata = 10;
-}
-
-// MessageType defines all possible types of messages in the protocol
-enum MessageType {
-  // Unknown message type (should not be used in normal operation)
-  UNKNOWN = 0;
-  
-  // Heartbeat messages for connection keep-alive
-  HEARTBEAT = 1;
-  HEARTBEAT_ACK = 2;
-  
-  // Connection establishment and acknowledgment
-  CONNECT = 3;
-  CONNECT_ACK = 4;
-  
-  // Connection termination and acknowledgment
-  DISCONNECT = 5;
-  DISCONNECT_ACK = 6;
-  
-  // Data transmission
-  DATA = 7;
-  DATA_ACK = 8;
-  MESSAGE = 9;
-  MESSAGE_ACK = 10;
-  RESEND = 11;
-  
-  // Error handling
-  ERROR = 12;
-  NOTIFICATION = 13;
-  
-  // Authentication messages
-  AUTH_REQUEST = 14;
-  AUTH_RESPONSE = 15;
-  
-  // Custom event messages (application-defined)
-  CUSTOM_EVENT = 16;
-  
-  // Custom message types (application-defined)
-  CUSTOM_MESSAGE = 17;
+  map<string, bytes> metadata = 9;
 }
 
 // Reliability defines the delivery guarantees for messages

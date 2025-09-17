@@ -237,63 +237,118 @@ impl ConfigurableSerializer for JsonSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{Frame, MessageType, Reliability};
+    use crate::common::protocol::factory::FrameFactory;
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     #[tokio::test]
     async fn test_json_serializer_basic() {
         let serializer = JsonSerializer::new();
         
-        let frame = Frame::new(
-            MessageType::Data,
-            12345,
-            Reliability::AtLeastOnce,
-            b"test message".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let message_id = FrameFactory::generate_message_id();
+        let proto_frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
         
         // 测试序列化
-        let serialized = serializer.serialize(&frame).await.unwrap();
+        let serialized = serializer.serialize(&proto_frame).await.unwrap();
         assert!(!serialized.is_empty());
         
         // 测试反序列化
         let deserialized = serializer.deserialize(&serialized).await.unwrap();
-        assert_eq!(deserialized.get_message_id(), frame.get_message_id());
-        assert_eq!(deserialized.get_message_type(), frame.get_message_type());
+        assert_eq!(deserialized.message_id, proto_frame.message_id);
+        assert_eq!(deserialized.reliability, proto_frame.reliability);
     }
     
     #[tokio::test]
     async fn test_json_serializer_pretty() {
         let serializer = JsonSerializer::pretty();
         
-        let frame = Frame::new(
-            MessageType::Heartbeat,
-            0,
-            Reliability::BestEffort,
-            Vec::new(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
         
         let serialized = serializer.serialize(&frame).await.unwrap();
-        let json_str = String::from_utf8(serialized).unwrap();
+        let deserialized = serializer.deserialize(&serialized).await.unwrap();
+        
+        assert_eq!(deserialized.message_id, frame.message_id);
+        assert_eq!(deserialized.reliability, frame.reliability);
         
         // 美化格式应该包含换行符
-        assert!(json_str.contains('\n'));
+        let serialized_str = String::from_utf8(serialized).unwrap();
+        assert!(serialized_str.contains('\n'));
+    }
+    
+    #[tokio::test]
+    async fn test_json_serializer_config() {
+        let mut config = SerializationConfig::default();
+        config.max_message_size = Some(1024);
+        
+        let serializer = JsonSerializer::with_config(config);
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+
+        // 添加一些元数据来增加大小
+        let mut frame_with_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_metadata, "test_key".to_string(), vec![0u8; 100]);
+        
+        let serialized = serializer.serialize(&frame_with_metadata).await.unwrap();
+        let deserialized = serializer.deserialize(&serialized).await.unwrap();
+        
+        assert_eq!(deserialized.message_id, frame_with_metadata.message_id);
     }
     
     #[tokio::test]
     async fn test_json_serializer_size_limit() {
         let mut config = SerializationConfig::default();
-        config.max_message_size = Some(10); // 非常小的限制
+        config.max_message_size = Some(100); // 很小的限制
         
         let serializer = JsonSerializer::with_config(config);
         
-        let frame = Frame::new(
-            MessageType::Data,
-            1,
-            Reliability::AtLeastOnce,
-            b"this is a very long message that exceeds the limit".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+
+        // 添加大量元数据来超过限制
+        let mut frame_with_large_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_large_metadata, "large_data".to_string(), vec![0u8; 1000]);
         
-        // 应该因为大小限制失败
-        let result = serializer.serialize(&frame).await;
+        let result = serializer.serialize(&frame_with_large_metadata).await;
         assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_json_serializer_validation() {
+        let serializer = JsonSerializer::new();
+        
+        // 测试配置验证
+        let mut config = SerializationConfig::default();
+        config.enable_compression = true;
+        
+        let result = serializer.validate_config(&config);
+        assert!(result.is_err());
+        
+        // 测试有效配置
+        let mut valid_config = SerializationConfig::default();
+        valid_config.pretty_format = true;
+        valid_config.max_message_size = Some(1024 * 1024);
+        
+        let result = serializer.validate_config(&valid_config);
+        assert!(result.is_ok());
     }
 }

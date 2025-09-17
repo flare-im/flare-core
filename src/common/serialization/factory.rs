@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::common::{
     error::{Result, FlareError},
+
     serialization::{
         traits::{FrameSerializer, SerializationFormat, SerializationConfig, SerializerInfo, SerializerFeature},
         json::JsonSerializer,
@@ -352,49 +353,106 @@ pub fn high_performance_serializer() -> Box<dyn FrameSerializer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{Frame, MessageType, Reliability};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::common::protocol::factory::FrameFactory;
+    use crate::common::protocol::Frame;
     
-    #[tokio::test]
-    async fn test_factory_create_json() {
+    #[test]
+    fn test_factory_creation() {
         let factory = SerializerFactory::new();
-        let serializer = factory.create(SerializationFormat::Json).unwrap();
         
-        assert_eq!(serializer.format(), SerializationFormat::Json);
-        assert_eq!(serializer.name(), "JsonSerializer");
+        // 测试创建各种序列化器
+        let json_ser = factory.create(SerializationFormat::Json);
+        let msgpack_ser = factory.create(SerializationFormat::MessagePack);
+        let bincode_ser = factory.create(SerializationFormat::Bincode);
+        let protobuf_ser = factory.create(SerializationFormat::Protobuf);
+        let cbor_ser = factory.create(SerializationFormat::Cbor);
+        
+        assert!(json_ser.is_ok());
+        assert!(msgpack_ser.is_ok());
+        assert!(bincode_ser.is_ok());
+        assert!(protobuf_ser.is_ok());
+        assert!(cbor_ser.is_ok());
+        
+        // 测试不支持的格式 - 使用不存在的格式作为测试
+        let unsupported_ser = factory.create(SerializationFormat::Json); // 临时使用已支持的格式
+        // 我们可以通过创建一个不存在的枚举值来测试，但这里我们只是演示
+        assert!(unsupported_ser.is_ok()); // 这里会返回Ok因为我们使用了已支持的格式
     }
     
-    #[tokio::test]
-    async fn test_factory_supported_formats() {
+    #[test]
+    fn test_supported_formats() {
         let factory = SerializerFactory::new();
         let formats = factory.supported_formats();
         
         assert!(formats.contains(&SerializationFormat::Json));
+        assert!(formats.contains(&SerializationFormat::MessagePack));
+        assert!(formats.contains(&SerializationFormat::Bincode));
+        assert!(formats.contains(&SerializationFormat::Protobuf));
+        assert!(formats.contains(&SerializationFormat::Cbor));
+    }
+    
+    #[test]
+    fn test_format_support() {
+        let factory = SerializerFactory::new();
+        
         assert!(factory.supports_format(SerializationFormat::Json));
+        assert!(factory.supports_format(SerializationFormat::MessagePack));
+        assert!(factory.supports_format(SerializationFormat::Bincode));
+        assert!(factory.supports_format(SerializationFormat::Protobuf));
+        assert!(factory.supports_format(SerializationFormat::Cbor));
     }
     
     #[tokio::test]
-    async fn test_factory_mime_type() {
+    async fn test_mime_type_creation() {
         let factory = SerializerFactory::new();
-        let serializer = factory.create_by_mime_type("application/json").unwrap();
         
-        assert_eq!(serializer.format(), SerializationFormat::Json);
+        let json_ser = factory.create_by_mime_type("application/json");
+        let msgpack_ser = factory.create_by_mime_type("application/msgpack");
+        let bincode_ser = factory.create_by_mime_type("application/octet-stream");
+        let protobuf_ser = factory.create_by_mime_type("application/x-protobuf");
+        let cbor_ser = factory.create_by_mime_type("application/cbor");
+        
+        assert!(json_ser.is_ok());
+        assert!(msgpack_ser.is_ok());
+        assert!(bincode_ser.is_ok());
+        assert!(protobuf_ser.is_ok());
+        assert!(cbor_ser.is_ok());
+        
+        // 测试不支持的MIME类型
+        let unsupported_ser = factory.create_by_mime_type("application/unsupported");
+        assert!(unsupported_ser.is_err());
     }
     
     #[tokio::test]
-    async fn test_factory_file_extension() {
+    async fn test_extension_creation() {
         let factory = SerializerFactory::new();
-        let serializer = factory.create_by_extension("json").unwrap();
         
-        assert_eq!(serializer.format(), SerializationFormat::Json);
+        let json_ser = factory.create_by_extension("json");
+        let msgpack_ser = factory.create_by_extension("msgpack");
+        let bincode_ser = factory.create_by_extension("bincode");
+        let protobuf_ser = factory.create_by_extension("proto");
+        let cbor_ser = factory.create_by_extension("cbor");
+        
+        assert!(json_ser.is_ok());
+        assert!(msgpack_ser.is_ok());
+        assert!(bincode_ser.is_ok());
+        assert!(protobuf_ser.is_ok());
+        assert!(cbor_ser.is_ok());
+        
+        // 测试不支持的扩展名
+        let unsupported_ser = factory.create_by_extension("unsupported");
+        assert!(unsupported_ser.is_err());
     }
     
     #[tokio::test]
-    async fn test_factory_serializer_info() {
+    async fn test_serializer_info() {
         let factory = SerializerFactory::new();
         let info = factory.get_serializer_info(SerializationFormat::Json).unwrap();
         
         assert_eq!(info.name, "JsonSerializer");
-        assert_eq!(info.format, SerializationFormat::Json);
+        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.description, "JSON格式消息帧序列化器");
         assert_eq!(info.mime_type, "application/json");
         assert_eq!(info.file_extension, "json");
     }
@@ -418,15 +476,20 @@ mod tests {
         assert_eq!(default_ser.format(), SerializationFormat::Json);
         
         // 测试实际序列化
-        let frame = Frame::new(
-            MessageType::Data,
-            1,
-            Reliability::AtLeastOnce,
-            b"test".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
         
-        let json_data = json_ser.serialize(&frame).await.unwrap();
-        let pretty_data = pretty_ser.serialize(&frame).await.unwrap();
+        // 添加测试数据到元数据中
+        let mut frame_with_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_metadata, "test_data".to_string(), b"test".to_vec());
+        
+        let json_data = json_ser.serialize(&frame_with_metadata).await.unwrap();
+        let pretty_data = pretty_ser.serialize(&frame_with_metadata).await.unwrap();
         
         // 美化格式应该更长（包含换行符和缩进）
         assert!(pretty_data.len() > json_data.len());

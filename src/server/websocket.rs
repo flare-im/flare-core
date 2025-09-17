@@ -104,9 +104,17 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
                             let connection_event_handler: Arc<dyn ConnectionEvent> = event_handler.clone();
                             
                             // 创建服务端连接配置
-                            let connection_config = crate::common::connections::config::ConnectionConfig::server(
+                            let mut connection_config = crate::common::connections::config::ConnectionConfig::server(
                                 format!("ws_connection_{}", addr).replace(":", "_"),
                                 addr.to_string(),
+                            );
+                            
+                            // 设置默认使用protobuf序列化
+                            connection_config = connection_config.with_serialization_config(
+                                crate::common::serialization::SerializationConfig {
+                                    format: crate::common::serialization::SerializationFormat::Protobuf,
+                                    ..Default::default()
+                                }
                             );
                             
                             // 创建服务端连接

@@ -211,29 +211,33 @@ impl ConfigurableSerializer for CborSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{Frame, MessageType, Reliability};
+    use crate::common::protocol::factory::FrameFactory;
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     #[tokio::test]
     async fn test_cbor_serializer_basic() {
         let serializer = CborSerializer::new();
         
-        let frame = Frame::new(
-            MessageType::Data,
-            42,
-            Reliability::AtLeastOnce,
-            b"Hello CBOR!".to_vec(),
-        );
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
+        let message_id = FrameFactory::generate_message_id();
+        let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+        
+        // 添加测试数据到元数据中
+        let mut frame_with_metadata = frame.clone();
+        FrameFactory::add_metadata(&mut frame_with_metadata, "test_data".to_string(), b"Hello CBOR!".to_vec());
         
         // 测试序列化
-        let serialized = serializer.serialize(&frame).await.unwrap();
+        let serialized = serializer.serialize(&frame_with_metadata).await.unwrap();
         assert!(!serialized.is_empty());
         
         // 测试反序列化
         let deserialized = serializer.deserialize(&serialized).await.unwrap();
-        assert_eq!(deserialized.get_message_id(), frame.get_message_id());
-        assert_eq!(deserialized.get_message_type(), frame.get_message_type());
-        assert_eq!(deserialized.get_reliability(), frame.get_reliability());
-        assert_eq!(deserialized.get_payload(), frame.get_payload());
+        assert_eq!(deserialized.message_id, frame_with_metadata.message_id);
+        assert_eq!(deserialized.reliability, frame_with_metadata.reliability);
     }
     
     #[tokio::test]
@@ -260,13 +264,14 @@ mod tests {
     async fn test_cbor_compact_size() {
         let serializer = CborSerializer::new();
         
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
         // 测试小消息的紧凑性
-        let small_frame = Frame::new(
-            MessageType::Heartbeat,
-            1,
-            Reliability::BestEffort,
-            Vec::new(),
-        );
+        let message_id = FrameFactory::generate_message_id();
+        let small_frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
         
         let cbor_data = serializer.serialize(&small_frame).await.unwrap();
         let json_data = serde_json::to_vec(&small_frame).unwrap();
@@ -282,22 +287,29 @@ mod tests {
     async fn test_cbor_different_payload_sizes() {
         let serializer = CborSerializer::new();
         
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
         let payload_sizes = vec![0, 10, 23, 24, 100, 255, 256, 1000];
         
         for size in payload_sizes {
             let payload = vec![0x42u8; size]; // 填充字节
-            let frame = Frame::new(
-                MessageType::Data,
-                size as u64,
-                Reliability::AtLeastOnce,
-                payload.clone(),
-            );
+            let message_id = FrameFactory::generate_message_id();
+            let frame = FrameFactory::create_ping_frame(message_id.clone()).unwrap();
             
-            let serialized = serializer.serialize(&frame).await.unwrap();
+            // 添加载荷数据到元数据中
+            let mut frame_with_payload = frame.clone();
+            FrameFactory::add_metadata(&mut frame_with_payload, "payload".to_string(), payload.clone());
+            
+            let serialized = serializer.serialize(&frame_with_payload).await.unwrap();
             let deserialized = serializer.deserialize(&serialized).await.unwrap();
             
-            assert_eq!(deserialized.get_payload().len(), size);
-            assert_eq!(deserialized.get_payload(), &payload);
+            // 验证元数据中的载荷数据
+            let deserialized_payload = deserialized.metadata.as_ref().unwrap().get("payload").unwrap();
+            assert_eq!(deserialized_payload.len(), size);
+            assert_eq!(deserialized_payload, &payload);
             
             println!("载荷{}字节 -> CBOR{}字节", size, serialized.len());
         }

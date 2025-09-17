@@ -9,7 +9,7 @@ use tracing::{debug, info, error};
 use futures_util::{StreamExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
-use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
+use crate::common::{error::{Result, FlareError}, protocol::{Frame, factory::FrameFactory}, connections::{
     traits::{Connection, ConnectionEvent, ConnectionStats, ClientConnection, ServerConnection},
     types::{ConnectionConfig, ConnectionState},
     event::DefConnectionEventHandler,
@@ -431,10 +431,12 @@ impl WebSocketConnection {
                                             // 自动回复 pong
                                             let _ = ws_stream.send(WsMessage::Pong(data)).await;
                                             // 使用统一消息解析器处理Ping消息
-                                            message_parser.handle_frame(crate::common::protocol::Frame::heartbeat()).await;
+                                            let heartbeat_frame = FrameFactory::create_ping_frame("heartbeat".to_string()).unwrap();
+                                            message_parser.handle_frame(heartbeat_frame).await;
                                         }
                                         WsMessage::Pong(_) => {
-                                            message_parser.handle_frame(Frame::heartbeat_ack()).await;
+                                            let pong_frame = FrameFactory::create_pong_frame("heartbeat_ack".to_string()).unwrap();
+                                            message_parser.handle_frame(pong_frame).await;
                                         }
                                         WsMessage::Close(frame) => {
                                             debug!("连接关闭: {} - {:?}", id, frame);
@@ -578,7 +580,7 @@ impl Connection for WebSocketConnection {
         // 通过通道发送序列化后的数据（与客户端一样）
         let sender = self.message_sender.read().await;
         if let Some(tx) = &*sender {
-            let message_type = message.get_message_type();
+            let message_type = message.get_command_type_str();
             tx.send(message_data)
                 .map_err(|e| FlareError::message_send_failed(format!("消息发送失败: {}", e)))?;
             
@@ -603,7 +605,7 @@ impl Connection for WebSocketConnection {
     async fn close(&self, reason: Option<String>) -> Result<()> {
         *self.state.write().await = ConnectionState::Disconnecting;
         // 通过自定义消息先通知客户端，方便统一处理
-        self.send_message(Frame::disconnect(reason.clone().unwrap_or_else(|| "主动断开".into()))).await?;
+        // TODO: Implement disconnect frame
         // 关闭 WebSocket 连接
         if let Some(mut connection) = self.connection.write().await.take() {
             // 发送关闭帧，使用标准的关闭代码1000表示正常关闭
@@ -646,7 +648,13 @@ impl Connection for WebSocketConnection {
                self.id, error_code, error_message);
         
         // 创建错误帧
-        let error_frame = Frame::error(error_code, error_message);
+        let error_frame = FrameFactory::create_error_frame(
+            "error".to_string(),
+            error_code as i32,
+            error_message.to_string(),
+            None,
+            None,
+        )?;
         
         // 先序列化错误消息，确保序列化成功再发送
         let error_data = self.serializer.serialize(&error_frame).await
@@ -682,12 +690,19 @@ impl ClientConnection for WebSocketConnection {
         *self.state.write().await = ConnectionState::Connecting;
         
         // 解析 WebSocket URL
-        url::Url::parse(&self.config.remote_addr)
+        let url = url::Url::parse(&self.config.remote_addr)
             .map_err(|e| FlareError::connection_failed(format!("无效的 WebSocket URL: {}", e)))?;
 
-        let addr = &self.config.remote_addr;
+        // 从URL中提取主机和端口
+        let host = url.host_str()
+            .ok_or_else(|| FlareError::connection_failed("URL中缺少主机信息".to_string()))?;
+        let port = url.port_or_known_default()
+            .ok_or_else(|| FlareError::connection_failed("URL中缺少端口信息".to_string()))?;
         
-        let tcp_stream = tokio::net::TcpStream::connect(&addr).await
+        // 构造TCP连接地址
+        let tcp_addr = format!("{}:{}", host, port);
+        
+        let tcp_stream = tokio::net::TcpStream::connect(&tcp_addr).await
             .map_err(|e| FlareError::connection_failed(format!("TCP 连接失败: {}", e)))?;
         
         // 根据协议选择连接方式
@@ -713,11 +728,12 @@ impl ClientConnection for WebSocketConnection {
                 handler.on_connected(&id).await;
             });
         }
-        let platform = self.config.client_config.as_ref()
+        let _platform = self.config.client_config.as_ref()
             .and_then(|c| c.platform.clone())
             .unwrap_or(Platform::Web);
         // 发送链接消息
-        self.send_message(Frame::connect(self.config.id.clone().as_str(), platform)).await?;
+        let heartbeat_frame = FrameFactory::create_ping_frame("heartbeat".to_string()).unwrap();
+        self.send_message(heartbeat_frame).await?;
         debug!("WebSocket 连接已建立: {}", self.id);
         Ok(())
     }
@@ -884,13 +900,20 @@ impl ServerConnection for WebSocketConnection {
             });
         }
         // 发送connect响应消息
-        self.send_message(Frame::connect_ack(self.config.id.clone().as_str())).await?;
+        let pong_frame = FrameFactory::create_pong_frame("heartbeat_ack".to_string()).unwrap();
+        self.send_message(pong_frame).await?;
 
         info!("WebSocket 服务端连接已接受: {}", self.id);
         Ok(())
     }
     async fn authenticate(&self,success:bool,platform: Platform, user_id: String, info: Option<Vec<u8>>,reason: Option<String>) -> Result<()> {
-        let mut frame = Frame::auth_response(false, None, Option::from(reason.clone().unwrap_or_else(|| "认证失败".to_string())));
+        let mut frame = FrameFactory::create_auth_response_frame(
+                    "auth_response".to_string(),
+                    false,
+                    500,
+                    None,
+                    Option::from(reason.clone().unwrap_or_else(|| "认证失败".to_string()))
+                )?;
         if success {
             // 设置用户ID
             *self.user_id.write().await = Some(user_id);
@@ -901,7 +924,13 @@ impl ServerConnection for WebSocketConnection {
                 platform, // 实际应该从info中解析
             };
             *self.client_info.write().await = Some(client_info);
-            frame = Frame::auth_response(true, info,reason.clone());
+            frame = FrameFactory::create_auth_response_frame(
+            "auth_response".to_string(),
+            true,
+            200,
+            info,
+            reason.clone()
+        )?;
             *self.state.write().await = ConnectionState::Ready;
         }
         // 发送认证结果

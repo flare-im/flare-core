@@ -192,7 +192,7 @@ impl ConnectionPool {
     }
     
     /// 创建新连接
-    async fn create_new_connection(&self, target: &str, conn_type: Transport) -> Result<Arc<dyn ClientConnection>> {
+    async fn create_new_connection(&self, target: &str, _conn_type: Transport) -> Result<Arc<dyn ClientConnection>> {
         let config = ConnectionConfig::client(
             format!("pool_conn_{}", fastrand::u32(..)),
             target.to_string(),

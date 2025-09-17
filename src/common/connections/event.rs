@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use crate::common::{
-    protocol::Frame,
+    protocol::{Frame},
     connections::traits::ConnectionStats,
 };
 
@@ -77,11 +77,11 @@ impl ConnectionEvent for DefConnectionEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        tracing::info!("收到消息: {} - 类型: {:?}", connection_id, message.get_message_type());
+        tracing::info!("收到消息: {} - 类型: {}", connection_id, message.get_command_type_str());
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        tracing::info!("发送消息: {} - 类型: {:?}", connection_id, message.get_message_type());
+        tracing::info!("发送消息: {} - 类型: {}", connection_id, message.get_command_type_str());
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {

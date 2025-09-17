@@ -429,16 +429,22 @@ pub fn create_low_priority_message(frame: Frame) -> PriorityMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{MessageType, Reliability};
+    use crate::common::protocol::Reliability;
     
     #[tokio::test]
     async fn test_priority_queue_basic() {
         let queue = PriorityMessageQueue::default();
         
         // 创建不同优先级的消息
-        let frame1 = Frame::new(MessageType::Data, 1, Reliability::AtLeastOnce, vec![1, 2, 3]);
-        let frame2 = Frame::new(MessageType::Data, 2, Reliability::AtLeastOnce, vec![4, 5, 6]);
-        let frame3 = Frame::new(MessageType::Data, 3, Reliability::AtLeastOnce, vec![7, 8, 9]);
+        let mut frame1 = Frame::default();
+        frame1.message_id = "1".to_string();
+        frame1.reliability = Reliability::AtLeastOnce;
+        let mut frame2 = Frame::default();
+        frame2.message_id = "2".to_string();
+        frame2.reliability = Reliability::AtLeastOnce;
+        let mut frame3 = Frame::default();
+        frame3.message_id = "3".to_string();
+        frame3.reliability = Reliability::AtLeastOnce;
         
         let low_msg = create_low_priority_message(frame1);
         let high_msg = create_high_priority_message(frame2);
@@ -452,15 +458,15 @@ mod tests {
         // 出队应该按优先级：系统 -> 高 -> 低
         let msg1 = queue.dequeue().await.unwrap().unwrap();
         assert_eq!(msg1.priority, MessagePriority::System);
-        assert_eq!(msg1.frame.get_message_id(), 3);
+        assert_eq!(msg1.frame.get_message_id(), "3");
         
         let msg2 = queue.dequeue().await.unwrap().unwrap();
         assert_eq!(msg2.priority, MessagePriority::High);
-        assert_eq!(msg2.frame.get_message_id(), 2);
+        assert_eq!(msg2.frame.get_message_id(), "2");
         
         let msg3 = queue.dequeue().await.unwrap().unwrap();
         assert_eq!(msg3.priority, MessagePriority::Low);
-        assert_eq!(msg3.frame.get_message_id(), 1);
+        assert_eq!(msg3.frame.get_message_id(), "1");
     }
     
     #[tokio::test]
@@ -469,7 +475,9 @@ mod tests {
         
         // 批量入队
         for i in 0..10 {
-            let frame = Frame::new(MessageType::Data, i, Reliability::AtLeastOnce, vec![i as u8]);
+            let mut frame = Frame::default();
+            frame.message_id = i.to_string();
+            frame.reliability = Reliability::AtLeastOnce;
             let priority = if i % 2 == 0 { MessagePriority::High } else { MessagePriority::Normal };
             let msg = PriorityMessage::new(frame, priority, Duration::from_secs(60));
             queue.enqueue(msg).await.unwrap();
@@ -488,7 +496,9 @@ mod tests {
         let queue = PriorityMessageQueue::default();
         
         // 创建一个已经过期的消息
-        let frame = Frame::new(MessageType::Data, 1, Reliability::AtLeastOnce, vec![1]);
+        let mut frame = Frame::default();
+        frame.message_id = "1".to_string();
+        frame.reliability = Reliability::AtLeastOnce;
         let mut expired_msg = PriorityMessage::new(frame, MessagePriority::Normal, Duration::from_millis(1));
         expired_msg.created_at = Instant::now() - Duration::from_millis(10); // 设为10ms前创建
         
@@ -517,7 +527,9 @@ mod tests {
         
         // 添加一些消息
         for i in 0..5 {
-            let frame = Frame::new(MessageType::Data, i, Reliability::AtLeastOnce, vec![]);
+            let mut frame = Frame::default();
+            frame.message_id = i.to_string();
+            frame.reliability = Reliability::AtLeastOnce;
             let msg = create_normal_message(frame);
             queue.enqueue(msg).await.unwrap();
         }

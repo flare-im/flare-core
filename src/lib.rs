@@ -6,7 +6,7 @@ pub mod server;
 // 重新导出常用的类型，方便外部使用
 pub use common::{
     error::{Result, FlareError},
-    protocol::{Frame, MessageType, Reliability, ProtocolSelection},
+    protocol::{Frame, Reliability, ProtocolSelection},
     connections::{
         traits::{Connection, ClientConnection, ServerConnection, ConnectionFactory, ConnectionEvent, DefConnectionEventHandler},
         types::{ConnectionRole, Transport, ConnectionConfig, ConnectionState, ConnectionQuality, QuicConfig},
