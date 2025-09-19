@@ -18,8 +18,9 @@ use crate::common::{error::{Result, FlareError}, protocol::{Frame, factory::Fram
 }, messaging::MessageParser, serialization::FrameSerializer, SerializerFactory, SerializationFormat};
 use crate::common::serialization::json_serializer;
 use uuid::Uuid;
+use crate::common::connections::enums::Platform;
 use crate::common::connections::types::ClientInfo;
-use crate::{Platform, Transport};
+use crate::Transport;
 
 /// WebSocket 连接实现
 pub struct WebSocketConnection {

@@ -111,6 +111,10 @@ name = "server_connection_event_example"
 path = "examples/server/server_connection_event_example.rs"
 
 [[example]]
+name = "server_proxy_example"
+path = "src/server/examples/server_proxy_example.rs"
+
+[[example]]
 name = "auth_example"
 path = "examples/server/auth_example.rs"
 
@@ -205,6 +209,9 @@ serde_cbor = "0.11.2"
 # 证书生成（QUIC服务端需要）
 rcgen = "0.13.1"
 hex = "0.4.3"
+
+# 并发哈希映射（服务器连接管理需要）
+dashmap = "6.0.1"
 
 [build-dependencies]
 prost-build = "0.13.0"

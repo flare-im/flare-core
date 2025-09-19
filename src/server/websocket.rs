@@ -11,28 +11,32 @@ use crate::common::{
     error::Result,
 };
 use crate::ConnectionEvent;
-use crate::common::connections::traits::{ServerConnection};
-use crate::server::{manager::traits::ServerConnectionManager, server::{Server, ServerConfig, ServerType, ServerService}, ServerEventAdapter};
+use crate::server::{
+    manager::traits::ServerConnectionManager, 
+    Server, 
+    ServerService,
+    ServerEventAdapter,
+};
+use crate::{
+    ServerConfig,
+    ServerType,
+};
 
 /// WebSocket 服务端实现
 ///
 /// 负责处理 WebSocket 协议的连接和消息
-///
-/// # 泛型参数
-///
-/// * `T` - 连接管理器类型，必须实现 [ConnectionManager](../manager/traits/trait.ConnectionManager.html) trait
-pub struct WebSocketServer<T: ServerConnectionManager> {
+pub struct WebSocketServer {
     /// 配置
     config: ServerConfig,
     /// 连接管理器
-    connection_manager: Arc<T>,
+    connection_manager: Arc<dyn ServerConnectionManager>,
     /// 服务句柄
     server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// 服务端事件适配器
+    /// 服务端事件处理器
     event_handler: Arc<ServerEventAdapter>,
 }
 
-impl<T: ServerConnectionManager + 'static> WebSocketServer<T> {
+impl WebSocketServer {
     /// 创建新的 WebSocket 服务端
     ///
     /// # 参数
@@ -45,7 +49,7 @@ impl<T: ServerConnectionManager + 'static> WebSocketServer<T> {
     /// 返回新的 [WebSocketServer](struct.WebSocketServer.html) 实例
     pub fn new(
         config: ServerConfig,
-        connection_manager: Arc<T>,
+        connection_manager: Arc<dyn ServerConnectionManager>,
         event_handler: Arc<ServerEventAdapter>,
     ) -> Self {
         Self {
@@ -55,10 +59,19 @@ impl<T: ServerConnectionManager + 'static> WebSocketServer<T> {
             event_handler,
         }
     }
+    
+    /// 获取WebSocket监听地址
+    fn get_listen_addr(&self) -> String {
+        if let Some(ws_config) = &self.config.websocket_config {
+            ws_config.listen_addr.clone()
+        } else {
+            "127.0.0.1:0".to_string() // 默认地址
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
+impl Server for WebSocketServer {
     /// 启动 WebSocket 服务
     ///
     /// 创建 TCP 监听器并开始监听客户端连接
@@ -67,8 +80,8 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
     ///
     /// 返回操作结果
     async fn start(&self) -> Result<()> {
-        let local_addr = self.config.local_addr.clone().unwrap_or_default();
-        info!("启动 WebSocket 服务: {}", local_addr);
+        let local_addr = self.get_listen_addr();
+        info!("准备启动 WebSocket 服务: {}", local_addr);
         
         // 解析地址
         let addr: SocketAddr = local_addr.parse().map_err(|e| {
@@ -79,6 +92,8 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
         let listener = tokio::net::TcpListener::bind(addr).await
             .map_err(|e| crate::common::error::FlareError::connection_failed(format!("绑定端口失败: {}", e)))?;
         
+        info!("WebSocket TCP监听器绑定成功: {}", addr);
+        
         // 克隆必要的组件
         let connection_manager = Arc::clone(&self.connection_manager);
         let config = self.config.clone();
@@ -86,7 +101,7 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
         
         // 启动服务任务
         let handle = tokio::spawn(async move {
-            info!("WebSocket 服务已启动: {}", local_addr);
+            info!("WebSocket 服务任务已启动并监听: {}", local_addr);
             
             // 监听新的客户端连接
             loop {
@@ -152,7 +167,8 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
                             }
                         });
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        error!("WebSocket监听错误: {}", e);
                         // 短暂等待后继续监听
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     }
@@ -163,6 +179,7 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
         // 保存服务句柄
         *self.server_handle.write().await = Some(handle);
         
+        info!("WebSocket服务启动完成");
         Ok(())
     }
     
@@ -180,7 +197,7 @@ impl<T: ServerConnectionManager + 'static> Server for WebSocketServer<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: ServerConnectionManager + 'static> ServerService for WebSocketServer<T> {
+impl ServerService for WebSocketServer {
     /// 获取服务类型
     fn get_type(&self) -> ServerType {
         ServerType::WebSocket
@@ -188,6 +205,6 @@ impl<T: ServerConnectionManager + 'static> ServerService for WebSocketServer<T> 
     
     /// 获取本地地址
     fn get_local_addr(&self) -> Option<String> {
-        self.config.local_addr.clone()
+        Some(self.get_listen_addr())
     }
 }

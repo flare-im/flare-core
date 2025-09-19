@@ -14,8 +14,7 @@ use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
 }, messaging::MessageParser, serialization::FrameSerializer, serialization::SerializerFactory, serialization::factory::json_serializer, SerializationFormat};
 
 use quinn::{Connection as QuinnConnection, Endpoint};
-use crate::common::error::ErrorCode;
-use crate::{Platform};
+use crate::common::connections::enums::Platform;
 
 /// 跳过服务器证书验证的实现（仅用于演示）
 #[derive(Debug)]
@@ -748,7 +747,7 @@ impl ClientConnection for QuicConnection {
             .unwrap_or(Platform::Web);
         // 发送链接消息
         let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
-        let frame = crate::common::protocol::factory::FrameFactory::create_ping_frame(message_id.clone()).unwrap();
+        let frame = crate::common::protocol::factory::FrameFactory::create_ping_frame(message_id.clone())?;
         self.send_message(frame).await?;
         
         info!("QUIC 连接已建立: {}", self.id);

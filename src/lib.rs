@@ -15,12 +15,9 @@ pub use common::{
 
 // 重新导出服务端模块
 pub use server::{
-    ServerConnectionManager,
-    ConnectionManager,
-    UserConnectionManager,
-    Platform,
-    HeartbeatConfig,
-    server::{Server, ServerConfig, ServerType},
+    ServerConfig,
+    ServerType,
+    ProtocolConfig,
 };
 
 // 重新导出客户端模块

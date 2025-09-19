@@ -7,8 +7,8 @@ use async_trait::async_trait;
 
 use crate::{common::{
     connections::types::{ClientInfo, ConnectionConfig, ConnectionState}, error::Result, protocol::Frame
-}, Platform};
-
+}};
+use crate::common::connections::enums::Platform;
 // 重新导出事件处理相关定义，保持对外路径稳定
 pub use super::event::{ConnectionEvent, DefConnectionEventHandler};
 

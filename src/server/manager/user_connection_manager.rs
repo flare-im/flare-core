@@ -163,6 +163,24 @@ impl UserConnectionManager {
         Ok(())
     }
 
+    /// 启动认证超时清理任务
+    /// 
+    /// 定期清理超时的待验证连接
+    pub async fn start_auth_timeout_cleanup_task(&self) -> tokio::task::JoinHandle<()> {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            loop {
+                // 每隔认证超时时间的一半执行一次清理
+                tokio::time::sleep(manager.auth_timeout / 2).await;
+                
+                let removed_count = manager.cleanup_timeout_pending_connections().await;
+                if removed_count > 0 {
+                    info!("清理了 {} 个超时的待验证连接", removed_count);
+                }
+            }
+        })
+    }
+    
     
     /// 完成连接认证并绑定用户
     pub async fn complete_authentication(
@@ -398,6 +416,7 @@ impl UserConnectionManager {
         removed_count
     }
     
+ 
     /// 主动断开未认证的连接（认证错误时调用）
     pub async fn disconnect_unauthenticated_connection(&self, connection_id: &str, reason: Option< String>) -> Result<()> {
         // 检查连接是否在待验证列表中
@@ -543,51 +562,94 @@ impl UserConnectionManager {
         Ok(total_sent)
     }
     
-    /// 处理认证请求
-    pub async fn handle_authentication_request(
+    /// 处理认证结果
+    /// 
+    /// 标记用户验证通过还是验证失败，支持验证等待期间多次验证
+    /// 
+    /// # 参数
+    /// * `connection_id` - 连接ID
+    /// * `user_id` - 用户ID
+    /// * `platform` - 平台信息
+    /// * `success` - 认证是否成功
+    /// * `error_message` - 错误消息（认证失败时提供）
+    /// * `user_info` - 用户信息（认证成功时提供）
+    pub async fn process_authentication_result(
         &self,
         connection_id: String,
         user_id: String,
         platform: String,
-        token: String,
+        success: bool,
+        error_message: Option<String>,
+        user_info: Option<Vec<u8>>,
     ) -> Result<()> {
-        // 这里应该调用认证处理器来处理认证请求
-        // 为了简化，我们假设认证总是成功
-        
         // 解析平台信息
         let platform_enum = crate::common::connections::enums::Platform::from_str(&platform);
         
-        // 完成连接认证并绑定用户
-        self.complete_authentication(
-            connection_id.clone(),
-            user_id.clone(),
-            platform_enum.clone(),
-            None, // device_id
-        ).await?;
-        
-        // 获取连接并发送认证成功响应
-        if let Some(connection) = self.connection_manager.get_connection(&connection_id).await {
-            // 调用连接的authenticate方法来设置连接状态为Ready
-            connection.authenticate(
-                true, // success
-                platform_enum,
-                user_id,
-                None, // info
-                None, // reason
+        if success {
+            // 认证成功，完成连接认证并绑定用户
+            self.complete_authentication(
+                connection_id.clone(),
+                user_id.clone(),
+                platform_enum.clone(),
+                None, // device_id
             ).await?;
             
-            // 发送认证成功响应消息
-            let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
-            let auth_response = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
-                message_id, // message_id
-                true,  // success
-                0,  // status
-                None,  // user_info
-                None   // error_message
-            ).unwrap();
-            
-            if let Err(e) = connection.send_message(auth_response).await {
-                warn!("发送认证成功响应失败: {} - 错误: {}", connection_id, e);
+            // 获取连接并发送认证成功响应
+            if let Some(connection) = self.connection_manager.get_connection(&connection_id).await {
+                // 调用连接的authenticate方法来设置连接状态为Ready
+                connection.authenticate(
+                    true, // success
+                    platform_enum,
+                    user_id,
+                    user_info.clone(), // info
+                    None, // reason
+                ).await?;
+                
+                // 发送认证成功响应消息
+                let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+                let auth_response = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
+                    message_id, // message_id
+                    true,  // success
+                    200,  // status
+                    user_info,  // user_info
+                    None   // error_message
+                ).unwrap();
+                
+                if let Err(e) = connection.send_message(auth_response).await {
+                    warn!("发送认证成功响应失败: {} - 错误: {}", connection_id, e);
+                }
+            }
+        } else {
+            // 认证失败，断开连接
+            if let Some(connection) = self.connection_manager.get_connection(&connection_id).await {
+                // 调用连接的authenticate方法来设置连接状态为认证失败
+                connection.authenticate(
+                    false, // success
+                    platform_enum,
+                    user_id,
+                    None, // info
+                    error_message.clone(), // reason
+                ).await?;
+                
+                // 发送认证失败响应消息
+                let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
+                let auth_response = crate::common::protocol::factory::FrameFactory::create_auth_response_frame(
+                    message_id, // message_id
+                    false,  // success
+                    401,  // status
+                    None,  // user_info
+                    error_message.clone()   // error_message
+                ).unwrap();
+                
+                if let Err(e) = connection.send_message(auth_response).await {
+                    warn!("发送认证失败响应失败: {} - 错误: {}", connection_id, e);
+                }
+                
+                // 断开连接
+                self.disconnect_unauthenticated_connection(
+                    &connection_id, 
+                    Some(error_message.unwrap_or_else(|| "Authentication failed".to_string()))
+                ).await?;
             }
         }
         
@@ -599,8 +661,13 @@ impl UserConnectionManager {
 impl ServerConnectionManager for UserConnectionManager {
     /// 添加连接
     async fn add_connection(&self, connection: Arc<dyn ServerConnection>) -> Result<()> {
-        // 将连接添加到基础连接管理器
-        self.connection_manager.add_connection(connection).await
+        // 先添加到基础连接管理器
+        self.connection_manager.add_connection(connection.clone()).await?;
+        
+        // 添加到待验证连接列表
+        self.add_pending_connection(connection.id().to_string()).await?;
+        
+        Ok(())
     }
     
     /// 移除连接

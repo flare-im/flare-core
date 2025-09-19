@@ -234,7 +234,6 @@ impl MessageParser {
                 }
             },
             Command::Message(_) | Command::Notification(_) | Command::Event(_) => {
-                info!("收到消息 {:?}", frame_clone);
                 // 消息、通知和事件类命令统一触发消息接收事件
                 handler.on_message_received(&id, &frame_clone).await;
             }

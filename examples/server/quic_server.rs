@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use flare_core::{
     server::{
-        server::{Server, ServerConfig},
-        ConnectionManager,
-        manager::message_handler::EchoMessageHandler,
+        config::{ServerConfig, ProtocolConfig, TlsConfig},
+        fast::server::FastServer,
     },
 };
 
@@ -19,21 +18,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
     tracing_subscriber::fmt::init();
     
+    // 创建TLS配置（需要提供有效的证书和私钥路径）
+    let tls_config = TlsConfig::new(
+        "path/to/cert.pem".to_string(),  // 需要替换为实际的证书路径
+        "path/to/key.pem".to_string(),   // 需要替换为实际的私钥路径
+    );
+    
     // 创建服务端配置
-    let config = ServerConfig::new()
-        .with_local_addr("127.0.0.1:8081".to_string())
-        .with_connection_timeout_ms(30000)
-        .with_heartbeat_interval_ms(10000)
-        .enable_tls(); // QUIC需要TLS
+    let config = ServerConfig::default_quic(
+        "path/to/cert.pem".to_string(),  // 需要替换为实际的证书路径
+        "path/to/key.pem".to_string(),   // 需要替换为实际的私钥路径
+    )
+    .with_quic_config(
+        ProtocolConfig::default()
+            .with_listen_addr("127.0.0.1:8081".to_string())
+            .with_tls_config(tls_config)
+    )
+    .with_connection_timeout_ms(30000)
+    .with_heartbeat_interval_ms(10000)
+    .with_auth_timeout_ms(30000);
     
-    // 创建连接管理器
-    let connection_manager = Arc::new(ConnectionManager::new());
-    
-    // 创建服务端实例
-    let server = Server::new(config, connection_manager);
+    // 创建FastServer实例
+    let server = FastServer::default();
     
     // 启动服务端
-    server.start().await?;
+    server.start(config).await?;
     
     println!("QUIC服务端已启动，监听地址: 127.0.0.1:8081");
     println!("按 Ctrl+C 停止服务端");

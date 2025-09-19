@@ -17,4 +17,3 @@ pub mod user_connection_manager;
 pub use connection_manager::ConnectionManager;
 pub use connection_manager::HeartbeatConfig;
 pub use user_connection_manager::UserConnectionManager;
-pub use crate::common::connections::enums::Platform;

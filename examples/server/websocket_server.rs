@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use flare_core::{
     server::{
-        server::{ServerImpl, ServerConfig},
-        ConnectionManager,
+        config::{ServerConfig, ProtocolConfig},
+        fast::server::FastServer,
     },
 };
 
@@ -19,17 +19,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
+    
     // 创建服务端配置
-    let config = ServerConfig::new()
-        .with_local_addr("127.0.0.1:8080".to_string())
-        .with_connection_timeout_ms(30000)
-        .with_heartbeat_interval_ms(10000);
+    let mut config = ServerConfig::default_websocket();
+    config = config.with_websocket_config(
+        ProtocolConfig::new()
+            .with_listen_addr("127.0.0.1:8080".to_string())
+            .with_max_connections(1000)
+    );
+    config = config.with_connection_timeout_ms(30000);
+    config = config.with_heartbeat_interval_ms(10000);
+    config = config.with_auth_timeout_ms(30000);
     
-    // 创建连接管理器
-    let connection_manager = Arc::new(ConnectionManager::new());
+    // 打印配置信息用于调试
+    tracing::info!("服务器配置: {:?}", config);
+    if let Some(ws_config) = &config.websocket_config {
+        tracing::info!("WebSocket配置存在，监听地址: {}", ws_config.listen_addr);
+    } else {
+        tracing::error!("WebSocket配置不存在！");
+    }
     
-    // 创建服务端实例
-    let server: ServerImpl<ConnectionManager> = ServerImpl::new(config, connection_manager);
+    // 创建FastServer实例
+    let server = FastServer::new_with_config(config);
     
     // 启动服务端
     server.start().await?;
