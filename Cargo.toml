@@ -81,6 +81,18 @@ path = "examples/client/enhanced_manager_client.rs"
 name = "user_link_manager_client"
 path = "examples/client/user_link_manager_client.rs"
 
+[[example]]
+name = "auth_client"
+path = "examples/client/auth_client.rs"
+
+[[example]]
+name = "fast_client"
+path = "examples/client/fast_client.rs"
+
+[[example]]
+name = "basic_client"
+path = "examples/client/basic_client.rs"
+
 # Server examples
 [[example]]
 name = "quic_server"

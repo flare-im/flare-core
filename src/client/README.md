@@ -2,378 +2,215 @@
 
 ## 概述
 
-客户端模块提供了完整的客户端实现，支持WebSocket和QUIC协议。该模块的核心特性是协议竞速功能，能够自动选择最优的连接协议，同时支持用户手动选择特定协议。
+客户端模块提供了完整的客户端实现，支持WebSocket和QUIC协议竞速。该模块包含基础客户端和Fast客户端两种实现方式：
 
-## 架构设计
-
-### 核心组件
-
-1. **Client** - 客户端主类，负责连接管理、消息发送等核心功能
-2. **ClientConfig** - 客户端配置，支持灵活的连接参数设置
-3. **ProtocolRacer** - 协议竞速器，实现多协议并发连接和最优选择
-
-### 协议支持
-
-- **WebSocket** - 经典的双向通信协议，广泛支持
-- **QUIC** - 下一代传输协议，低延迟、高可靠性
+1. **基础客户端**：提供与服务端对应的基础功能，设计良好的扩展接口，方便用户进行功能扩展
+2. **Fast客户端（开箱即用）**：内置心跳机制，自动处理连接认证，封装消息发送功能，实现断线自动重连，支持协议切换，集成长连接核心功能，用户可直接使用无需关注底层实现细节，提供简单易用的API接口
 
 ## 功能特性
 
-### 1. 协议竞速
+### 基础功能
+- [x] 支持WebSocket和QUIC协议
+- [x] 协议竞速（Protocol Racing）
+- [x] 可配置的连接参数
+- [x] 消息序列化/反序列化
+- [x] 请求-响应模式
+- [x] 心跳机制
+- [x] 连接状态管理
 
-协议竞速是客户端的核心功能，能够同时尝试多种协议并选择最优的连接：
+### 认证功能
+- [x] 可配置的认证流程
+- [x] 支持认证成功/失败处理
+- [x] 认证超时处理
+
+### 高级功能（Fast客户端）
+- [x] 自动心跳
+- [x] 自动重连
+- [x] 事件处理机制
+- [x] 协议切换
+- [x] 统计信息收集
+
+## 模块结构
+
+```
+src/client/
+├── client.rs          # 基础客户端实现
+├── config.rs          # 客户端配置
+├── protocol_racing.rs # 协议竞速实现
+├── auth.rs            # 认证管理
+├── fast.rs            # Fast客户端实现
+├── event.rs           # 客户端事件处理
+├── adapter/           # 适配器模块
+│   └── client_event_adapter.rs # 客户端事件适配器
+└── mod.rs             # 模块声明
+```
+
+## 使用指南
+
+### 基础客户端
+
+基础客户端提供了核心的连接和消息处理功能，适合需要自定义行为的场景。
 
 ```rust
-use flare_core::client::{Client, ClientConfig, ProtocolSelection};
-use flare_core::common::connections::types::ConnectionType;
+use flare_core::client::{Client, ClientConfig};
 
-// 为不同协议指定不同的服务器地址
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_protocol_selection(ProtocolSelection::Auto);
+// 创建客户端配置
+let config = ClientConfig::default();
 
+// 创建客户端实例
 let mut client = Client::new(config);
-client.connect().await?; // 自动选择最优协议
-```
 
-### 2. 单一协议选择
+// 连接到服务器
+client.connect().await?;
 
-用户也可以选择使用特定的协议：
-
-```rust
-use flare_core::client::{Client, ClientConfig, ProtocolSelection};
-use flare_core::common::connections::types::ConnectionType;
-
-// 仅使用QUIC
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_quic_only();
-
-// 仅使用WebSocket
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_websocket_only();
-```
-
-### 3. 心跳机制
-
-客户端负责发起心跳，服务端负责检查和超时处理：
-
-```rust
-// 客户端发送心跳
-client.send_heartbeat().await?;
-
-// 自动心跳（根据配置自动发送）
-```
-
-### 4. 请求-响应模式（类似REST接口）
-
-客户端支持发送请求并等待响应的模式，类似于REST接口：
-
-```rust
-use flare_core::client::Client;
-use flare_core::common::protocol::{Frame, MessageType, Reliability};
-use serde_json::json;
-
-// 发送请求并等待响应
-let request = Frame::new(
-    MessageType::Data,
-    1, // 请求ID
-    Reliability::ExactlyOnce,
-    serde_json::to_vec(&json!({"action": "get_user_info"}))?,
-);
-
-match client.send_request(request).await {
-    Ok(response) => {
-        println!("收到响应: {:?}", response);
-    }
-    Err(e) => {
-        println!("请求失败: {}", e);
-    }
-}
-```
-
-### 5. 连接管理
-
-支持自动重连、连接状态管理等功能：
-
-```rust
-// 检查连接状态
-if client.is_connected().await {
-    // 发送消息
-    client.send_message(message).await?;
-}
+// 发送消息
+let message = Frame::text("Hello, server!".to_string());
+client.send_message(message).await?;
 
 // 断开连接
 client.disconnect().await?;
 ```
 
-## 使用方式
+### Fast客户端
 
-### 基本使用
+Fast客户端提供了开箱即用的功能，内置了心跳、自动重连等高级特性。
 
 ```rust
-use flare_core::client::{Client, ClientConfig};
+use flare_core::client::{FastClientBuilder, FastClient};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建客户端配置，为不同协议指定不同的服务器地址
-    let config = ClientConfig::new(
-        "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-        "127.0.0.1:8081".to_string()       // QUIC地址
-    );
-    
-    // 创建客户端实例
-    let mut client = Client::new(config);
-    
-    // 连接到服务器
-    client.connect().await?;
-    
-    // 发送消息
-    let message = Frame::text(1, "Hello, Server!".to_string());
-    client.send_message(message).await?;
-    
-    // 断开连接
-    client.disconnect().await?;
-    
-    Ok(())
-}
+// 使用构建器创建Fast客户端
+let mut client = FastClientBuilder::new()
+    .with_websocket_only()  // 仅使用WebSocket协议
+    .with_heartbeat(10000, 30000)  // 心跳间隔10秒，超时30秒
+    .with_auto_reconnect(true)  // 启用自动重连
+    .build();
+
+// 启动客户端
+client.start().await?;
+
+// 发送消息
+let message = Frame::text("Hello, server!".to_string());
+client.send_message(message).await?;
+
+// 停止客户端
+client.stop().await?;
 ```
 
-### 协议竞速使用
+### 认证配置
+
+客户端支持可配置的认证流程：
 
 ```rust
-use flare_core::client::{Client, ClientConfig, ProtocolSelection};
+use flare_core::client::{ClientConfig, AuthConfig};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建支持协议竞速的配置
-    let config = ClientConfig::new(
-        "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-        "127.0.0.1:8081".to_string()       // QUIC地址
-    ).with_protocol_selection(ProtocolSelection::Auto)
-    .with_heartbeat(5000, 2000) // 5秒心跳，2秒超时
-    .with_request_timeout(3000); // 3秒请求超时
-    
-    let mut client = Client::new(config);
-    client.connect().await?; // 自动选择QUIC或WebSocket
-    
-    Ok(())
-}
+let auth_config = AuthConfig {
+    enabled: true,
+    user_id: Some("user123".to_string()),
+    platform: Some("mobile".to_string()),
+    token: Some("auth_token".to_string()),
+    timeout_ms: 5000,
+};
+
+let config = ClientConfig::default()
+    .with_auth_config(auth_config);
 ```
 
-### 请求-响应模式使用
+当启用认证时，客户端会在连接建立后自动发送认证请求，并等待服务端响应。只有认证成功后，连接才可正常使用。
+
+### 事件处理机制
+
+客户端支持事件处理机制，用户可以通过实现[ClientEvent](event.rs) trait来自定义事件处理逻辑：
 
 ```rust
-use flare_core::client::Client;
-use flare_core::common::protocol::{Frame, MessageType, Reliability};
-use serde_json::json;
+use flare_core::client::{Client, ClientConfig, ClientEvent, ClientEventAdapter};
+use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建客户端（配置同上）
-    let mut client = Client::new(config);
-    client.connect().await?;
-    
-    // 发送认证请求
-    let auth_request = Frame::new(
-        MessageType::Connect,
-        1,
-        Reliability::ExactlyOnce,
-        serde_json::to_vec(&json!({"token": "user_token"}))?,
-    );
-    
-    match client.send_request(auth_request).await {
-        Ok(response) => println!("认证成功"),
-        Err(e) => println!("认证失败: {}", e),
-    }
-    
-    Ok(())
-}
-```
-
-## 高级功能
-
-### 1. 自定义序列化
-
-```rust
-use flare_core::client::{Client, ClientConfig};
-use flare_core::common::serialization::{SerializationFormat, SerializationConfig};
-
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_serialization(
-    SerializationFormat::Json,
-    SerializationConfig::default()
-);
-```
-
-### 2. 连接事件处理
-
-```rust
-use flare_core::common::connections::traits::ConnectionEvent;
-
-struct MyEventHandler;
+// 实现自定义事件处理器
+struct MyClientEventHandler;
 
 #[async_trait::async_trait]
-impl ConnectionEvent for MyEventHandler {
-    async fn on_connected(&self, connection_id: &str) {
-        println!("连接已建立: {}", connection_id);
+impl ClientEvent for MyClientEventHandler {
+    async fn on_control_command(&self, cmd: &ControlCmd) {
+        // 处理控制命令
     }
     
-    async fn on_disconnected(&self, connection_id: &str, reason: &str) {
-        println!("连接已断开: {} - 原因: {}", connection_id, reason);
+    async fn on_message_command(&self, message: &MessageCmd) {
+        // 处理消息命令
     }
     
     // ... 其他事件处理方法
+    
+    async fn on_authenticated(&self) {
+        // 认证成功处理
+    }
+    
+    async fn on_authentication_failed(&self, error: &str) {
+        // 认证失败处理
+    }
 }
+
+// 创建客户端并使用自定义事件处理器
+let event_handler = Arc::new(MyClientEventHandler);
+let client = Client::with_event_handler(config, event_handler);
 ```
 
-## 性能优化
+系统提供了默认的事件处理器[DefClientEventHandler](event.rs)，用户可以直接使用或继承。
 
-### 1. 连接复用
-
-客户端支持连接复用，避免频繁建立和断开连接：
-
-```rust
-// 保持连接活跃
-if !client.is_connected().await {
-    client.connect().await?;
-}
-```
-
-### 2. 心跳优化
-
-合理配置心跳间隔和超时时间：
-
-```rust
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_heartbeat(10000, 5000); // 10秒心跳，5秒超时
-```
-
-### 3. 请求超时优化
-
-合理配置请求超时时间：
-
-```rust
-let config = ClientConfig::new(
-    "ws://127.0.0.1:8080".to_string(),  // WebSocket地址
-    "127.0.0.1:8081".to_string()       // QUIC地址
-).with_request_timeout(3000); // 3秒请求超时
-```
-
-## 应用场景
-
-### 1. IM应用客户端
-
-```rust
-use flare_core::client::{Client, ClientConfig};
-
-// IM客户端通常需要低延迟和高可靠性
-let config = ClientConfig::new(
-    "ws://im-server:8080".to_string(),  // WebSocket地址
-    "im-server:8081".to_string()       // QUIC地址
-).with_quic_only(); // 优先使用QUIC获得更低延迟
-```
-
-### 2. Web应用客户端
-
-```rust
-// Web应用通常使用WebSocket以获得更好的兼容性
-let config = ClientConfig::new(
-    "ws://web-server:8080".to_string(),  // WebSocket地址
-    "web-server:8081".to_string()       // QUIC地址
-).with_websocket_only();
-```
-
-### 3. 混合场景
-
-```rust
-// 混合场景使用协议竞速自动选择最优协议
-let config = ClientConfig::new(
-    "ws://server:8080".to_string(),  // WebSocket地址
-    "server:8081".to_string()       // QUIC地址
-).with_protocol_selection(ProtocolSelection::Auto);
-```
-
-## 配置参数
+## 配置选项
 
 ### ClientConfig
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| server_addresses | HashMap<ConnectionType, String> | - | 协议类型到服务器地址的映射 |
-| protocol_selection | ProtocolSelection | Auto | 协议选择模式 |
-| enable_auto_reconnect | bool | true | 是否启用自动重连 |
-| max_reconnect_attempts | u32 | 5 | 最大重连尝试次数 |
-| reconnect_delay_ms | u64 | 1000 | 重连延迟（毫秒） |
-| heartbeat_interval_ms | u64 | 10000 | 心跳间隔（毫秒） |
-| heartbeat_monitor_timeout_ms | u64 | 30000 | 心跳监控超时（毫秒） |
-| enable_auto_heartbeat_response | bool | true | 是否启用自动心跳响应 |
-| request_timeout_ms | u64 | 5000 | 请求超时时间（毫秒） |
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| server_addresses | HashMap<Transport, String> | 服务器地址映射 |
+| transport | Transport | 传输类型 |
+| protocol_selection | ProtocolSelection | 协议选择模式 |
+| enable_auto_reconnect | bool | 是否启用自动重连 |
+| max_reconnect_attempts | u32 | 最大重连尝试次数 |
+| reconnect_delay_ms | u64 | 重连延迟（毫秒） |
+| heartbeat_interval_ms | u64 | 心跳间隔（毫秒） |
+| heartbeat_monitor_timeout_ms | u64 | 心跳监控超时（毫秒） |
+| enable_auto_heartbeat_response | bool | 是否启用自动心跳响应 |
+| serialization_format | SerializationFormat | 序列化格式 |
+| serialization_config | SerializationConfig | 序列化配置 |
+| request_timeout_ms | u64 | 请求超时时间（毫秒） |
+| auth_config | AuthConfig | 认证配置 |
+
+### AuthConfig
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| enabled | bool | 是否启用认证 |
+| user_id | Option<String> | 用户ID |
+| platform | Option<String> | 平台信息 |
+| token | Option<String> | 认证令牌 |
+| timeout_ms | u64 | 认证超时时间（毫秒） |
+
+## 示例代码
+
+更多示例请参考[examples/client/](../../examples/client/)目录：
+
+- [基础客户端示例](../../examples/client/basic_client.rs)
+- [Fast客户端示例](../../examples/client/fast_client.rs)
+- [认证客户端示例](../../examples/client/auth_client.rs)
+- [事件处理客户端示例](../../examples/client/event_client.rs)
 
 ## 错误处理
 
-客户端提供了完善的错误处理机制：
+客户端使用[FlareError](../common/error.rs)来处理各种错误情况，包括网络错误、认证失败、超时等。
 
-```rust
-use flare_core::common::error::FlareError;
+## 性能优化
 
-match client.connect().await {
-    Ok(_) => println!("连接成功"),
-    Err(FlareError::ConnectionFailed(msg)) => {
-        println!("连接失败: {}", msg);
-    }
-    Err(e) => {
-        println!("其他错误: {:?}", e);
-    }
-}
-
-// 请求-响应模式的错误处理
-match client.send_request(request).await {
-    Ok(response) => println!("收到响应"),
-    Err(FlareError::Timeout(msg)) => {
-        println!("请求超时: {}", msg);
-    }
-    Err(e) => {
-        println!("请求失败: {:?}", e);
-    }
-}
-```
+- 使用异步I/O提高并发性能
+- 连接池管理减少连接建立开销
+- 消息批处理减少网络传输次数
+- 心跳机制保持连接活跃
 
 ## 扩展性
 
-### 自定义协议支持
+客户端设计遵循开闭原则，用户可以通过以下方式扩展功能：
 
-可以通过扩展ConnectionFactory来支持新的协议：
-
-```rust
-use flare_core::common::connections::traits::ConnectionFactory;
-
-struct CustomConnectionFactory;
-
-#[async_trait::async_trait]
-impl ConnectionFactory for CustomConnectionFactory {
-    async fn create_client_connection(&self, config: ConnectionConfig) -> Result<Box<dyn ClientConnection>> {
-        // 实现自定义协议连接创建逻辑
-        todo!()
-    }
-    
-    // ... 其他方法
-}
-```
-
-## 最佳实践
-
-1. **优先使用协议竞速**：让客户端自动选择最优协议
-2. **合理配置心跳**：根据网络环境调整心跳间隔和超时时间
-3. **处理连接事件**：实现ConnectionEvent trait处理连接状态变化
-4. **错误重试**：启用自动重连机制处理网络波动
-5. **资源管理**：及时断开不需要的连接释放资源
-6. **请求超时**：合理设置请求超时时间避免长时间阻塞
+1. 实现自定义事件处理器
+2. 扩展配置选项
+3. 实现自定义序列化器
+4. 添加新的协议支持

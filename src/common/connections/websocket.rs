@@ -747,7 +747,7 @@ impl ClientConnection for WebSocketConnection {
             .and_then(|c| c.platform.clone())
             .unwrap_or(Platform::Web);
         // 发送链接消息
-        let heartbeat_frame = FrameFactory::create_ping_frame("heartbeat".to_string()).unwrap();
+        let heartbeat_frame = FrameFactory::create_ping_frame("heartbeat".to_string())?;
         self.send_message(heartbeat_frame).await?;
         debug!("WebSocket 连接已建立: {}", self.id);
         Ok(())

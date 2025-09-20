@@ -1,61 +1,68 @@
-# Server Examples
+# 服务端示例
 
-This directory contains various server examples demonstrating how to use the flare-core library.
+本目录包含各种服务端示例，演示如何使用flare-core创建不同类型的服务器。
 
-## Examples
+## 示例列表
 
-### 1. QUIC Server (`quic_server.rs`)
-Demonstrates how to create a QUIC server that listens for QUIC client connections.
+### WebSocket 服务端
+- [websocket_server.rs](websocket_server.rs) - 基本的WebSocket服务端示例
 
-Features:
-- QUIC protocol server
-- Protobuf serialization
-- Connection management
-- Heartbeat mechanism
-- Message handling
+### QUIC 服务端
+- [quic_server.rs](quic_server.rs) - 基本的QUIC服务端示例
 
-### 2. WebSocket Server (`websocket_server.rs`)
-Demonstrates how to create a WebSocket server that listens for WebSocket client connections.
+### 双协议服务端
+- [dual_protocol_server.rs](dual_protocol_server.rs) - 同时支持WebSocket和QUIC的服务端示例
 
-Features:
-- WebSocket protocol server
-- Protobuf serialization
-- Connection management
-- Heartbeat mechanism
-- Message handling
+## 运行示例
 
-### 3. Dual Protocol Server (`dual_protocol_server.rs`)
-Demonstrates how to create a server that simultaneously supports both QUIC and WebSocket protocols, allowing clients to seamlessly switch between protocols.
-
-Features:
-- Dual protocol support (QUIC and WebSocket)
-- Automatic protocol detection
-- Seamless client switching between protocols
-- Connection management for both protocols
-- Heartbeat mechanism
-- Message handling
-
-## Usage
-
-To run any of the examples:
+要运行任何示例：
 
 ```bash
-# Run QUIC server example
+# 运行QUIC服务端示例
 cargo run --example quic_server
 
-# Run WebSocket server example
+# 运行WebSocket服务端示例
 cargo run --example websocket_server
 
-# Run dual protocol server example
+# 运行双协议服务端示例
 cargo run --example dual_protocol_server
 ```
 
-## Configuration
+## 配置说明
 
-Each example can be configured by modifying the server parameters in the source code:
+每个示例都可以通过修改源代码中的服务器参数进行配置：
 
-- Listening addresses and ports
-- Serialization format
-- Heartbeat interval and timeout
-- Maximum connections
-- Connection timeout settings
+- 监听地址和端口
+- 序列化格式
+- 心跳间隔和超时
+- 最大连接数
+- 连接超时设置
+
+### 序列化配置
+
+服务端现在支持统一的序列化配置，可以与客户端保持一致：
+
+```rust
+// 创建统一的序列化配置
+let serialization_config = SerializationConfig::builder()
+    .format(SerializationFormat::Protobuf)  // 使用Protobuf序列化
+    .build();
+
+// 在服务端配置中设置
+let mut server_config = ServerConfig::default_websocket();
+server_config = server_config.with_serialization_config(serialization_config);
+```
+
+### 客户端和服务端序列化一致性
+
+为了确保消息能够正确解析，客户端和服务端应该使用相同的序列化格式：
+
+```rust
+// 服务端
+server_config = server_config.with_serialization_format(SerializationFormat::Protobuf);
+
+// 客户端
+client_builder = client_builder.with_serialization(SerializationConfig::builder()
+    .format(SerializationFormat::Protobuf)
+    .build());
+```

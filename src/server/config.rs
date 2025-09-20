@@ -1,3 +1,5 @@
+use crate::common::serialization::{SerializationConfig, SerializationFormat};
+
 /// 服务器类型
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerType {
@@ -101,6 +103,8 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// 认证超时时间（毫秒）
     pub auth_timeout_ms: u64,
+    /// 序列化配置
+    pub serialization_config: SerializationConfig,
 }
 
 impl Default for ServerConfig {
@@ -131,6 +135,7 @@ impl ServerConfig {
             heartbeat_interval_ms: 10000,
             max_connections: 1000,
             auth_timeout_ms: 30000, // 默认认证超时时间30秒
+            serialization_config: SerializationConfig::default(),
         }
     }
     
@@ -153,6 +158,7 @@ impl ServerConfig {
             heartbeat_interval_ms: 10000,
             max_connections: 1000,
             auth_timeout_ms: 30000, // 默认认证超时时间30秒
+            serialization_config: SerializationConfig::default(),
         }
     }
     
@@ -180,6 +186,7 @@ impl ServerConfig {
             heartbeat_interval_ms: 10000,
             max_connections: 1000,
             auth_timeout_ms: 30000, // 默认认证超时时间30秒
+            serialization_config: SerializationConfig::default(),
         }
     }
     
@@ -233,6 +240,18 @@ impl ServerConfig {
         self
     }
     
+    /// 设置序列化配置
+    pub fn with_serialization_config(mut self, config: SerializationConfig) -> Self {
+        self.serialization_config = config;
+        self
+    }
+    
+    /// 设置序列化格式
+    pub fn with_serialization_format(mut self, format: SerializationFormat) -> Self {
+        self.serialization_config.format = format;
+        self
+    }
+    
     /// 检查是否配置了WebSocket
     pub fn has_websocket(&self) -> bool {
         self.websocket_config.is_some()
@@ -266,5 +285,10 @@ impl ServerConfig {
     /// 获取认证超时时间（毫秒）
     pub fn get_auth_timeout_ms(&self) -> u64 {
         self.auth_timeout_ms
+    }
+    
+    /// 获取序列化配置
+    pub fn get_serialization_config(&self) -> &SerializationConfig {
+        &self.serialization_config
     }
 }

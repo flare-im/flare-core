@@ -2,7 +2,6 @@
 //!
 //! 演示如何创建和运行WebSocket服务端
 
-use std::sync::Arc;
 use tokio::time::sleep;
 use std::time::Duration;
 
@@ -11,6 +10,7 @@ use flare_core::{
         config::{ServerConfig, ProtocolConfig},
         fast::server::FastServer,
     },
+    common::serialization::{SerializationConfig, SerializationFormat},
 };
 
 #[tokio::main]
@@ -30,6 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config = config.with_connection_timeout_ms(30000);
     config = config.with_heartbeat_interval_ms(10000);
     config = config.with_auth_timeout_ms(30000);
+    // 设置使用Protobuf序列化
+    config = config.with_serialization_format(SerializationFormat::Protobuf);
     
     // 打印配置信息用于调试
     tracing::info!("服务器配置: {:?}", config);
@@ -38,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::error!("WebSocket配置不存在！");
     }
+    tracing::info!("序列化配置: {:?}", config.serialization_config);
     
     // 创建FastServer实例
     let server = FastServer::new_with_config(config);

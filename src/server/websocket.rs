@@ -110,9 +110,10 @@ impl Server for WebSocketServer {
                         info!("WebSocket客户端已连接: {}", addr);
                         
                         // 克隆组件
-                        let _connection_config = config.clone();
                         let connection_manager = Arc::clone(&connection_manager);
                         let event_handler = Arc::clone(&event_handler);
+                        // 克隆序列化配置以避免在循环中移动
+                        let serialization_config = config.serialization_config.clone();
                         
                         // 为每个连接创建独立的任务
                         tokio::spawn(async move {
@@ -128,13 +129,19 @@ impl Server for WebSocketServer {
                             // 设置远程地址为客户端地址
                             connection_config.remote_addr = addr.to_string();
                             
-                            // 设置默认使用protobuf序列化
-                            connection_config = connection_config.with_serialization_config(
+                            // 使用服务端配置中的序列化配置，如果未设置则默认使用protobuf序列化
+                            let serialization_config = if serialization_config.format != crate::common::serialization::SerializationFormat::Json {
+                                // 如果已配置了非默认的序列化格式，则使用配置的格式
+                                serialization_config
+                            } else {
+                                // 否则默认使用protobuf序列化
                                 crate::common::serialization::SerializationConfig {
-                                    format: crate::common::serialization::SerializationFormat::Protobuf,
+                                    format: crate::common::serialization::SerializationFormat::Json,
                                     ..Default::default()
                                 }
-                            );
+                            };
+                            
+                            connection_config = connection_config.with_serialization_config(serialization_config);
                             
                             // 创建服务端连接
                             match crate::common::connections::factory::RawConnectionHandler::from_websocket_with_handler_arc(

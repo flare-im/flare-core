@@ -22,6 +22,9 @@ use crate::common::{
 use super::{
     config::{ClientConfig, ProtocolSelection},
     protocol_racing::ProtocolRacer,
+    auth::ClientAuthManager,
+    event::ClientEvent,
+    adapter::ClientEventAdapter,
 };
 
 /// 请求回调
@@ -41,6 +44,10 @@ pub struct Client {
     pending_requests: Arc<Mutex<HashMap<String, (RequestCallback, std::time::Instant)>>>,
     /// 请求超时时间（毫秒）
     request_timeout_ms: u64,
+    /// 认证管理器
+    auth_manager: Arc<ClientAuthManager>,
+    /// 客户端事件处理器
+    event_handler: Arc<dyn ClientEvent>,
 }
 
 impl Client {
@@ -52,7 +59,10 @@ impl Client {
     /// # 返回值
     /// 返回新的客户端实例
     pub fn new(config: ClientConfig) -> Self {
+        let auth_manager = Arc::new(ClientAuthManager::new(config.auth_config.clone()));
         let request_timeout_ms = config.request_timeout_ms;
+        let event_handler = Arc::new(ClientEventAdapter::new(Arc::new(super::DefClientEventHandler::default())));
+        
         let client = Self {
             config,
             connection: Arc::new(RwLock::new(None)),
@@ -60,12 +70,48 @@ impl Client {
             serializer: Arc::new(RwLock::new(None)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             request_timeout_ms,
+            auth_manager,
+            event_handler,
         };
         
         // 启动响应监听任务
         client.start_response_listener();
         
         client
+    }
+    
+    /// 创建新的客户端实例，指定事件处理器
+    /// 
+    /// # 参数
+    /// * `config` - 客户端配置
+    /// * `event_handler` - 客户端事件处理器
+    /// 
+    /// # 返回值
+    /// 返回新的客户端实例
+    pub fn with_event_handler(config: ClientConfig, event_handler: Arc<dyn ClientEvent>) -> Self {
+        let auth_manager = Arc::new(ClientAuthManager::new(config.auth_config.clone()));
+        let request_timeout_ms = config.request_timeout_ms;
+        
+        let client = Self {
+            config,
+            connection: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            serializer: Arc::new(RwLock::new(None)),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            request_timeout_ms,
+            auth_manager,
+            event_handler,
+        };
+        
+        // 启动响应监听任务
+        client.start_response_listener();
+        
+        client
+    }
+    
+    /// 获取客户端配置的引用
+    pub fn get_config(&self) -> &ClientConfig {
+        &self.config
     }
     
     /// 设置请求超时时间
@@ -88,6 +134,7 @@ impl Client {
         
         // 更新状态
         *self.state.write().await = ConnectionState::Connecting;
+        self.event_handler.on_connected("client").await;
         
         // 创建基础连接配置
         let base_config = self.create_connection_config();
@@ -110,10 +157,66 @@ impl Client {
         
         // 保存连接
         *self.connection.write().await = Some(connection);
-        *self.state.write().await = ConnectionState::Connected;
+        
+        // 执行认证流程（如果启用）
+        if self.config.auth_config.enabled {
+            self.perform_authentication().await?;
+        } else {
+            // 如果没有启用认证，直接设置为已连接状态
+            *self.state.write().await = ConnectionState::Connected;
+            self.event_handler.on_connected("client").await;
+        }
         
         info!("连接建立成功");
         Ok(())
+    }
+
+    /// 执行认证流程
+    async fn perform_authentication(&self) -> Result<()> {
+        info!("开始执行认证流程");
+        
+        // 重置认证管理器状态
+        self.auth_manager.reset().await;
+        
+        // 更新状态为连接中（表示正在认证）
+        *self.state.write().await = ConnectionState::Connecting;
+        
+        // 创建认证请求消息
+        let auth_request = self.auth_manager.create_auth_request()?;
+        
+        // 发送认证请求
+        if let Some(connection) = &*self.connection.read().await {
+            connection.send_message(auth_request).await?;
+        } else {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "连接不存在".to_string()
+            ));
+        }
+        
+        // 等待认证完成
+        match self.auth_manager.wait_for_authentication().await {
+            Ok(true) => {
+                // 认证成功，更新连接状态
+                *self.state.write().await = ConnectionState::Connected;
+                self.event_handler.on_authenticated().await;
+                info!("认证成功，连接已建立");
+                Ok(())
+            }
+            Ok(false) => {
+                // 认证失败
+                *self.state.write().await = ConnectionState::Disconnected;
+                self.event_handler.on_authentication_failed("认证失败").await;
+                Err(crate::common::error::FlareError::authentication_failed(
+                    "认证失败".to_string()
+                ))
+            }
+            Err(e) => {
+                // 认证过程中发生错误
+                *self.state.write().await = ConnectionState::Disconnected;
+                self.event_handler.on_authentication_failed(&e.to_string()).await;
+                Err(e)
+            }
+        }
     }
 
     /// 断开连接
@@ -124,6 +227,7 @@ impl Client {
         info!("开始断开连接");
         
         *self.state.write().await = ConnectionState::Disconnecting;
+        self.event_handler.on_disconnected("client", "用户主动断开连接").await;
         
         // 清理所有等待的请求
         {
@@ -166,8 +270,11 @@ impl Client {
         
         // 获取连接并发送消息
         if let Some(connection) = &*self.connection.read().await {
-            match connection.send_message(message).await {
-                Ok(()) => Ok(()),
+            match connection.send_message(message.clone()).await {
+                Ok(()) => {
+                    self.event_handler.on_message_sent("client", &message).await;
+                    Ok(())
+                },
                 Err(e) => {
                     // 记录错误日志
                     error!("发送消息失败: {}", e);
@@ -180,6 +287,7 @@ impl Client {
                             crate::common::error::ErrorCode::NetworkError => {
                                 // 更新连接状态为断开
                                 *self.state.write().await = ConnectionState::Disconnected;
+                                self.event_handler.on_disconnected("client", &format!("连接错误: {}", e)).await;
                                 error!("连接已断开，状态已更新");
                             }
                             _ => {}
@@ -227,7 +335,11 @@ impl Client {
         
         // 发送请求
         let send_result = if let Some(connection) = &*self.connection.read().await {
-            connection.send_message(request).await
+            let result = connection.send_message(request.clone()).await;
+            if result.is_ok() {
+                self.event_handler.on_message_sent("client", &request).await;
+            }
+            result
         } else {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()
@@ -281,7 +393,14 @@ impl Client {
         
         // 获取连接并发送心跳
         if let Some(connection) = &*self.connection.read().await {
-            connection.send_message(Frame::heartbeat("heartbeat".to_string())).await
+            let heartbeat_msg = Frame::heartbeat("heartbeat".to_string());
+            match connection.send_message(heartbeat_msg.clone()).await {
+                Ok(()) => {
+                    self.event_handler.on_message_sent("client", &heartbeat_msg).await;
+                    Ok(())
+                },
+                Err(e) => Err(e)
+            }
         } else {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()
@@ -395,6 +514,20 @@ impl Client {
         let response_id = response.get_message_id();
         debug!("收到响应消息: ID={}", response_id);
         
+        // 触发消息接收事件
+        self.event_handler.on_message_received("client", &response).await;
+        
+        // 检查是否是认证响应
+        if let crate::common::protocol::commands::Command::Control(
+            crate::common::protocol::commands::ControlCmd::AuthResponse(_)
+        ) = &response.command {
+            // 处理认证响应
+            if let Err(e) = self.auth_manager.handle_auth_response(&response).await {
+                error!("处理认证响应失败: {}", e);
+            }
+            return;
+        }
+        
         // 查找等待此响应的请求
         let mut pending = self.pending_requests.lock().await;
         if let Some((sender, _)) = pending.remove(&response_id) {
@@ -431,6 +564,8 @@ impl Clone for Client {
             serializer: self.serializer.clone(),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             request_timeout_ms: self.request_timeout_ms,
+            auth_manager: self.auth_manager.clone(),
+            event_handler: self.event_handler.clone(),
         }
     }
 }

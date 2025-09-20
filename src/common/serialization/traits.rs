@@ -71,10 +71,83 @@ impl Default for SerializationConfig {
     }
 }
 
+// 添加构建器结构体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializationConfigBuilder {
+    config: SerializationConfig,
+}
+
+impl SerializationConfigBuilder {
+    /// 创建新的序列化配置构建器
+    pub fn new() -> Self {
+        Self {
+            config: SerializationConfig::default(),
+        }
+    }
+    
+    /// 从现有配置创建构建器
+    pub fn from_config(config: SerializationConfig) -> Self {
+        Self { config }
+    }
+    
+    /// 设置序列化格式
+    pub fn format(mut self, format: SerializationFormat) -> Self {
+        self.config.format = format;
+        self
+    }
+    
+    /// 启用加密
+    pub fn enable_encryption(mut self, enable: bool) -> Self {
+        self.config.enable_encryption = enable;
+        self
+    }
+    
+    /// 启用压缩
+    pub fn enable_compression(mut self, enable: bool) -> Self {
+        self.config.enable_compression = enable;
+        self
+    }
+    
+    /// 设置压缩级别
+    pub fn compression_level(mut self, level: Option<u32>) -> Self {
+        self.config.compression_level = level;
+        self
+    }
+    
+    /// 启用美化格式
+    pub fn pretty_format(mut self, enable: bool) -> Self {
+        self.config.pretty_format = enable;
+        self
+    }
+    
+    /// 设置最大消息大小
+    pub fn max_message_size(mut self, size: Option<usize>) -> Self {
+        self.config.max_message_size = size;
+        self
+    }
+    
+    /// 添加自定义参数
+    pub fn add_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.custom_params.insert(key.into(), value.into());
+        self
+    }
+    
+    /// 构建最终的序列化配置
+    pub fn build(self) -> SerializationConfig {
+        self.config
+    }
+}
+
+
 impl SerializationConfig {
     /// 创建新的序列化配置
     pub fn new() -> Self {
         Self::default()
+    }
+    
+    /// 创建构建器
+    pub fn builder() -> SerializationConfigBuilder {
+        SerializationConfigBuilder::new()
     }
     
     /// 启用压缩

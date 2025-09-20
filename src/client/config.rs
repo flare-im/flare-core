@@ -9,6 +9,9 @@ use crate::common::{
 };
 use serde::{Deserialize, Serialize};
 
+// 添加认证配置的引用
+use crate::client::auth::AuthConfig;
+
 /// 协议选择模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtocolSelection {
@@ -47,12 +50,12 @@ pub struct ClientConfig {
     pub heartbeat_monitor_timeout_ms: u64,
     /// 是否启用自动心跳响应
     pub enable_auto_heartbeat_response: bool,
-    /// 序列化格式
-    pub serialization_format: SerializationFormat,
     /// 序列化配置
     pub serialization_config: SerializationConfig,
     /// 请求超时时间（毫秒）
     pub request_timeout_ms: u64,
+    /// 认证配置
+    pub auth_config: AuthConfig,
 }
 
 impl Default for ClientConfig {
@@ -71,9 +74,9 @@ impl Default for ClientConfig {
             heartbeat_interval_ms: 10000,
             heartbeat_monitor_timeout_ms: 30000,
             enable_auto_heartbeat_response: true,
-            serialization_format: SerializationFormat::Json,
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
+            auth_config: AuthConfig::default(),
         }
     }
 }
@@ -95,9 +98,9 @@ impl ClientConfig {
             heartbeat_interval_ms: 10000,
             heartbeat_monitor_timeout_ms: 30000,
             enable_auto_heartbeat_response: true,
-            serialization_format: SerializationFormat::Json,
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
+            auth_config: AuthConfig::default(),
         }
     }
     
@@ -145,8 +148,7 @@ impl ClientConfig {
     }
 
     /// 设置序列化格式
-    pub fn with_serialization(mut self, format: SerializationFormat, config: SerializationConfig) -> Self {
-        self.serialization_format = format;
+    pub fn with_serialization(mut self,config: SerializationConfig) -> Self {
         self.serialization_config = config;
         self
     }
@@ -154,6 +156,42 @@ impl ClientConfig {
     /// 设置请求超时时间
     pub fn with_request_timeout(mut self, timeout_ms: u64) -> Self {
         self.request_timeout_ms = timeout_ms;
+        self
+    }
+    
+    /// 设置认证配置
+    pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
+        self.auth_config = auth_config;
+        self
+    }
+    
+    /// 启用认证
+    pub fn with_auth_enabled(mut self, enabled: bool) -> Self {
+        self.auth_config.enabled = enabled;
+        self
+    }
+    
+    /// 设置认证用户ID
+    pub fn with_auth_user_id(mut self, user_id: String) -> Self {
+        self.auth_config.user_id = Some(user_id);
+        self
+    }
+    
+    /// 设置认证平台
+    pub fn with_auth_platform(mut self, platform: String) -> Self {
+        self.auth_config.platform = Some(platform);
+        self
+    }
+    
+    /// 设置认证令牌
+    pub fn with_auth_token(mut self, token: String) -> Self {
+        self.auth_config.token = Some(token);
+        self
+    }
+    
+    /// 设置认证超时时间
+    pub fn with_auth_timeout(mut self, timeout_ms: u64) -> Self {
+        self.auth_config.timeout_ms = timeout_ms;
         self
     }
 }
