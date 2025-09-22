@@ -73,3 +73,34 @@ client_builder = client_builder.with_serialization(SerializationConfig::builder(
 // 服务端
 server_config = server_config.with_serialization_format(SerializationFormat::Protobuf);
 ```
+
+### 错误处理
+
+客户端提供了完善的错误处理机制，包括连接错误、重连失败等情况的处理：
+
+```rust
+// 启用自动重连
+client_builder = client_builder
+    .with_auto_reconnect(true)
+    .with_reconnect_params(5, 2000);  // 最多重连5次，每次间隔2秒
+
+// 通过事件处理器处理各种错误情况
+#[async_trait::async_trait]
+impl flare_core::common::connections::event::ConnectionEvent for MyEventHandler {
+    async fn on_error(&self, connection_id: &str, error: &str) {
+        error!("连接错误: {} - 错误: {}", connection_id, error);
+        // 处理特定错误，如连接被拒绝
+        if error.contains("Connection refused") {
+            std::process::exit(1);
+        }
+    }
+
+    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
+        error!("重连失败: {} - 尝试次数: {} - 错误: {}", connection_id, attempt, error);
+        // 当重连失败次数达到上限时退出程序
+        if attempt >= 5 {
+            std::process::exit(1);
+        }
+    }
+}
+```

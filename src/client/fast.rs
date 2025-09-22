@@ -277,8 +277,17 @@ impl Drop for FastClient {
     fn drop(&mut self) {
         // 在运行时环境中停止任务
         let is_running = Arc::clone(&self.is_running);
-        let heartbeat_task = std::mem::take(&mut *self.heartbeat_task.blocking_write());
-        let reconnect_task = std::mem::take(&mut *self.reconnect_task.blocking_write());
+        // 使用异步写入而不是阻塞写入
+        let heartbeat_task = if let Ok(mut guard) = self.heartbeat_task.try_write() {
+            guard.take()
+        } else {
+            None
+        };
+        let reconnect_task = if let Ok(mut guard) = self.reconnect_task.try_write() {
+            guard.take()
+        } else {
+            None
+        };
         
         // Spawn一个任务来处理清理
         tokio::spawn(async move {

@@ -121,7 +121,12 @@ impl flare_core::common::connections::event::ConnectionEvent for WebSocketClient
     }
 
     async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
-        info!("[{}] WebSocket重连失败: {} - 尝试次数: {} - 错误: {}", self.name, connection_id, attempt, error);
+        error!("[{}] WebSocket重连失败: {} - 尝试次数: {} - 错误: {}", self.name, connection_id, attempt, error);
+        // 当重连失败时，可以在这里添加终止程序的逻辑
+        if attempt >= 5 {
+            error!("[{}] 重连尝试次数已达到上限，程序将退出", self.name);
+            std::process::exit(1);
+        }
     }
 
     async fn on_statistics_updated(&self, connection_id: &str, stats: &flare_core::common::connections::traits::ConnectionStats) {
@@ -144,18 +149,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format(SerializationFormat::Protobuf)
         .build();
     
-    // 使用FastClientBuilder创建客户端
-    let _client = FastClientBuilder::new()
-        .with_websocket_only()  // 仅使用WebSocket协议
-        .with_server_address(Transport::WebSocket, "ws://127.0.0.1:8080".to_string())
-        .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
-        .with_serialization(serialization_config.clone())
-        .build();
-    
     // 设置事件处理器
     let event_handler = Arc::new(WebSocketClientEventHandler::new("FastClient WebSocket客户端".to_string()));
     
-    // 重新创建带有自定义事件处理器的客户端
+    // 创建带有自定义事件处理器的客户端
     let mut client = FastClientBuilder::new()
         .with_websocket_only()  // 仅使用WebSocket协议
         .with_server_address(Transport::WebSocket, "ws://127.0.0.1:8080".to_string())
@@ -167,9 +164,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动客户端
     info!("正在连接WebSocket服务端...");
     let connect_start = Instant::now();
-    client.start().await?;
-    let connect_time = connect_start.elapsed();
-    info!("✅ 已连接到WebSocket服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
+    
+    // 使用更好的错误处理
+    match client.start().await {
+        Ok(()) => {
+            let connect_time = connect_start.elapsed();
+            info!("✅ 已连接到WebSocket服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
+        }
+        Err(e) => {
+            error!("❌ 连接WebSocket服务端失败: {}", e);
+            error!("请确保服务端已启动并监听在 ws://127.0.0.1:8080");
+            // 等待一段时间让事件处理器处理错误
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            return Err(e.into());
+        }
+    }
     
     // 发送认证消息（简化示例，实际应用中应该使用真实的认证数据）
     info!("发送认证消息...");
@@ -182,8 +191,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "1.0.0".to_string(),
     )?;
     
-    client.send_message(auth_message).await?;
-    info!("认证消息已发送");
+    if let Err(e) = client.send_message(auth_message).await {
+        error!("发送认证消息失败: {}", e);
+    } else {
+        info!("认证消息已发送");
+    }
     
     // 等待一小段时间确保认证完成
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -197,16 +209,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Reliability::AtLeastOnce,
     )?;
     
-    client.send_message(test_message).await?;
-    info!("测试消息已发送");
+    if let Err(e) = client.send_message(test_message).await {
+        error!("发送测试消息失败: {}", e);
+    } else {
+        info!("测试消息已发送");
+    }
     
     // 等待一段时间以接收响应
     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     
     // 停止客户端
     info!("正在停止客户端...");
-    client.stop().await?;
-    info!("客户端已停止");
+    if let Err(e) = client.stop().await {
+        error!("停止客户端时发生错误: {}", e);
+    } else {
+        info!("客户端已停止");
+    }
     
     Ok(())
 }
