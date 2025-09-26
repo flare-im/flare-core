@@ -4,7 +4,7 @@
 //! 并触发相应的连接事件。
 
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::common::{
     protocol::Frame,

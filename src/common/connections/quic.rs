@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::fs;
+use std::io::BufReader;
 use tokio::sync::RwLock;
 use tracing::{debug, info, error};
 
@@ -13,7 +15,8 @@ use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
     event::DefConnectionEventHandler,
 }, messaging::MessageParser, serialization::FrameSerializer, serialization::SerializerFactory, serialization::factory::json_serializer, SerializationFormat};
 
-use quinn::{Connection as QuinnConnection, Endpoint};
+use quinn::{Connection as QuinnConnection, Endpoint, ClientConfig};
+use rustls_pemfile::certs;
 use crate::common::connections::enums::Platform;
 
 /// 跳过服务器证书验证的实现（仅用于演示）
@@ -351,9 +354,14 @@ impl QuicConnection {
                         
                         // 发送消息
                         if let Some(conn) = &*connection.read().await {
-                            // 打开双向流
-                            match conn.open_bi().await {
-                                Ok((mut send, _recv)) => {
+                            // 设置超时时间
+                            let open_bi_result = tokio::time::timeout(
+                                Duration::from_secs(10), // 增加到10秒超时
+                                conn.open_bi()
+                            ).await;
+                            
+                            match open_bi_result {
+                                Ok(Ok((mut send, _recv))) => {
                                     // 发送已序列化的数据
                                     if let Err(e) = send.write_all(&message_data).await {
                                         error!("QUIC 消息发送失败: {} - {}", id, e);
@@ -390,7 +398,7 @@ impl QuicConnection {
                                     
                                     debug!("QUIC 消息已发送: {}", id);
                                 }
-                                Err(e) => {
+                                Ok(Err(e)) => {
                                     error!("QUIC 无法打开双向流: {} - {}", id, e);
                                     if let Some(handler) = &*event_handler.read().await {
                                         let handler = std::sync::Arc::clone(handler);
@@ -398,7 +406,17 @@ impl QuicConnection {
                                         let err_text = e.to_string();
                                         tokio::spawn(async move { handler.on_error(&id_clone, &err_text).await; });
                                     }
-                                    break;
+                                    // 不要立即break，继续尝试发送其他消息
+                                }
+                                Err(timeout_err) => {
+                                    error!("QUIC 打开双向流超时: {} - {}", id, timeout_err);
+                                    if let Some(handler) = &*event_handler.read().await {
+                                        let handler = std::sync::Arc::clone(handler);
+                                        let id_clone = id.clone();
+                                        let err_text = "打开双向流超时".to_string();
+                                        tokio::spawn(async move { handler.on_error(&id_clone, &err_text).await; });
+                                    }
+                                    // 不要立即break，继续尝试发送其他消息
                                 }
                             }
                         } else {
@@ -444,7 +462,7 @@ impl QuicConnection {
             let last_activity: Arc<RwLock<Instant>> = Arc::clone(&last_activity);
             let _state: Arc<RwLock<ConnectionState>> = Arc::clone(&state);
             let serializer: Arc<Box<dyn FrameSerializer>> = Arc::clone(&serializer);
-            let config = config.clone(); // 使用克隆的配置
+            let config = config.clone(); // 传递配置
             let message_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>> = Arc::clone(&self.message_sender); // 克隆发送通道
             
             // 创建统一消息解析器
@@ -465,36 +483,119 @@ impl QuicConnection {
             
             tokio::spawn(async move {
                 loop {
+                    // 检查连接状态
+                    {
+                        let current_state = *_state.read().await;
+                        if matches!(current_state, ConnectionState::Disconnected | ConnectionState::Failed) {
+                            debug!("连接已断开，停止接收任务: {}", id);
+                            break;
+                        }
+                    }
+                    
                     // 读取 QUIC 消息
                     {
                         let mut conn_guard = connection.write().await;
                         if let Some(conn) = &mut *conn_guard {
-                            // 等待双向流
-                            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                                // 更新活跃时间
-                                {
-                                    let mut last = last_activity.write().await;
-                                    *last = Instant::now();
-                                }
-                                
-                                // 处理接收到的数据
-                                let mut buffer = vec![0u8; 1024];
-                                match recv.read(&mut buffer).await {
-                                    Ok(Some(bytes_read)) => {
-                                        let data = buffer[..bytes_read].to_vec();
-                                        // 使用消息解析器处理数据，确保事件被正确触发
-                                        if let Err(e) = message_parser.parse_and_handle(data).await {
-                                            error!("消息处理失败: {}", e);
+                            // 检查连接是否仍然有效
+                            if conn.close_reason().is_some() {
+                                debug!("QUIC 连接已被关闭，停止接收任务: {}", id);
+                                break;
+                            }
+                            
+                            // 使用 tokio::select! 同时监听双向流和单向流
+                            tokio::select! {
+                                // 监听传入的双向流
+                                bi_result = conn.accept_bi() => {
+                                    match bi_result {
+                                        Ok((mut send, mut recv)) => {
+                                            // 更新活跃时间
+                                            {
+                                                let mut last = last_activity.write().await;
+                                                *last = Instant::now();
+                                            }
+                                            
+                                            // 处理接收到的数据
+                                            let mut buffer = vec![0u8; 4096]; // 增大缓冲区
+                                            match recv.read(&mut buffer).await {
+                                                Ok(Some(bytes_read)) => {
+                                                    let data = buffer[..bytes_read].to_vec();
+                                                    info!("QUIC 接收到双向流数据: {} - 长度: {}", id, data.len());
+                                                    // 使用消息解析器处理数据，确保事件被正确触发
+                                                    if let Err(e) = message_parser.parse_and_handle(data).await {
+                                                        error!("消息处理失败: {}", e);
+                                                    }
+                                                },
+                                                Ok(None) => {
+                                                    debug!("QUIC 双向流已关闭");
+                                                }
+                                                Err(e) => {
+                                                    error!("QUIC 双向流读取错误: {}", e);
+                                                }
+                                            }
+                                            
+                                            // 关闭发送流
+                                            if let Err(e) = send.finish() {
+                                                error!("QUIC 发送流关闭失败: {}", e);
+                                            }
                                         }
-                                    },
-                                    Ok(None) => {
-                                        debug!("QUIC 流已关闭");
-                                        break;
+                                        Err(e) => {
+                                            // 检查是否是连接关闭错误
+                                            if e.to_string().contains("closed by peer") {
+                                                debug!("QUIC 连接已被对端关闭: {}", id);
+                                                break;
+                                            } else if !e.to_string().contains("timed out") {
+                                                error!("QUIC 接受双向流错误: {}", e);
+                                            } else {
+                                                debug!("QUIC 接受双向流超时: {}", e);
+                                            }
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!("QUIC 读取错误: {}", e);
-                                        break;
+                                }
+                                // 监听传入的单向流
+                                uni_result = conn.accept_uni() => {
+                                    match uni_result {
+                                        Ok(mut recv) => {
+                                            // 更新活跃时间
+                                            {
+                                                let mut last = last_activity.write().await;
+                                                *last = Instant::now();
+                                            }
+                                            
+                                            // 处理接收到的数据
+                                            let mut buffer = vec![0u8; 4096]; // 增大缓冲区
+                                            match recv.read(&mut buffer).await {
+                                                Ok(Some(bytes_read)) => {
+                                                    let data = buffer[..bytes_read].to_vec();
+                                                    info!("QUIC 接收到单向流数据: {} - 长度: {}", id, data.len());
+                                                    // 使用消息解析器处理数据，确保事件被正确触发
+                                                    if let Err(e) = message_parser.parse_and_handle(data).await {
+                                                        error!("消息处理失败: {}", e);
+                                                    }
+                                                },
+                                                Ok(None) => {
+                                                    debug!("QUIC 单向流已关闭");
+                                                }
+                                                Err(e) => {
+                                                    error!("QUIC 单向流读取错误: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            // 检查是否是连接关闭错误
+                                            if e.to_string().contains("closed by peer") {
+                                                debug!("QUIC 连接已被对端关闭: {}", id);
+                                                break;
+                                            } else if !e.to_string().contains("timed out") {
+                                                error!("QUIC 接受单向流错误: {}", e);
+                                            } else {
+                                                debug!("QUIC 接受单向流超时: {}", e);
+                                            }
+                                        }
                                     }
+                                }
+                                // 超时处理，避免无限等待
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                    debug!("QUIC 连接接收超时，继续监听");
                                 }
                             }
                         } else {
@@ -529,6 +630,65 @@ impl QuicConnection {
         }
         
         Ok(())
+    }
+    
+    /// 创建客户端配置
+    async fn create_client_config(&self) -> Result<ClientConfig> {
+        let quic_config = &self.config.protocol_config.quic;
+        
+        // 如果配置为跳过服务器验证，使用跳过验证的配置
+        if quic_config.skip_server_verification {
+            let client_config_builder = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_no_client_auth();
+            
+            let quinn_config = ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_config_builder)
+                    .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
+            ));
+            
+            return Ok(quinn_config);
+        }
+        
+        // 如果有服务器证书路径，使用证书验证
+        if let Some(cert_path) = &quic_config.server_cert_path {
+            // 读取服务器证书
+            let cert_file = fs::File::open(cert_path)
+                .map_err(|e| FlareError::connection_failed(format!("无法读取服务器证书文件 {}: {}", cert_path, e)))?;
+            let cert_reader = &mut BufReader::new(cert_file);
+            
+            // 解析证书
+            let cert_der = certs(cert_reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| FlareError::connection_failed(format!("解析服务器证书失败: {}", e)))?;
+            
+            // 创建根证书存储并添加证书
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in cert_der {
+                root_store.add(rustls::pki_types::CertificateDer::from(cert))
+                    .map_err(|e| FlareError::connection_failed(format!("添加证书到根证书存储失败: {}", e)))?;
+            }
+            
+            // 使用quinn的with_root_certificates方法
+            let client_config = ClientConfig::with_root_certificates(Arc::new(root_store))
+                .map_err(|e| FlareError::connection_failed(format!("创建客户端配置失败: {}", e)))?;
+            
+            Ok(client_config)
+        } else {
+            // 默认使用跳过验证的配置
+            let client_config_builder = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_no_client_auth();
+            
+            let quinn_config = ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_config_builder)
+                    .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
+            ));
+            
+            Ok(quinn_config)
+        }
     }
 }
 
@@ -690,8 +850,8 @@ impl ClientConnection for QuicConnection {
         let addr = self.config.remote_addr.parse::<std::net::SocketAddr>()
             .map_err(|e| FlareError::connection_failed(format!("无效的地址格式: {}", e)))?;
         
-        // 获取客户端特定配置
-        let client_config = if let Some(config) = &self.config.client_config {
+        // 获取客户端特定配置（暂时未使用，但保留以备将来扩展）
+        let _client_config = if let Some(config) = &self.config.client_config {
             config.clone()
         } else {
             // 如果没有客户端配置，使用默认值
@@ -699,15 +859,7 @@ impl ClientConnection for QuicConnection {
         };
         
         // 创建客户端 QUIC 配置
-        let client_config_builder = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-            .with_no_client_auth();
-        
-        let quinn_config = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(client_config_builder)
-                .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
-        ));
+        let quinn_config = self.create_client_config().await?;
         
         // 创建 QUIC 端点
         let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
@@ -716,7 +868,7 @@ impl ClientConnection for QuicConnection {
         endpoint.set_default_client_config(quinn_config);
         
         // 连接到服务器
-        let connecting = endpoint.connect(addr, "localhost")
+        let connecting = endpoint.connect(addr, "flare-core-server")
             .map_err(|e| FlareError::connection_failed(format!("QUIC 连接失败: {}", e)))?;
         
         let new_conn = connecting.await
@@ -742,9 +894,6 @@ impl ClientConnection for QuicConnection {
             });
         }
         
-        let platform = self.config.client_config.as_ref()
-            .and_then(|c| c.platform.clone())
-            .unwrap_or(Platform::Web);
         // 发送链接消息
         let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
         let frame = crate::common::protocol::factory::FrameFactory::create_ping_frame(message_id.clone())?;
@@ -877,15 +1026,11 @@ impl ServerConnection for QuicConnection {
             }
         }
         
-        *self.state.write().await = ConnectionState::Connecting;
+        *self.state.write().await = ConnectionState::Connected;
         
         // 检查基础配置是否完成
         if self.config.id.is_empty() {
             return Err(FlareError::connection_failed("连接ID未设置"));
-        }
-        
-        if self.config.remote_addr.is_empty() {
-            return Err(FlareError::connection_failed("远程地址未设置"));
         }
         
         // 检查QUIC连接是否已设置
@@ -899,8 +1044,6 @@ impl ServerConnection for QuicConnection {
         // 启动必要的任务
         self.start_task().await?;
         
-        *self.state.write().await = ConnectionState::Connected;
-        
         // 更新最后活跃时间
         self.update_last_activity().await;
         
@@ -912,9 +1055,10 @@ impl ServerConnection for QuicConnection {
                 handler.on_connected(&id).await;
             });
         }
+        
         // 发送connect响应消息
         let message_id = crate::common::protocol::factory::FrameFactory::generate_message_id();
-        let mut frame = crate::common::protocol::Frame::new(
+        let frame = crate::common::protocol::Frame::new(
             crate::common::protocol::commands::Command::Control(crate::common::protocol::commands::ControlCmd::Pong),
             message_id.clone(),
             crate::common::protocol::Reliability::BestEffort

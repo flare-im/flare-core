@@ -133,6 +133,10 @@ pub struct QuicConfig {
     pub connection_window: u32,
     /// 拥塞控制算法
     pub congestion_control: String,
+    /// 服务器证书路径（用于客户端验证服务器）
+    pub server_cert_path: Option<String>,
+    /// 是否跳过服务器证书验证（仅用于测试）
+    pub skip_server_verification: bool,
 }
 
 /// TCP 配置
@@ -189,6 +193,8 @@ impl Default for QuicConfig {
             initial_stream_window: 65536,
             connection_window: 262144,
             congestion_control: "bbr".to_string(),
+            server_cert_path: None,
+            skip_server_verification: false,
         }
     }
 }
@@ -404,6 +410,12 @@ impl ConnectionConfig {
     /// 设置序列化配置
     pub fn with_serialization_config(mut self, config: crate::common::serialization::SerializationConfig) -> Self {
         self.serialization_config = Some(config);
+        self
+    }
+    
+    /// 设置远程地址
+    pub fn with_remote_addr(mut self, remote_addr: String) -> Self {
+        self.remote_addr = remote_addr;
         self
     }
     

@@ -17,8 +17,20 @@ name = "quic_client_example"
 path = "examples/common/quic_client_example.rs"
 
 [[example]]
+name = "simple_quic_client"
+path = "examples/common/simple_quic_client.rs"
+
+[[example]]
 name = "quic_server_example"
 path = "examples/common/quic_server_example.rs"
+
+[[example]]
+name = "cert_generator"
+path = "examples/common/cert_generator.rs"
+
+[[example]]
+name = "simple_quic_server"
+path = "examples/common/simple_quic_server.rs"
 
 [[example]]
 name = "websocket_client_example"
@@ -27,38 +39,6 @@ path = "examples/common/websocket_client_example.rs"
 [[example]]
 name = "websocket_server_example"
 path = "examples/common/websocket_server_example.rs"
-
-[[example]]
-name = "command_example"
-path = "examples/common/command_example.rs"
-
-[[example]]
-name = "command_structure_example"
-path = "examples/common/command_structure_example.rs"
-
-[[example]]
-name = "advanced_command_example"
-path = "examples/common/advanced_command_example.rs"
-
-[[example]]
-name = "simplified_command_example"
-path = "examples/common/simplified_command_example.rs"
-
-[[example]]
-name = "separated_data_message_example"
-path = "examples/common/separated_data_message_example.rs"
-
-[[example]]
-name = "message_includes_data_example"
-path = "examples/common/message_includes_data_example.rs"
-
-[[example]]
-name = "command_transport_example"
-path = "examples/common/command_transport_example.rs"
-
-[[example]]
-name = "command_response_example"
-path = "examples/common/command_response_example.rs"
 
 # Client examples
 [[example]]
@@ -72,14 +52,6 @@ path = "examples/client/websocket_client.rs"
 [[example]]
 name = "protocol_race_client"
 path = "examples/client/protocol_race_client.rs"
-
-[[example]]
-name = "enhanced_manager_client"
-path = "examples/client/enhanced_manager_client.rs"
-
-[[example]]
-name = "user_link_manager_client"
-path = "examples/client/user_link_manager_client.rs"
 
 [[example]]
 name = "auth_client"
@@ -107,56 +79,48 @@ name = "dual_protocol_server"
 path = "examples/server/dual_protocol_server.rs"
 
 [[example]]
-name = "enhanced_manager_server"
-path = "examples/server/enhanced_manager_server.rs"
-
-[[example]]
-name = "user_link_manager_server"
-path = "examples/server/user_link_manager_server.rs"
-
-[[example]]
-name = "user_connection_manager_example"
-path = "examples/server/user_connection_manager_example"
-
-[[example]]
-name = "server_connection_event_example"
-path = "examples/server/server_connection_event_example.rs"
-
-[[example]]
-name = "server_proxy_example"
-path = "src/server/examples/server_proxy_example.rs"
-
-[[example]]
-name = "auth_example"
-path = "examples/server/auth_example.rs"
-
-[[example]]
-name = "auth_server_example"
-path = "examples/server/auth_server_example.rs"
-
-[[example]]
 name = "client_auth_example"
 path = "examples/client/auth_example.rs"
 
-[[example]]
-name = "auth_vs_connect"
-path = "examples/auth_vs_connect.rs"
+# === 示例配置说明 ===
+#
+# 以下是如何为不同类型的示例配置 Cargo.toml 的示例
+# 注意：这些配置仅用于说明目的，实际使用时应根据需要启用相应的功能
 
-[[example]]
-name = "connect_with_platform"
-path = "examples/connect_with_platform.rs"
+# === QUIC 示例配置 ===
+#
+# QUIC 客户端和服务端示例需要以下依赖：
+# - quinn (QUIC 协议实现)
+# - rustls (TLS 支持)
+# - rustls-pemfile (PEM 文件解析)
+# - rcgen (证书生成，用于测试)
+# - tokio (异步运行时)
+#
+# 示例文件：
+# - examples/common/quic_client_example.rs
+# - examples/common/quic_server_example.rs
 
-[[example]]
-name = "connection_auth_analysis"
-path = "examples/connection_auth_analysis.md"
+# === WebSocket 示例配置 ===
+#
+# WebSocket 客户端和服务端示例需要以下依赖：
+# - tokio-tungstenite (WebSocket 实现)
+# - tokio-native-tls (TLS 支持，可选)
+# - url (URL 解析)
+# - futures-util (异步流处理)
+#
+# 示例文件：
+# - examples/common/websocket_client_example.rs
+# - examples/common/websocket_server_example.rs
 
-[[example]]
-name = "websocket_message_test"
-path = "examples/common/websocket_message_test.rs"
-
-[[example]]
-name = "websocket_client_test"
-path = "examples/common/websocket_client_test.rs"
+# === 通用依赖项 ===
+#
+# 所有示例都需要以下依赖：
+# - tokio (异步运行时)
+# - serde/serde_json (JSON 序列化)
+# - prost (Protobuf 序列化)
+# - tracing/tracing-subscriber (日志)
+# - async-trait (异步 trait)
+# - chrono (时间处理)
 
 [dependencies]
 # 异步运行时（核心功能）
@@ -171,14 +135,14 @@ prost = "0.14.1"
 prost-types = "0.14.1"
 
 # 网络相关（默认可用）
-quinn = "0.11.8"
+quinn = "0.11"
 tokio-tungstenite = "0.27.0"
 
 # TLS（与网络功能配合）
 rustls = { version = "0.23.31", features = ["ring"] }
 rustls-pemfile = "2.2.0"
 rustls-native-certs = "0.8.1"
-tokio-native-tls = "0.3.1"
+# tokio-native-tls = "0.3.1"
 
 # 时间处理（连接管理需要）
 chrono = { version = "0.4.38", features = ["serde"] }
@@ -239,3 +203,43 @@ full = ["logging"]
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"
+
+# === 示例配置说明 ===
+#
+# 以下是如何为不同类型的示例配置 Cargo.toml 的示例
+# 注意：这些配置仅用于说明目的，实际使用时应根据需要启用相应的功能
+
+# === QUIC 示例配置 ===
+#
+# QUIC 客户端和服务端示例需要以下依赖：
+# - quinn (QUIC 协议实现)
+# - rustls (TLS 支持)
+# - rustls-pemfile (PEM 文件解析)
+# - rcgen (证书生成，用于测试)
+# - tokio (异步运行时)
+#
+# 示例文件：
+# - examples/common/quic_client_example.rs
+# - examples/common/quic_server_example.rs
+
+# === WebSocket 示例配置 ===
+#
+# WebSocket 客户端和服务端示例需要以下依赖：
+# - tokio-tungstenite (WebSocket 实现)
+# - tokio-native-tls (TLS 支持，可选)
+# - url (URL 解析)
+# - futures-util (异步流处理)
+#
+# 示例文件：
+# - examples/common/websocket_client_example.rs
+# - examples/common/websocket_server_example.rs
+
+# === 通用依赖项 ===
+#
+# 所有示例都需要以下依赖：
+# - tokio (异步运行时)
+# - serde/serde_json (JSON 序列化)
+# - prost (Protobuf 序列化)
+# - tracing/tracing-subscriber (日志)
+# - async-trait (异步 trait)
+# - chrono (时间处理)

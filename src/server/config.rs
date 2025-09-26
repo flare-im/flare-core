@@ -141,12 +141,12 @@ impl ServerConfig {
     
     /// 创建默认的QUIC服务器配置
     /// 
-    /// QUIC服务器监听在127.0.0.1:4321，必须启用TLS
+    /// QUIC服务器监听在127.0.0.1:8081，必须启用TLS
     /// 注意：使用此配置时，必须提供有效的TLS证书和私钥路径
     pub fn default_quic(cert_path: String, key_path: String) -> Self {
         let tls_config = TlsConfig::new(cert_path, key_path);
         let quic_config = ProtocolConfig::new()
-            .with_listen_addr("127.0.0.1:4321".to_string())
+            .with_listen_addr("127.0.0.1:8081".to_string())
             .with_max_connections(1000)
             .with_tls_config(tls_config);
         

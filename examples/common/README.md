@@ -1,129 +1,77 @@
-# Common Examples
+# QUIC 简单通信示例
 
-本目录包含了flare-core中通用功能的使用示例，展示了如何直接使用src/common模块中的连接功能。
+这个目录包含了使用quinn直接实现的简单QUIC客户端和服务端示例，支持TLS证书认证。这些示例直接使用quinn的API，不依赖flare-core的抽象层。
 
-## 目录结构
+## 文件说明
 
-```
-common/
-├── quic_client_example.rs     # QUIC客户端连接示例
-├── quic_server_example.rs     # QUIC服务端连接示例
-├── websocket_client_example.rs # WebSocket客户端连接示例
-├── websocket_server_example.rs # WebSocket服务端连接示例
-└── README.md                  # 本说明文件
-```
-
-## 示例说明
-
-### QUIC连接示例
-
-#### quic_client_example.rs
-- 展示如何创建和使用QUIC客户端连接
-- 演示QUIC连接的配置和事件处理
-- 包含完整的消息发送和接收流程
-- 使用Protobuf序列化和LZ4压缩
-
-#### quic_server_example.rs
-- 展示如何创建和运行QUIC服务端
-- 演示QUIC服务端的配置和消息处理
-- 使用EchoMessageHandler回显客户端消息
-- 支持TLS加密通信
-
-### WebSocket连接示例
-
-#### websocket_client_example.rs
-- 展示如何创建和使用WebSocket客户端连接
-- 演示WebSocket连接的配置和事件处理
-- 包含完整的消息发送和接收流程
-- 使用Bincode序列化和LZ4压缩
-
-#### websocket_server_example.rs
-- 展示如何创建和运行WebSocket服务端
-- 演示WebSocket服务端的配置和消息处理
-- 使用EchoMessageHandler回显客户端消息
+- `cert_generator.rs` - 证书生成工具，用于生成QUIC通信所需的TLS证书
+- `simple_quic_server.rs` - 简单的QUIC服务端示例
+- `simple_quic_client.rs` - 简单的QUIC客户端示例
 
 ## 使用方法
 
-### 运行QUIC示例
+### 1. 生成证书
 
-1. 首先确保有TLS证书（可以使用项目提供的证书生成脚本）：
-   ```bash
-   ./scripts/generate_certs.sh
-   ```
+首先运行证书生成工具来创建TLS证书：
 
-2. 在一个终端中运行QUIC服务端：
-   ```bash
-   cargo run --example quic_server_example
-   ```
+```bash
+cargo run --example cert_generator
+```
 
-3. 在另一个终端中运行QUIC客户端：
-   ```bash
-   cargo run --example quic_client_example
-   ```
+这将在`certs/`目录下生成以下文件：
+- `server.crt/server.key` - 服务器证书和私钥
+- `client.crt/client.key` - 客户端证书和私钥
 
-### 运行WebSocket示例
+### 2. 启动服务端
 
-1. 在一个终端中运行WebSocket服务端：
-   ```bash
-   cargo run --example websocket_server_example
-   ```
+在一个终端中启动QUIC服务端：
 
-2. 在另一个终端中运行WebSocket客户端：
-   ```bash
-   cargo run --example websocket_client_example
-   ```
+```bash
+cargo run --example simple_quic_server
+```
+
+服务端将在`127.0.0.1:8081`上监听连接。
+
+### 3. 运行客户端
+
+在另一个终端中运行QUIC客户端：
+
+```bash
+cargo run --example simple_quic_client
+```
+
+客户端将连接到服务端，发送几条测试消息，并接收响应。
 
 ## 功能特性
 
-### 连接管理
-- 统一的连接接口，支持WebSocket和QUIC协议
-- 自动心跳机制，保持连接活跃
-- 连接状态监控和事件处理
-- 错误处理和重连机制
+- **TLS加密**: 使用自签名证书进行TLS加密通信
+- **双向流**: 支持QUIC双向流进行消息收发
+- **错误处理**: 包含完整的错误处理和日志记录
+- **简单易用**: 代码简洁，易于理解和修改
+- **纯quinn实现**: 直接使用quinn API，不依赖其他抽象层
+- **证书跳过验证**: 客户端跳过服务器证书验证（仅用于测试）
 
-### 消息处理
-- 多种序列化格式支持（JSON、Bincode、Protobuf等）
-- 消息压缩支持（LZ4、Snappy、GZIP）
-- 消息可靠性保证（尽力而为、至少一次、恰好一次、有序）
-- 异步消息处理管道
+## 通信流程
 
-### 性能优化
-- 零拷贝序列化器
-- 自适应压缩器
-- CPU亲和性绑定
-- 内存优化技术
+1. 客户端连接到服务端
+2. 建立TLS加密连接
+3. 客户端打开双向流
+4. 客户端发送消息
+5. 服务端接收消息并发送响应
+6. 客户端接收响应
+7. 连接关闭
 
-## 事件处理
+## 自定义修改
 
-所有示例都实现了完整的事件处理机制：
+你可以根据需要修改以下内容：
 
-- `on_connected`: 连接建立事件
-- `on_disconnected`: 连接断开事件
-- `on_error`: 错误事件
-- `on_message_received`: 消息接收事件
-- `on_message_sent`: 消息发送事件
-- `on_heartbeat_timeout`: 心跳超时事件
-- `on_quality_changed`: 连接质量变化事件
-- `on_statistics_updated`: 统计信息更新事件
+- **消息内容**: 在`simple_quic_client.rs`中修改发送的消息
+- **服务端响应**: 在`simple_quic_server.rs`中修改服务端的响应逻辑
+- **端口和地址**: 修改服务端监听的地址和端口
+- **证书配置**: 修改证书生成参数
 
-## 配置选项
+## 注意事项
 
-### 连接配置
-- 心跳间隔和超时设置
-- TLS/SSL加密支持
-- 序列化格式选择
-- 压缩算法配置
-
-### 协议特定配置
-- QUIC: 流控制、拥塞控制、并发流数量
-- WebSocket: 子协议、扩展、压缩阈值
-
-## 扩展使用
-
-这些示例可以作为基础模板进行扩展：
-
-1. 实现自定义消息处理器
-2. 添加认证和授权机制
-3. 集成业务逻辑处理
-4. 实现连接池管理
-5. 添加监控和日志功能
+- 这些示例使用自签名证书，仅用于开发和测试
+- 生产环境应使用由受信任CA签发的证书
+- 客户端跳过了服务器证书验证，仅用于演示目的

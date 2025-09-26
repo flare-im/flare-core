@@ -263,11 +263,8 @@ impl RawConnectionHandler {
         // 设置 QUIC 连接到连接中
         connection.set_connection(quic_connection).await;
         
-        // 启动消息处理任务
-        connection.start_task().await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(
-                format!("启动消息接收任务失败: {}", e)
-            ))?;
+        // 注意：不在这里启动任务，而是在accept方法中启动
+        // 这样可以确保任务在正确的时机启动
 
         Ok(Arc::new(connection))
     }
