@@ -9,8 +9,7 @@ use tracing::{info, error};
 use crate::common::{
     error::Result,
 };
-use rustls_pemfile;
-use crate::common::connections::factory::RawConnectionHandler;
+use crate::common::connections::factory::ConnectionFactory;
 use crate::ConnectionEvent;
 use crate::server::{
     manager::traits::ServerConnectionManager, 
@@ -19,8 +18,6 @@ use crate::server::{
     ServerEventAdapter,
     ServerConfig,
     ServerType,
-    ProtocolConfig,
-    TlsConfig,
 };
 
 /// QUIC 服务端实现
@@ -75,70 +72,32 @@ impl QuicServer {
     
     /// 创建 QUIC 端点
     async fn create_endpoint(&self) -> Result<quinn::Endpoint> {
-        use quinn::{Endpoint, ServerConfig};
-        use rustls::ServerConfig as RustlsServerConfig;
+        // 创建连接配置
+        let connection_config = self.create_connection_config();
+        
+        // 使用ConnectionFactory创建QUIC服务端端点
+        ConnectionFactory::create_quic_server_endpoint(connection_config).await
+    }
+    
+    /// 创建连接配置
+    fn create_connection_config(&self) -> crate::common::connections::types::ConnectionConfig {
+        use crate::common::connections::types::{ConnectionConfig, Transport};
         
         let local_addr = self.get_listen_addr();
-        let addr = local_addr.parse().map_err(|e| {
-            crate::common::error::FlareError::connection_failed(format!("地址解析失败: {}", e))
-        })?;
+        let connection_id = format!("quic_server_{}", local_addr.replace(":", "_"));
         
-        // 使用配置中的证书（如果提供），否则生成自签名证书
-        let (cert, key) = if let Some(quic_config) = &self.config.quic_config {
+        let mut config = ConnectionConfig::server(connection_id, local_addr);
+        config.transport = Transport::Quic;
+        
+        // 如果有QUIC配置，设置证书路径
+        if let Some(quic_config) = &self.config.quic_config {
             if let Some(tls_config) = &quic_config.tls_config {
-                // 读取提供的证书和密钥文件
-                let cert_file = std::fs::File::open(&tls_config.cert_path)
-                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法打开证书文件: {}", e)))?;
-                let key_file = std::fs::File::open(&tls_config.key_path)
-                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法打开密钥文件: {}", e)))?;
-                
-                let mut certs = Vec::new();
-                for cert_result in rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file)) {
-                    certs.push(cert_result
-                        .map_err(|e| crate::common::error::FlareError::connection_failed(format!("证书解析失败: {}", e)))?);
-                }
-                
-                let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
-                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("密钥解析失败: {}", e)))?
-                    .ok_or_else(|| crate::common::error::FlareError::connection_failed("未找到私钥".to_string()))?;
-                
-                (certs, key)
-            } else {
-                // 生成自签名证书
-                let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("生成自签名证书失败: {}", e)))?;
-                let certs = vec![rustls::pki_types::CertificateDer::from(cert.cert)];
-                let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der())
-                );
-                (certs, key)
+                config.protocol_config.quic.server.cert_path = tls_config.cert_path.clone();
+                config.protocol_config.quic.server.key_path = tls_config.key_path.clone();
             }
-        } else {
-            // 生成自签名证书
-            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("生成自签名证书失败: {}", e)))?;
-            let certs = vec![rustls::pki_types::CertificateDer::from(cert.cert)];
-            let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der())
-            );
-            (certs, key)
-        };
+        }
         
-        let rustls_config = RustlsServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert, key)
-            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("TLS 配置失败: {}", e)))?;
-        
-        let server_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_config)
-            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("QUIC 配置失败: {}", e)))?;
-        
-        let server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
-        
-        // 绑定端点
-        let endpoint = Endpoint::server(server_config, addr)
-            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("QUIC 端点创建失败: {}", e)))?;
-        
-        Ok(endpoint)
+        config
     }
 }
 
@@ -190,7 +149,7 @@ impl Server for QuicServer {
                             ).with_remote_addr(remote_addr.to_string());
                             
                             // 创建服务端连接
-                            match RawConnectionHandler::from_quic_with_handler_arc(
+                            match ConnectionFactory::from_quic_with_handler_arc(
                                 quic_connection, 
                                 connection_config, 
                                 connection_event_handler,

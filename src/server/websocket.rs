@@ -144,7 +144,7 @@ impl Server for WebSocketServer {
                             connection_config = connection_config.with_serialization_config(serialization_config);
                             
                             // 创建服务端连接
-                            match crate::common::connections::factory::RawConnectionHandler::from_websocket_with_handler_arc(
+                            match crate::common::connections::factory::ConnectionFactory::from_websocket_with_handler_arc(
                                 tcp_stream, 
                                 connection_config, 
                                 connection_event_handler.clone(),  // 克隆事件处理器

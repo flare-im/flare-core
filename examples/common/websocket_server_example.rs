@@ -11,11 +11,11 @@ use tokio::net::TcpListener;
 use flare_core::{
     common::{
         connections::{
-            traits::{ConnectionEvent, ServerConnection},
-            types::{ConnectionConfig, ConnectionType},
-            factory::RawConnectionHandler,
+            traits::ConnectionEvent,
+            types::{ConnectionConfig, Transport},
+            factory::ConnectionFactory,
         },
-        protocol::{Frame, MessageType},
+        protocol::Frame,
         serialization::SerializationFormat,
     },
 };
@@ -41,29 +41,11 @@ impl ConnectionEvent for WebSocketServerEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] 收到WebSocket心跳消息: {}", self.name, connection_id);
-        } else {
-            let payload = message.get_payload();
-            if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                info!("[{}] 收到WebSocket客户端消息: {} - 内容: {}", self.name, connection_id, text);
-                
-                // 如果是数据消息，可以发送响应
-                if message.get_message_type() == MessageType::Data {
-                    info!("[{}] 准备发送响应消息", self.name);
-                }
-            } else {
-                info!("[{}] 收到WebSocket二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
-            }
-        }
+        info!("[{}] 收到WebSocket消息: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] WebSocket心跳消息已发送: {}", self.name, connection_id);
-        } else {
-            info!("[{}] WebSocket数据消息已发送: {}", self.name, connection_id);
-        }
+        info!("[{}] WebSocket消息已发送: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {
@@ -113,8 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    // 服务端地址 (使用不同的端口避免冲突)
-    let addr: SocketAddr = "127.0.0.1:8083".parse()?;
+    // 服务端地址 (使用标准 WebSocket 端口)
+    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
     
     // 创建TCP监听器
     let listener = TcpListener::bind(addr).await?;
@@ -134,21 +116,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 为每个连接创建独立的任务
         tokio::spawn(async move {
             // 创建连接配置
-            let config = ConnectionConfig::server(
+            let mut config = ConnectionConfig::server(
                 format!("ws_server_{}", client_addr).replace(":", "_"),
                 addr.to_string(),
-            )
-            .with_type(ConnectionType::WebSocket)
-            .with_serialization_format(SerializationFormat::Protobuf); // 使用Protobuf序列化
+            );
+            // 设置远程地址为客户端地址
+            config.remote_addr = client_addr.to_string();
+            config.transport = Transport::WebSocket;
+            
+            // 配置 WebSocket 特定设置
+            config.protocol_config.websocket = flare_core::common::connections::types::WebSocketConfig {
+                subprotocols: vec!["flare-protocol".to_string()],
+                extensions: vec![],
+                compression_threshold: Some(1024),
+            };
+            
+            config.serialization_config = Some(flare_core::common::serialization::SerializationConfig {
+                format: SerializationFormat::Protobuf,
+                enable_encryption: false,
+                enable_compression: false,
+                compression_level: Some(0),
+                pretty_format: false,
+                max_message_size: Some(1024 * 1024), // 1MB
+                custom_params: std::collections::HashMap::new(),
+            });
             
             // 从原始TCP连接创建WebSocket服务端连接
-            match RawConnectionHandler::from_websocket_with_handler_arc(
+            match ConnectionFactory::from_websocket_with_handler_arc(
                 tcp_stream,
                 config,
                 handler as Arc<dyn ConnectionEvent>,
             ).await {
                 Ok(connection) => {
-                    let connection_id = connection.get_id().to_string();
+                    let connection_id = connection.id();
                     info!("WebSocket连接已建立: {} (ID: {})", client_addr, connection_id);
                     
                     // 接受连接以正确初始化状态
@@ -159,43 +159,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     info!("连接已接受并准备就绪: {}", connection_id);
                     
-                    // 启动消息处理循环
+                    // 发送欢迎消息
+                    let welcome_cmd = flare_core::common::protocol::commands::MessageSendCommand::new(
+                        format!("欢迎连接到 WebSocket 服务端! 客户端: {}", client_addr).into_bytes()
+                    );
+                    let command = flare_core::common::protocol::commands::Command::Message(
+                        flare_core::common::protocol::commands::MessageCmd::Send(welcome_cmd)
+                    );
+                    let welcome_message = flare_core::common::protocol::Frame::new(
+                        command,
+                        uuid::Uuid::new_v4().to_string(),
+                        flare_core::common::protocol::Reliability::AtLeastOnce,
+                    );
+                    
+                    if let Err(e) = connection.send_message(welcome_message).await {
+                        error!("发送欢迎消息失败: {}", e);
+                    } else {
+                        info!("欢迎消息已发送给客户端: {}", client_addr);
+                    }
+                    
+                    // 保持连接活跃，等待消息处理
                     loop {
-                        match connection.receive_message().await {
-                            Ok(Some(frame)) => {
-                                // 处理接收到的消息
-                                info!("收到消息: {:?}", frame.get_message_type());
-                                
-                                // 如果是数据消息，可以发送响应
-                                if frame.get_message_type() == MessageType::Data {
-                                    let response_payload = b"Hello from WebSocket server with Protobuf!".to_vec();
-                                    let response = Frame::new(
-                                        MessageType::Data,
-                                        frame.get_message_id(),
-                                        frame.get_reliability(),
-                                        response_payload,
-                                    );
-                                    
-                                    if let Err(e) = connection.send_message(response).await {
-                                        error!("发送响应消息失败: {}", e);
-                                    } else {
-                                        info!("响应消息已发送");
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                // 连接已关闭
-                                info!("连接已关闭: {}", client_addr);
-                                break;
-                            }
-                            Err(e) => {
-                                error!("接收消息失败: {}", e);
-                                break;
-                            }
-                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         
-                        // 检查连接是否还活跃
-                        if !connection.is_active().await {
+                        // 检查连接状态
+                        let state = connection.state();
+                        if matches!(state, flare_core::common::connections::types::ConnectionState::Disconnected) {
                             info!("连接已断开: {}", client_addr);
                             break;
                         }

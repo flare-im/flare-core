@@ -3,18 +3,15 @@
 //! 演示如何创建和使用QUIC服务端
 
 use std::sync::Arc;
-use std::fs;
-use std::io::BufReader;
-use std::net::SocketAddr;
-use quinn::Endpoint;
 use tokio::signal;
+use quinn::Endpoint;
 use flare_core::{
     common::{
         connections::{
             types::ConnectionConfig,
             event::ConnectionEvent,
-            quic::QuicConnection,
-            traits::{ConnectionStats, ServerConnection, Connection},
+            factory::ConnectionFactory,
+            traits::ConnectionStats,
         },
         protocol::{Frame, Reliability, commands::{Command, MessageCmd, MessageSendCommand}},
     },
@@ -91,25 +88,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
     tracing_subscriber::fmt::init();
     
-    // 创建TLS配置，使用项目中的证书
-    let cert_file = fs::File::open("certs/server.crt")?;
-    let key_file = fs::File::open("certs/server.key")?;
+    // 创建服务端连接配置
+    let mut config = ConnectionConfig::server(
+        "quic_server".to_string(),
+        "127.0.0.1:8081".to_string(),
+    );
+    config.transport = flare_core::common::connections::types::Transport::Quic;
     
-    let cert_reader = &mut BufReader::new(cert_file);
-    let key_reader = &mut BufReader::new(key_file);
+    // 设置证书路径
+    config.protocol_config.quic.server.cert_path = "certs/server.crt".to_string();
+    config.protocol_config.quic.server.key_path = "certs/server.key".to_string();
+    config.protocol_config.quic.server.server_hostname = Some("localhost".to_string()); // 设置服务器主机名
     
-    let cert_chain = rustls_pemfile::certs(cert_reader).collect::<Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(key_reader)?.unwrap();
-    
-    let server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
-    
-    let server_cfg = quinn::ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
-    
-    // 创建QUIC端点
-    let addr: SocketAddr = "127.0.0.1:8081".parse()?;
-    let endpoint = Endpoint::server(server_cfg, addr)?;
+    // 使用ConnectionFactory创建QUIC服务端端点
+    let endpoint = ConnectionFactory::create_quic_server_endpoint(config).await?;
     
     println!("QUIC服务端已启动，监听地址: 127.0.0.1:8081");
     println!("按 Ctrl+C 停止服务端");
@@ -157,20 +149,27 @@ async fn handle_connection(incoming: quinn::Incoming) {
             println!("新连接来自: {}", remote_addr);
             
             // 创建服务端连接配置
-            let connection_config = ConnectionConfig::server(
+            let mut connection_config = ConnectionConfig::server(
                 format!("quic_server_connection_{}", remote_addr).replace(":", "_"),
                 remote_addr.to_string(),
             );
-            
-            // 创建QUIC连接实例
-            let mut server_connection = QuicConnection::new(connection_config);
+            connection_config.transport = flare_core::common::connections::types::Transport::Quic;
             
             // 设置事件处理器
             let event_handler = Arc::new(SimpleServerEventHandler);
-            server_connection.set_event_handler(event_handler).await;
             
-            // 设置QUIC连接
-            server_connection.set_connection(connecting).await;
+            // 使用ConnectionFactory创建服务端连接
+            let server_connection = match ConnectionFactory::from_quic_with_handler(
+                connecting,
+                connection_config,
+                event_handler,
+            ).await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("创建服务端连接失败: {}", e);
+                    return;
+                }
+            };
             
             // 接受连接
             if let Err(e) = server_connection.accept().await {

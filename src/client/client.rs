@@ -13,7 +13,7 @@ use crate::common::{
     protocol::Frame,
     connections::{
         types::{ConnectionConfig, Transport, ConnectionState},
-        traits::{ClientConnection, ConnectionFactory as ConnectionFactoryTrait},
+        traits::ClientConnection,
         factory::ConnectionFactory,
     },
     serialization::FrameSerializer,
@@ -488,8 +488,7 @@ impl Client {
         
         base_config.transport = protocol_type;
         
-        let factory = ConnectionFactory::new();
-        let connection = factory.create_client_connection(base_config).await?;
+        let connection = ConnectionFactory::create_client(base_config).await?;
         
         match connection.connect().await {
             Ok(_) => {

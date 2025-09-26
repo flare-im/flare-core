@@ -12,9 +12,9 @@ use crate::common::{
     error::Result,
     protocol::Frame,
     connections::{
-        traits::{ClientConnection, ConnectionEvent, ConnectionFactory as ConnectionFactoryTrait},
-        types::{ConnectionConfig, ConnectionState},
+        traits::{ClientConnection, ConnectionEvent},
         factory::ConnectionFactory,
+        types::{ConnectionConfig, ConnectionState},
     },
 };
 
@@ -131,7 +131,7 @@ impl ConnectionManager {
         drop(connections);
         
         // 创建连接
-        let connection = self.factory.create_client_connection(config.clone()).await?;
+        let connection = ConnectionFactory::create_client(config.clone()).await?;
         let connection_id = config.id.clone();
         
         // 创建连接信息

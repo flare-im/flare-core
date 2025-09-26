@@ -8,7 +8,8 @@ pub use common::{
     error::{Result, FlareError},
     protocol::{Frame, Reliability, ProtocolSelection},
     connections::{
-        traits::{Connection, ClientConnection, ServerConnection, ConnectionFactory, ConnectionEvent, DefConnectionEventHandler},
+        traits::{Connection, ClientConnection, ServerConnection, ConnectionEvent, DefConnectionEventHandler},
+        factory::ConnectionFactory,
         types::{ConnectionRole, Transport, ConnectionConfig, ConnectionState, ConnectionQuality, QuicConfig},
     },
 };

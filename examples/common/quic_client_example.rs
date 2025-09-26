@@ -11,8 +11,8 @@ use flare_core::{
         connections::{
             types::{ConnectionConfig, Transport},
             event::ConnectionEvent,
-            quic::QuicConnection,
-            traits::{ConnectionStats, ClientConnection, Connection},
+            factory::ConnectionFactory,
+            traits::ConnectionStats,
         },
         protocol::{Frame, Reliability, commands::{Command, MessageCmd, MessageSendCommand}},
     },
@@ -96,8 +96,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     config.transport = Transport::Quic;
     
-    // 创建QUIC客户端连接
-    let mut client_connection = QuicConnection::new(config);
+    // 设置服务器证书路径（用于验证服务器身份）
+    config.protocol_config.quic.client.server_cert_path = Some("certs/server.crt".to_string());
+    config.protocol_config.quic.client.skip_server_verification = false; // 启用服务器验证
+    config.protocol_config.quic.client.server_hostname = Some("localhost".to_string()); // 设置服务器主机名
+    
+    // 使用ConnectionFactory创建QUIC客户端连接
+    let mut client_connection = ConnectionFactory::create_client(config).await?;
     
     // 设置事件处理器
     let event_handler = Arc::new(SimpleClientEventHandler);

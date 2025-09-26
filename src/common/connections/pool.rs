@@ -13,7 +13,6 @@ use crate::common::{
     connections::{
         ClientConnection, ConnectionConfig, ConnectionState, Transport,
         factory::ConnectionFactory,
-        traits::ConnectionFactory as ConnectionFactoryTrait,
     },
 };
 
@@ -198,7 +197,7 @@ impl ConnectionPool {
             target.to_string(),
         );
         
-        let connection_box = ConnectionFactoryTrait::create_client_connection(&*self.factory, config).await?;
+        let connection_box = ConnectionFactory::create_client(config).await?;
         
         // 建立连接
         connection_box.connect().await?;

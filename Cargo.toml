@@ -16,9 +16,6 @@ readme = "README.md"
 name = "quic_client_example"
 path = "examples/common/quic_client_example.rs"
 
-[[example]]
-name = "simple_quic_client"
-path = "examples/common/simple_quic_client.rs"
 
 [[example]]
 name = "quic_server_example"
@@ -28,9 +25,6 @@ path = "examples/common/quic_server_example.rs"
 name = "cert_generator"
 path = "examples/common/cert_generator.rs"
 
-[[example]]
-name = "simple_quic_server"
-path = "examples/common/simple_quic_server.rs"
 
 [[example]]
 name = "websocket_client_example"
@@ -39,6 +33,10 @@ path = "examples/common/websocket_client_example.rs"
 [[example]]
 name = "websocket_server_example"
 path = "examples/common/websocket_server_example.rs"
+
+[[example]]
+name = "quic_custom_hostname_example"
+path = "examples/common/quic_custom_hostname_example.rs"
 
 # Client examples
 [[example]]

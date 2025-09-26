@@ -9,7 +9,7 @@ use crate::common::{
     error::Result,
     connections::{
         types::{ConnectionConfig, Transport},
-        traits::{ClientConnection, ConnectionFactory as ConnectionFactoryTrait},
+        traits::ClientConnection,
         factory::ConnectionFactory,
     },
 };
@@ -88,10 +88,10 @@ impl ProtocolRacer {
         let start_time = Instant::now();
         
         for (config, protocol_type) in protocol_configs {
-            let factory = self.factory.clone_box();
+            let factory = self.factory.clone();
             let handle = tokio::spawn(async move {
                 let connect_start = Instant::now();
-                match factory.create_client_connection(config).await {
+                match ConnectionFactory::create_client(config).await {
                     Ok(connection) => {
                         match connection.connect().await {
                             Ok(_) => {

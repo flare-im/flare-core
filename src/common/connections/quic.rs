@@ -4,8 +4,6 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::fs;
-use std::io::BufReader;
 use tokio::sync::RwLock;
 use tracing::{debug, info, error};
 
@@ -15,8 +13,7 @@ use crate::common::{error::{Result, FlareError}, protocol::Frame, connections::{
     event::DefConnectionEventHandler,
 }, messaging::MessageParser, serialization::FrameSerializer, serialization::SerializerFactory, serialization::factory::json_serializer, SerializationFormat};
 
-use quinn::{Connection as QuinnConnection, Endpoint, ClientConfig};
-use rustls_pemfile::certs;
+use quinn::{Connection as QuinnConnection, Endpoint};
 use crate::common::connections::enums::Platform;
 
 /// 跳过服务器证书验证的实现（仅用于演示）
@@ -128,6 +125,7 @@ impl QuicConnection {
         
         Self::with_serializer(config, Arc::from(serializer))
     }
+    
     
     /// 创建新的 QUIC 连接（使用自定义序列化器）
     pub fn with_serializer(config: ConnectionConfig, serializer: Arc<Box<dyn FrameSerializer>>) -> Self {
@@ -632,64 +630,6 @@ impl QuicConnection {
         Ok(())
     }
     
-    /// 创建客户端配置
-    async fn create_client_config(&self) -> Result<ClientConfig> {
-        let quic_config = &self.config.protocol_config.quic;
-        
-        // 如果配置为跳过服务器验证，使用跳过验证的配置
-        if quic_config.skip_server_verification {
-            let client_config_builder = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-                .with_no_client_auth();
-            
-            let quinn_config = ClientConfig::new(Arc::new(
-                quinn::crypto::rustls::QuicClientConfig::try_from(client_config_builder)
-                    .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
-            ));
-            
-            return Ok(quinn_config);
-        }
-        
-        // 如果有服务器证书路径，使用证书验证
-        if let Some(cert_path) = &quic_config.server_cert_path {
-            // 读取服务器证书
-            let cert_file = fs::File::open(cert_path)
-                .map_err(|e| FlareError::connection_failed(format!("无法读取服务器证书文件 {}: {}", cert_path, e)))?;
-            let cert_reader = &mut BufReader::new(cert_file);
-            
-            // 解析证书
-            let cert_der = certs(cert_reader)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| FlareError::connection_failed(format!("解析服务器证书失败: {}", e)))?;
-            
-            // 创建根证书存储并添加证书
-            let mut root_store = rustls::RootCertStore::empty();
-            for cert in cert_der {
-                root_store.add(rustls::pki_types::CertificateDer::from(cert))
-                    .map_err(|e| FlareError::connection_failed(format!("添加证书到根证书存储失败: {}", e)))?;
-            }
-            
-            // 使用quinn的with_root_certificates方法
-            let client_config = ClientConfig::with_root_certificates(Arc::new(root_store))
-                .map_err(|e| FlareError::connection_failed(format!("创建客户端配置失败: {}", e)))?;
-            
-            Ok(client_config)
-        } else {
-            // 默认使用跳过验证的配置
-            let client_config_builder = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-                .with_no_client_auth();
-            
-            let quinn_config = ClientConfig::new(Arc::new(
-                quinn::crypto::rustls::QuicClientConfig::try_from(client_config_builder)
-                    .map_err(|e| FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
-            ));
-            
-            Ok(quinn_config)
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -850,16 +790,8 @@ impl ClientConnection for QuicConnection {
         let addr = self.config.remote_addr.parse::<std::net::SocketAddr>()
             .map_err(|e| FlareError::connection_failed(format!("无效的地址格式: {}", e)))?;
         
-        // 获取客户端特定配置（暂时未使用，但保留以备将来扩展）
-        let _client_config = if let Some(config) = &self.config.client_config {
-            config.clone()
-        } else {
-            // 如果没有客户端配置，使用默认值
-            crate::common::connections::types::ClientSpecificConfig::default()
-        };
-        
-        // 创建客户端 QUIC 配置
-        let quinn_config = self.create_client_config().await?;
+        // 使用ConnectionFactory创建客户端 QUIC 配置
+        let quinn_config = crate::common::connections::factory::ConnectionFactory::create_quic_client_config(&self.config).await?;
         
         // 创建 QUIC 端点
         let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
@@ -868,7 +800,12 @@ impl ClientConnection for QuicConnection {
         endpoint.set_default_client_config(quinn_config);
         
         // 连接到服务器
-        let connecting = endpoint.connect(addr, "flare-core-server")
+        let hostname = self.config.protocol_config.quic.client.server_hostname
+            .as_ref()
+            .map(|h| h.as_str())
+            .unwrap_or("localhost");
+        
+        let connecting = endpoint.connect(addr, hostname)
             .map_err(|e| FlareError::connection_failed(format!("QUIC 连接失败: {}", e)))?;
         
         let new_conn = connecting.await

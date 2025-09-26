@@ -10,10 +10,10 @@ use flare_core::{
     common::{
         connections::{
             factory::ConnectionFactory,
-            traits::{ConnectionFactory as ConnectionFactoryTrait, ConnectionEvent},
-            types::{ConnectionConfig, ConnectionType, WebSocketConfig},
+            traits::ConnectionEvent,
+            types::{ConnectionConfig, Transport, WebSocketConfig},
         },
-        protocol::{Frame, MessageType, Reliability},
+        protocol::{Frame, Reliability},
     },
 };
 
@@ -38,24 +38,11 @@ impl ConnectionEvent for WebSocketClientEventHandler {
     }
 
     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] 收到WebSocket心跳消息: {}", self.name, connection_id);
-        } else {
-            let payload = message.get_payload();
-            if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                info!("[{}] 收到WebSocket服务器消息: {} - 内容: {}", self.name, connection_id, text);
-            } else {
-                info!("[{}] 收到WebSocket二进制消息: {} - 长度: {}", self.name, connection_id, payload.len());
-            }
-        }
+        info!("[{}] 收到WebSocket消息: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
     }
 
     async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        if message.is_heartbeat() {
-            info!("[{}] WebSocket心跳消息已发送: {}", self.name, connection_id);
-        } else {
-            info!("[{}] WebSocket数据消息已发送: {}", self.name, connection_id);
-        }
+        info!("[{}] WebSocket消息已发送: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
     }
 
     async fn on_heartbeat_timeout(&self, connection_id: &str) {
@@ -108,30 +95,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("启动WebSocket客户端示例");
     
     // 创建WebSocket客户端配置
-    let config = ConnectionConfig::client(
+    let mut config = ConnectionConfig::client(
         "websocket_client_example".to_string(),
         "ws://127.0.0.1:8080".to_string()  // WebSocket服务端地址
-    ).with_type(ConnectionType::WebSocket)
-     .with_websocket_config(WebSocketConfig {
-         subprotocols: vec!["binary".to_string()],
-         extensions: vec![],
-         compression_threshold: Some(128),
-     })
-     .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
-     .with_serialization_format(flare_core::common::serialization::SerializationFormat::Protobuf); // 使用Protobuf序列化
+    );
+    config.transport = Transport::WebSocket;
+    config.heartbeat_interval_ms = 5000;  // 5秒心跳
+    config.heartbeat_timeout_ms = 2000;   // 2秒超时
+    
+    // 配置 WebSocket 特定设置
+    config.protocol_config.websocket = WebSocketConfig {
+        subprotocols: vec!["flare-protocol".to_string()],
+        extensions: vec![],
+        compression_threshold: Some(1024),
+    };
+    config.serialization_config = Some(flare_core::common::serialization::SerializationConfig {
+        format: flare_core::common::serialization::SerializationFormat::Protobuf,
+        enable_encryption: false,
+        enable_compression: false,
+        compression_level: Some(0),
+        pretty_format: false,
+        max_message_size: Some(1024 * 1024), // 1MB
+        custom_params: std::collections::HashMap::new(),
+    });
     
     info!("WebSocket客户端配置: {:?}", config);
     info!("连接地址: {}", config.remote_addr);
     
-    // 创建连接工厂
-    let factory = ConnectionFactory::new();
-    
-    // 创建客户端连接
-    let mut client_connection = factory.create_client_connection(config).await?;
+    // 使用ConnectionFactory创建客户端连接
+    let mut client_connection = ConnectionFactory::create_client(config).await?;
     
     // 设置事件处理器
     let event_handler = Arc::new(WebSocketClientEventHandler::new("WebSocket客户端".to_string()));
-    client_connection.set_connection_event_handler(event_handler as Arc<dyn ConnectionEvent>).await;
+    client_connection.set_event_handler(event_handler).await;
     
     // 建立连接
     info!("正在连接WebSocket服务端...");
@@ -142,8 +138,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 发送认证消息（简化示例，实际应用中应该使用真实的认证数据）
     info!("发送认证消息...");
-    let auth_message = Frame::connect(
-        "websocket_client_example",
+    let connect_cmd = flare_core::common::protocol::commands::ConnectCommand::new(
+        "websocket_client_example".to_string(),
+        "websocket".to_string(),
+        "rust".to_string(),
+        "1.0.0".to_string()
+    );
+    let command = flare_core::common::protocol::commands::Command::Control(
+        flare_core::common::protocol::commands::ControlCmd::Connect(connect_cmd)
+    );
+    let auth_message = Frame::new(
+        command,
+        uuid::Uuid::new_v4().to_string(),
+        Reliability::AtLeastOnce,
     );
     
     client_connection.send_message(auth_message).await?;
@@ -154,11 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 发送测试消息
     info!("发送测试消息...");
+    let send_cmd = flare_core::common::protocol::commands::MessageSendCommand::new(
+        "Hello from WebSocket client with Protobuf!".as_bytes().to_vec()
+    );
+    let command = flare_core::common::protocol::commands::Command::Message(
+        flare_core::common::protocol::commands::MessageCmd::Send(send_cmd)
+    );
     let test_message = Frame::new(
-        MessageType::Data,
-        1,
+        command,
+        uuid::Uuid::new_v4().to_string(),
         Reliability::AtLeastOnce,
-        "Hello from WebSocket client with Protobuf!".as_bytes().to_vec(),
     );
     
     client_connection.send_message(test_message).await?;
@@ -169,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 断开连接
     info!("正在断开连接...");
-    client_connection.disconnect().await?;
+    client_connection.disconnect(Some("客户端主动断开".to_string())).await?;
     info!("连接已断开");
     
     Ok(())

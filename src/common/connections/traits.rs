@@ -138,23 +138,3 @@ impl Default for ConnectionStats {
     }
 }
 
-/// 连接工厂接口
-/// 
-/// 负责创建不同类型的连接实例
-#[async_trait]
-pub trait ConnectionFactory: Send + Sync {
-    /// 创建客户端连接
-    async fn create_client_connection(&self, config: ConnectionConfig) -> Result<Box<dyn ClientConnection>>;
-    
-    /// 创建服务端连接
-    async fn create_server_connection(&self, config: ConnectionConfig) -> Result<Box<dyn ServerConnection>>;
-    
-    /// 获取支持的类型
-    fn supported_types(&self) -> Vec<crate::common::connections::types::Transport>;
-        
-    /// 检查配置是否支持
-    fn supports_config(&self, config: &ConnectionConfig) -> bool;
-    
-    /// 克隆工厂
-    fn clone_box(&self) -> Box<dyn ConnectionFactory>;
-}

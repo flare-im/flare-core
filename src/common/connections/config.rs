@@ -122,9 +122,9 @@ pub struct WebSocketConfig {
     pub compression_threshold: Option<usize>,
 }
 
-/// QUIC 配置
+/// QUIC 客户端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuicConfig {
+pub struct QuicClientConfig {
     /// 最大并发流数
     pub max_concurrent_streams: u32,
     /// 初始流窗口大小
@@ -133,10 +133,40 @@ pub struct QuicConfig {
     pub connection_window: u32,
     /// 拥塞控制算法
     pub congestion_control: String,
-    /// 服务器证书路径（用于客户端验证服务器）
+    /// 服务器证书路径（用于验证服务器证书）
     pub server_cert_path: Option<String>,
     /// 是否跳过服务器证书验证（仅用于测试）
     pub skip_server_verification: bool,
+    /// 服务器主机名（用于 SNI 和证书验证）
+    pub server_hostname: Option<String>,
+}
+
+/// QUIC 服务端配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuicServerConfig {
+    /// 最大并发流数
+    pub max_concurrent_streams: u32,
+    /// 初始流窗口大小
+    pub initial_stream_window: u32,
+    /// 连接窗口大小
+    pub connection_window: u32,
+    /// 拥塞控制算法
+    pub congestion_control: String,
+    /// 服务端证书路径
+    pub cert_path: String,
+    /// 服务端私钥路径
+    pub key_path: String,
+    /// 服务端主机名（用于证书验证）
+    pub server_hostname: Option<String>,
+}
+
+/// QUIC 配置（统一配置，根据角色使用不同部分）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuicConfig {
+    /// 客户端配置
+    pub client: QuicClientConfig,
+    /// 服务端配置
+    pub server: QuicServerConfig,
 }
 
 /// TCP 配置
@@ -186,7 +216,7 @@ impl Default for WebSocketConfig {
     }
 }
 
-impl Default for QuicConfig {
+impl Default for QuicClientConfig {
     fn default() -> Self {
         Self {
             max_concurrent_streams: 100,
@@ -195,6 +225,30 @@ impl Default for QuicConfig {
             congestion_control: "bbr".to_string(),
             server_cert_path: None,
             skip_server_verification: false,
+            server_hostname: Some("localhost".to_string()),
+        }
+    }
+}
+
+impl Default for QuicServerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: 100,
+            initial_stream_window: 65536,
+            connection_window: 262144,
+            congestion_control: "bbr".to_string(),
+            cert_path: "certs/server.crt".to_string(),
+            key_path: "certs/server.key".to_string(),
+            server_hostname: Some("localhost".to_string()),
+        }
+    }
+}
+
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self {
+            client: QuicClientConfig::default(),
+            server: QuicServerConfig::default(),
         }
     }
 }
