@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::fs;
 use std::io::BufReader;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::common::{error::Result, connections::{
     types::{ConnectionConfig, Transport, ConnectionRole},
@@ -39,6 +39,10 @@ impl ConnectionFactory {
             .map(|c| c.format)
             .unwrap_or(SerializationFormat::Json);
 
+        // 添加调试信息
+        debug!("创建序列化器 - 配置格式: {:?}, 序列化配置: {:?}", 
+               format, config.serialization_config);
+
         // 尝试根据配置创建序列化器
         match factory.create_with_config(format, config.get_serialization_config()) {
             Ok(serializer) => {
@@ -46,7 +50,8 @@ impl ConnectionFactory {
                 Ok(Arc::from(serializer))
             }
             Err(e) => {
-                warn!("创建序列化器失败: {}, 使用默认JSON序列化器", e);
+                error!("创建序列化器失败: {}, 使用默认JSON序列化器", e);
+                error!("序列化配置: {:?}", config.get_serialization_config());
                 // 如果创建失败，使用默认JSON序列化器
                 Ok(Arc::from(json_serializer()))
             }
@@ -150,6 +155,12 @@ impl ConnectionFactory {
 
     /// 创建QUIC客户端配置
     pub async fn create_quic_client_config(config: &ConnectionConfig) -> Result<ClientConfig> {
+        // 确保 rustls 加密提供者已设置
+        if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+            warn!("设置 rustls 加密提供者失败: {:?}", e);
+            // 继续执行，因为可能已经设置过了
+        }
+        
         let quic_config = &config.protocol_config.quic.client;
 
         // 如果配置为跳过服务器验证，使用跳过验证的配置
@@ -422,6 +433,12 @@ impl ConnectionFactory {
     
     /// 创建QUIC服务端配置
     pub async fn create_quic_server_config(config: &ConnectionConfig) -> Result<ServerConfig> {
+        // 确保 rustls 加密提供者已设置
+        if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+            warn!("设置 rustls 加密提供者失败: {:?}", e);
+            // 继续执行，因为可能已经设置过了
+        }
+        
         let quic_config = &config.protocol_config.quic.server;
         
         // 读取服务端证书和私钥

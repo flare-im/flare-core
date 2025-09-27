@@ -18,7 +18,6 @@ use crate::server::{
         ConnectionManager,
         UserConnectionManager,
     },
-    event::DefServerEventHandler,
     ServerEventAdapter,
 };
 use crate::server::fast::event_handler::FastServerEventHandler;
@@ -87,11 +86,8 @@ impl FastServer {
         // 创建消息发送器
         let message_sender = Arc::new(MessageSender::new(user_manager.clone()));
         
-        // 创建默认服务端事件处理器
-        let event_handler = Arc::new(DefServerEventHandler::default());
-        
-        // 创建服务端事件适配器
-        let event_adapter = Arc::new(ServerEventAdapter::new(event_handler));
+        // 创建服务端事件适配器，使用系统事件处理器
+        let event_adapter = Arc::new(ServerEventAdapter::new(system_event_handler.clone()));
         
         // 创建服务实现
         let server = Arc::new(AggregationServer::with_event_handler(

@@ -80,24 +80,21 @@ impl QuicServer {
     }
     
     /// 创建连接配置
-    fn create_connection_config(&self) -> crate::common::connections::types::ConnectionConfig {
-        use crate::common::connections::types::{ConnectionConfig, Transport};
+    fn create_connection_config(&self) -> crate::common::connections::config::ConnectionConfig {
+        use crate::common::connections::config::ConnectionConfig;
         
         let local_addr = self.get_listen_addr();
         let connection_id = format!("quic_server_{}", local_addr.replace(":", "_"));
         
-        let mut config = ConnectionConfig::server(connection_id, local_addr);
-        config.transport = Transport::Quic;
-        
-        // 如果有QUIC配置，设置证书路径
-        if let Some(quic_config) = &self.config.quic_config {
-            if let Some(tls_config) = &quic_config.tls_config {
-                config.protocol_config.quic.server.cert_path = tls_config.cert_path.clone();
-                config.protocol_config.quic.server.key_path = tls_config.key_path.clone();
-            }
-        }
-        
-        config
+        // 使用增强的 to_quic_connection_config 方法
+        self.config.to_quic_connection_config(connection_id)
+            .unwrap_or_else(|| {
+                // 如果配置中没有QUIC配置，创建一个基本的连接配置
+                ConnectionConfig::server(
+                    format!("quic_server_{}", local_addr.replace(":", "_")),
+                    local_addr
+                )
+            })
     }
 }
 
@@ -120,7 +117,7 @@ impl Server for QuicServer {
         
         // 克隆必要的组件
         let connection_manager = Arc::clone(&self.connection_manager);
-        let config = self.config.clone();
+        let config = Arc::new(self.config.clone());
         let event_handler = Arc::clone(&self.event_handler);
         
         // 启动服务任务
@@ -129,7 +126,7 @@ impl Server for QuicServer {
             
             // 监听新的客户端连接
             while let Some(connecting) = endpoint.accept().await {
-                let _connection_config = config.clone();
+                let config = Arc::clone(&config);
                 let connection_manager = Arc::clone(&connection_manager);
                 let event_handler = Arc::clone(&event_handler);
                 
@@ -142,11 +139,19 @@ impl Server for QuicServer {
                             // 创建事件处理器
                             let connection_event_handler: Arc<dyn ConnectionEvent> = event_handler.get_server_event_handler();
                             
-                            // 创建服务端连接配置
-                            let connection_config = crate::common::connections::config::ConnectionConfig::server(
-                                format!("quic_connection_{}", remote_addr).replace(":", "_"),
-                                remote_addr.to_string(),
-                            ).with_remote_addr(remote_addr.to_string());
+                            // 使用增强的配置转换方法创建连接配置
+                            let connection_id = format!("quic_connection_{}", remote_addr).replace(":", "_");
+                            let mut connection_config = config.to_quic_connection_config(connection_id)
+                                .unwrap_or_else(|| {
+                                    // 如果配置中没有QUIC配置，创建一个基本的连接配置
+                                    crate::common::connections::config::ConnectionConfig::server(
+                                        format!("quic_connection_{}", remote_addr).replace(":", "_"),
+                                        remote_addr.to_string(),
+                                    )
+                                });
+                            
+                            // 设置远程地址（从原始连接获取）
+                            connection_config.remote_addr = remote_addr.to_string();
                             
                             // 创建服务端连接
                             match ConnectionFactory::from_quic_with_handler_arc(

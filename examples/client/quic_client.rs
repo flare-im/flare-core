@@ -1,6 +1,6 @@
-//! QUIC 客户端连接示例 (FastClient版本)
+//! QUIC 客户端连接示例 (Client版本)
 //!
-//! 展示如何使用flare-core的FastClient创建QUIC客户端并进行通信
+//! 展示如何使用flare-core的Client类创建QUIC客户端并进行通信
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,17 +11,17 @@ use rustls::crypto::ring;
 
 use flare_core::{
     client::{
-        FastClientBuilder, 
-        ClientEvent, 
+        Client,
+        config::{ClientConfig, ProtocolSelection},
+        event::ClientEvent,
     },
     common::{
         connections::{
             types::{Transport},
         },
-        protocol::{Reliability},
+        protocol::{Reliability, Frame, commands::{Command, MessageCmd, MessageSendCommand}},
         serialization::{SerializationFormat, SerializationConfig},
     },
-    common::protocol::factory::FrameFactory,
 };
 
 /// QUIC客户端事件处理器
@@ -146,33 +146,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     
     // 初始化CryptoProvider
-    rustls::crypto::CryptoProvider::install_default(ring::default_provider()).unwrap();
+    if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+        error!("设置 rustls 加密提供者失败: {:?}", e);
+        // 继续执行，因为可能已经设置过了
+    }
     
-    info!("启动FastClient QUIC客户端示例");
+    info!("启动Client QUIC客户端示例");
     
-    // 创建序列化配置
+    // 创建序列化配置 - 使用 Protobuf
     let serialization_config = SerializationConfig::builder()
         .format(SerializationFormat::Protobuf)
         .build();
     
     // 设置事件处理器
-    let event_handler = Arc::new(QuicClientEventHandler::new("FastClient QUIC客户端".to_string()));
+    let event_handler = Arc::new(QuicClientEventHandler::new("Client QUIC客户端".to_string()));
     
-    // 创建带有自定义事件处理器的客户端
-    let mut client = FastClientBuilder::new()
-        .with_quic_only()  // 仅使用QUIC协议
+    // 创建客户端配置
+    let config = ClientConfig::default()
+        .with_protocol_selection(ProtocolSelection::QuicOnly)
         .with_server_address(Transport::Quic, "127.0.0.1:8081".to_string())
         .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
         .with_serialization(serialization_config)
-        .with_event_handler(event_handler)
-        .build();
+        .with_auth_enabled(false); // 禁用认证以简化示例
+    
+    // 创建客户端实例
+    let mut client = Client::with_event_handler(config, event_handler);
     
     // 启动客户端
     info!("正在连接QUIC服务端...");
     let connect_start = Instant::now();
     
     // 使用更好的错误处理
-    match client.start().await {
+    match client.connect().await {
         Ok(()) => {
             let connect_time = connect_start.elapsed();
             info!("✅ 已连接到QUIC服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
@@ -186,47 +191,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    // 发送认证消息（简化示例，实际应用中应该使用真实的认证数据）
-    info!("发送认证消息...");
-    let message_id = FrameFactory::generate_message_id();
-    let auth_message = FrameFactory::create_connect_frame(
-        message_id,
-        "quic_client".to_string(),
-        "quic".to_string(),
-        "desktop".to_string(),
-        "1.0.0".to_string(),
-    )?;
-    
-    if let Err(e) = client.send_message(auth_message).await {
-        error!("发送认证消息失败: {}", e);
-    } else {
-        info!("认证消息已发送");
-    }
-    
-    // 等待一小段时间确保认证完成
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    
     // 发送测试消息
     info!("发送测试消息...");
-    let message_id = FrameFactory::generate_message_id();
-    let test_message = FrameFactory::create_message_frame(
-        message_id,
-        "Hello from FastClient QUIC client!".as_bytes().to_vec(),
-        Reliability::AtLeastOnce,
-    )?;
-    
-    if let Err(e) = client.send_message(test_message).await {
-        error!("发送测试消息失败: {}", e);
-    } else {
-        info!("测试消息已发送");
+    for i in 1..=5 {
+        let message_id = format!("msg_{}", i);
+        let send_cmd = MessageSendCommand::new(
+            format!("Hello from Client QUIC client! Message #{}", i).into_bytes()
+        );
+        let command = Command::Message(MessageCmd::Send(send_cmd));
+        let message = Frame::new(command, message_id, Reliability::AtLeastOnce);
+        
+        if let Err(e) = client.send_message(message).await {
+            error!("发送测试消息 #{} 失败: {}", i, e);
+        } else {
+            info!("测试消息 #{} 已发送", i);
+        }
+        
+        // 等待一段时间
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
     
     // 等待一段时间以接收响应
-    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     
     // 停止客户端
     info!("正在停止客户端...");
-    if let Err(e) = client.stop().await {
+    if let Err(e) = client.disconnect().await {
         error!("停止客户端时发生错误: {}", e);
     } else {
         info!("客户端已停止");

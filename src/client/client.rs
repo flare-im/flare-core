@@ -136,22 +136,19 @@ impl Client {
         *self.state.write().await = ConnectionState::Connecting;
         self.event_handler.on_connected("client").await;
         
-        // 创建基础连接配置
-        let base_config = self.create_connection_config();
-        
         // 根据协议选择模式进行连接
         let connection = match self.config.protocol_selection {
             ProtocolSelection::Auto => {
                 info!("使用协议竞速模式连接");
-                self.connect_with_racing(base_config).await?
+                self.connect_with_racing().await?
             }
             ProtocolSelection::QuicOnly => {
                 info!("使用QUIC协议连接");
-                self.connect_single_protocol(base_config, Transport::Quic).await?
+                self.connect_single_protocol(Transport::Quic).await?
             }
             ProtocolSelection::WebSocketOnly => {
                 info!("使用WebSocket协议连接");
-                self.connect_single_protocol(base_config, Transport::WebSocket).await?
+                self.connect_single_protocol(Transport::WebSocket).await?
             }
         };
         
@@ -426,41 +423,23 @@ impl Client {
 
     /// 创建连接配置
     fn create_connection_config(&self) -> ConnectionConfig {
-        // 获取默认地址或使用第一个配置的地址
-        let default_addr = if !self.config.server_addresses.is_empty() {
-            self.config.server_addresses.values().next().unwrap().clone()
-        } else {
-            "127.0.0.1:8080".to_string()
-        };
+        let connection_id = format!("client_{}", fastrand::u64(..));
         
-        let mut config = ConnectionConfig::client(
-            format!("client_{}", fastrand::u64(..)),
-            default_addr,
-        );
-        
-        // 设置连接参数
-        config.transport = self.config.transport;
-        // 这些参数现在在客户端特定配置中设置
-        // config.auto_reconnect = self.config.enable_auto_reconnect;
-        // config.max_reconnect_attempts = self.config.max_reconnect_attempts;
-        // config.reconnect_delay_ms = self.config.reconnect_delay_ms;
-        // config.heartbeat_interval_ms = self.config.heartbeat_interval_ms;
-        // config.heartbeat_timeout_ms = self.config.heartbeat_monitor_timeout_ms;
-        // config.auto_heartbeat_response = self.config.enable_auto_heartbeat_response;
-        
-        // 设置序列化配置
-        config.serialization_config = Some(self.config.serialization_config.clone());
-        
-        config
+        // 使用增强的配置转换方法
+        self.config.to_connection_config(connection_id, None)
     }
 
     /// 使用协议竞速连接
-    async fn connect_with_racing(&self, base_config: ConnectionConfig) -> Result<Box<dyn ClientConnection>> {
+    async fn connect_with_racing(&self) -> Result<Box<dyn ClientConnection>> {
         info!("使用协议竞速连接");
         
         let racer = ProtocolRacer::new(5000); // 5秒超时
         let protocols = vec![Transport::Quic, Transport::WebSocket];
         
+        // 创建基础配置用于竞速
+        let base_config = self.create_connection_config();
+        
+        // 使用现有的 race 方法
         match racer.race(base_config, self.config.server_addresses.clone(), protocols).await {
             Ok(result) => {
                 info!("协议竞速成功，选择协议: {:?}", result.protocol_type);
@@ -476,19 +455,15 @@ impl Client {
     /// 使用单一协议连接
     async fn connect_single_protocol(
         &self, 
-        mut base_config: ConnectionConfig, 
         protocol_type: Transport
     ) -> Result<Box<dyn ClientConnection>> {
         info!("使用单一协议连接: {:?}", protocol_type);
         
-        // 获取协议对应的地址
-        if let Some(address) = self.config.get_server_address(protocol_type) {
-            base_config.remote_addr = address.clone();
-        }
+        // 使用增强的配置转换方法创建特定协议的连接配置
+        let connection_id = format!("client_single_{}", fastrand::u64(..));
+        let config = self.config.to_connection_config(connection_id, Some(protocol_type));
         
-        base_config.transport = protocol_type;
-        
-        let connection = ConnectionFactory::create_client(base_config).await?;
+        let connection = ConnectionFactory::create_client(config).await?;
         
         match connection.connect().await {
             Ok(_) => {

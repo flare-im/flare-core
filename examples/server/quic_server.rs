@@ -1,9 +1,10 @@
 //! QUIC服务端示例
 //!
-//! 演示如何创建和运行QUIC服务端
+//! 演示如何使用AggregationServer创建和运行QUIC服务端
 
 use tokio::time::sleep;
 use std::time::Duration;
+use std::sync::Arc;
 
 // 添加rustls的引用
 use rustls::crypto::ring;
@@ -11,7 +12,8 @@ use rustls::crypto::ring;
 use flare_core::{
     server::{
         config::{ServerConfig, ProtocolConfig, TlsConfig},
-        fast::server::FastServer,
+        server::AggregationServer,
+        event::DefServerEventHandler,
     },
     common::serialization::{SerializationConfig, SerializationFormat},
 };
@@ -24,7 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     
     // 初始化CryptoProvider
-    rustls::crypto::CryptoProvider::install_default(ring::default_provider()).unwrap();
+    if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+        tracing::warn!("设置 rustls 加密提供者失败: {:?}", e);
+        // 继续执行，因为可能已经设置过了
+    }
     
     // 创建TLS配置（需要提供有效的证书和私钥路径）
     // 注意：在实际使用中，您需要提供真实的证书和私钥文件路径
@@ -62,8 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("序列化配置: {:?}", config.serialization_config);
     
-    // 创建FastServer实例
-    let server = FastServer::new_with_config(config);
+    // 创建事件处理器
+    let event_handler = Arc::new(DefServerEventHandler::default());
+    
+    // 创建AggregationServer实例
+    let server = AggregationServer::with_event_handler(config, event_handler);
     
     // 启动服务端
     server.start().await?;

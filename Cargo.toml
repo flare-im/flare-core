@@ -38,6 +38,7 @@ path = "examples/common/websocket_server_example.rs"
 name = "quic_custom_hostname_example"
 path = "examples/common/quic_custom_hostname_example.rs"
 
+
 # Client examples
 [[example]]
 name = "quic_client"
@@ -52,16 +53,9 @@ name = "protocol_race_client"
 path = "examples/client/protocol_race_client.rs"
 
 [[example]]
-name = "auth_client"
-path = "examples/client/auth_client.rs"
+name = "fast_client_example"
+path = "examples/client/fast_client_example.rs"
 
-[[example]]
-name = "fast_client"
-path = "examples/client/fast_client.rs"
-
-[[example]]
-name = "basic_client"
-path = "examples/client/basic_client.rs"
 
 # Server examples
 [[example]]
@@ -73,12 +67,17 @@ name = "websocket_server"
 path = "examples/server/websocket_server.rs"
 
 [[example]]
-name = "dual_protocol_server"
-path = "examples/server/dual_protocol_server.rs"
+name = "config_example"
+path = "examples/server/config_example.rs"
 
 [[example]]
-name = "client_auth_example"
-path = "examples/client/auth_example.rs"
+name = "connection_test"
+path = "examples/server/connection_test.rs"
+
+[[example]]
+name = "fast_server_example"
+path = "examples/server/fast_server_example.rs"
+
 
 # === 示例配置说明 ===
 #

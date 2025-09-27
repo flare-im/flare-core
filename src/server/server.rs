@@ -1,7 +1,6 @@
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use tracing::info;
-use dashmap::DashMap;
 
 use crate::common::{
     error::Result,
@@ -38,8 +37,6 @@ pub struct AggregationServer {
     config: ServerConfig,
     /// 是否正在运行
     is_running: Arc<AtomicBool>,
-    /// 连接列表
-    connections: Arc<DashMap<String, Arc<dyn ServerConnectionManager>>>,
     /// 事件处理器
     event_handler: Arc<ServerEventAdapter>,
     /// 连接管理器
@@ -284,7 +281,6 @@ impl ServerBuilder {
         Ok(AggregationServer {
             config: self.config,
             is_running: Arc::new(AtomicBool::new(false)),
-            connections: Arc::new(DashMap::new()),
             event_handler,
             connection_manager,
             websocket_server: Arc::new(tokio::sync::RwLock::new(None)),

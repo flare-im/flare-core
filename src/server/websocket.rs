@@ -7,10 +7,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 use std::net::SocketAddr;
 
-use crate::common::{
-    error::Result,
-};
-use crate::ConnectionEvent;
+use crate::common::{error::Result};
+use crate::{ConnectionConfig, ConnectionEvent, ConnectionFactory};
 use crate::server::{
     manager::traits::ServerConnectionManager, 
     Server, 
@@ -112,39 +110,29 @@ impl Server for WebSocketServer {
                         // 克隆组件
                         let connection_manager = Arc::clone(&connection_manager);
                         let event_handler = Arc::clone(&event_handler);
-                        // 克隆序列化配置以避免在循环中移动
-                        let serialization_config = config.serialization_config.clone();
+                        let config = config.clone();
                         
                         // 为每个连接创建独立的任务
                         tokio::spawn(async move {
                             // 创建事件处理器
                             let connection_event_handler: Arc<dyn ConnectionEvent> = event_handler.clone();
                             
-                            // 创建服务端连接配置
-                            let mut connection_config = crate::common::connections::config::ConnectionConfig::server(
-                                format!("ws_connection_{}", addr).replace(":", "_"),
-                                addr.to_string(),
-                            );
+                            // 使用增强的配置转换方法创建连接配置
+                            let connection_id = format!("ws_connection_{}", addr).replace(":", "_");
+                            let mut connection_config = config.to_websocket_connection_config(connection_id)
+                                .unwrap_or_else(|| {
+                                    // 如果配置中没有WebSocket配置，创建一个基本的连接配置
+                                    ConnectionConfig::server(
+                                        format!("ws_connection_{}", addr).replace(":", "_"),
+                                        addr.to_string(),
+                                    )
+                                });
                             
-                            // 设置远程地址为客户端地址
+                            // 设置远程地址（从原始连接获取）
                             connection_config.remote_addr = addr.to_string();
                             
-                            // 使用服务端配置中的序列化配置，如果未设置则默认使用protobuf序列化
-                            let serialization_config = if serialization_config.format != crate::common::serialization::SerializationFormat::Json {
-                                // 如果已配置了非默认的序列化格式，则使用配置的格式
-                                serialization_config
-                            } else {
-                                // 否则默认使用protobuf序列化
-                                crate::common::serialization::SerializationConfig {
-                                    format: crate::common::serialization::SerializationFormat::Json,
-                                    ..Default::default()
-                                }
-                            };
-                            
-                            connection_config = connection_config.with_serialization_config(serialization_config);
-                            
                             // 创建服务端连接
-                            match crate::common::connections::factory::ConnectionFactory::from_websocket_with_handler_arc(
+                            match ConnectionFactory::from_websocket_with_handler_arc(
                                 tcp_stream, 
                                 connection_config, 
                                 connection_event_handler.clone(),  // 克隆事件处理器
