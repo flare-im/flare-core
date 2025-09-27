@@ -12,7 +12,7 @@ use crate::common::{
     protocol::Frame,
 };
 use crate::server::fast::message_handler::{MessageHandler, DefaultMessageHandler};
-use crate::server::server::AggregationServer;
+use crate::server::server::{AggregationServer, ServerBuilder};
 use crate::server::{
     manager::{
         ConnectionManager,
@@ -88,15 +88,15 @@ impl FastServer {
         
         // 创建服务端事件适配器，使用系统事件处理器
         let event_adapter = Arc::new(ServerEventAdapter::new(system_event_handler.clone()));
-        
-        // 创建服务实现
-        let server = Arc::new(AggregationServer::with_event_handler(
-            config.clone(),
-            event_adapter,
-        ));
+
+        let server = ServerBuilder::new(config.clone())
+            .with_event_handler(event_adapter)
+            .with_connection_manager(user_manager.clone())
+            .build()
+            .unwrap();
         
         Self {
-            server,
+            server:Arc::new(server),
             user_connection_manager: user_manager,
             message_handler,
             system_event_handler,

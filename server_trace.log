@@ -1,0 +1,452 @@
+   Compiling flare-core v0.1.0 (/Users/hg/workspace/rust/flare-core)
+warning: unused import: `SerializationFormat`
+ --> src/client/config.rs:8:21
+  |
+8 |     serialization::{SerializationFormat, SerializationConfig},
+  |                     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `data`
+   --> src/common/connections/websocket.rs:437:57
+    |
+437 | ...                   WsMessage::Ping(data) => {
+    |                                       ^^^^ help: if this is intentional, prefix it with an underscore: `_data`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `factory`
+  --> src/client/protocol_racing.rs:91:17
+   |
+91 |             let factory = self.factory.clone();
+   |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_factory`
+
+warning: unused variable: `connection_id`
+  --> src/client/adapter/client_event_adapter.rs:78:41
+   |
+78 |     async fn on_message_received(&self, connection_id: &str, message: &Frame) {
+   |                                         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_connection_id`
+
+warning: field `factory` is never read
+  --> src/common/connections/manager.rs:94:5
+   |
+92 | pub struct ConnectionManager {
+   |            ----------------- field in this struct
+93 |     /// 连接工厂
+94 |     factory: ConnectionFactory,
+   |     ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `factory` is never read
+  --> src/common/connections/pool.rs:54:5
+   |
+48 | pub struct ConnectionPool {
+   |            -------------- field in this struct
+...
+54 |     factory: Arc<ConnectionFactory>,
+   |     ^^^^^^^
+
+warning: struct `SkipServerVerification` is never constructed
+  --> src/common/connections/quic.rs:21:8
+   |
+21 | struct SkipServerVerification;
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `generate_timestamp` and `generate_with_prefix` are never used
+   --> src/common/protocol/frame.rs:223:12
+    |
+216 | impl MessageIdGenerator {
+    | ----------------------- associated functions in this implementation
+...
+223 |     pub fn generate_timestamp() -> String {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+232 |     pub fn generate_with_prefix(prefix: &str) -> String {
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `connections` is never read
+  --> src/server/server.rs:42:5
+   |
+36 | pub struct AggregationServer {
+   |            ----------------- field in this struct
+...
+42 |     connections: Arc<DashMap<String, Arc<dyn ServerConnectionManager>>>,
+   |     ^^^^^^^^^^^
+
+warning: `flare-core` (lib) generated 9 warnings (run `cargo fix --lib -p flare-core` to apply 1 suggestion)
+warning: unused import: `SerializationConfig`
+  --> examples/server/quic_server.rs:18:29
+   |
+18 |     common::serialization::{SerializationConfig, SerializationFormat},
+   |                             ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused `Result` that must be used
+  --> examples/server/quic_server.rs:83:5
+   |
+83 |     server.stop().await;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+   = note: `#[warn(unused_must_use)]` on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+83 |     let _ = server.stop().await;
+   |     +++++++
+
+warning: `flare-core` (example "quic_server") generated 2 warnings (run `cargo fix --example "quic_server"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.60s
+     Running `target/debug/examples/quic_server`
+2025-09-26T16:38:05.679118Z  INFO quic_server: 服务器配置: ServerConfig { server_type: Quic, websocket_config: None, quic_config: Some(ProtocolConfig { listen_addr: "127.0.0.1:8081", max_connections: 1000, enable_tls: true, tls_config: Some(TlsConfig { cert_path: "certs/server.crt", key_path: "certs/server.key" }) }), connection_timeout_ms: 30000, heartbeat_interval_ms: 10000, max_connections: 1000, auth_timeout_ms: 30000, serialization_config: SerializationConfig { format: Protobuf, enable_encryption: false, enable_compression: false, compression_level: None, pretty_format: false, max_message_size: Some(16777216), custom_params: {} } }
+2025-09-26T16:38:05.679327Z  INFO quic_server: QUIC配置存在，监听地址: 127.0.0.1:8081
+2025-09-26T16:38:05.679335Z  INFO quic_server: 序列化配置: SerializationConfig { format: Protobuf, enable_encryption: false, enable_compression: false, compression_level: None, pretty_format: false, max_message_size: Some(16777216), custom_params: {} }
+2025-09-26T16:38:05.679615Z  INFO flare_core::server::server: 开始启动服务器，类型: Quic
+2025-09-26T16:38:05.679622Z  INFO flare_core::server::server: 启动QUIC服务模式
+启动QUIC服务: 127.0.0.1:8081
+2025-09-26T16:38:05.679745Z  INFO flare_core::server::quic: 启动 QUIC 服务: 127.0.0.1:8081
+2025-09-26T16:38:05.682773Z  INFO flare_core::server::server: 服务器启动完成
+QUIC服务端已启动，监听地址: 127.0.0.1:8081
+按 Ctrl+C 停止服务端
+2025-09-26T16:38:05.682917Z  INFO flare_core::server::quic: QUIC 服务已启动: 127.0.0.1:8081
+2025-09-26T16:38:12.877981Z  INFO flare_core::server::quic: QUIC客户端已连接: 127.0.0.1:56149
+2025-09-26T16:38:12.878268Z  INFO flare_core::server::quic: QUIC 服务端连接已建立: 127.0.0.1:56149 (ID: quic_connection_127.0.0.1_56149)
+2025-09-26T16:38:12.878781Z  INFO flare_core::common::connections::quic: QUIC 服务端连接已接受: quic_connection_127.0.0.1_56149
+2025-09-26T16:38:12.878796Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 188
+2025-09-26T16:38:12.878815Z  INFO flare_core::server::manager::connection_manager: 连接已添加: quic_connection_127.0.0.1_56149
+2025-09-26T16:38:12.878813Z  INFO flare_core::server::event: 服务端: 连接已建立: quic_connection_127.0.0.1_56149
+2025-09-26T16:38:12.878837Z  INFO flare_core::server::event: 服务端: 连接已建立: quic_connection_127.0.0.1_56149
+2025-09-26T16:38:12.879025Z  INFO flare_core::server::event: 服务端: 发送消息: quic_connection_127.0.0.1_56149 - 类型: control
+2025-09-26T16:38:12.879506Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 0 - 质量: 100
+2025-09-26T16:38:13.882224Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 46
+2025-09-26T16:38:13.882508Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.882617Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.882757Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.882899Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 64
+2025-09-26T16:38:13.882919Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.882942Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.883019Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.883509Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 64
+2025-09-26T16:38:13.883581Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.883682Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.883837Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.884104Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 212
+2025-09-26T16:38:13.884120Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.884143Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.884171Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.884930Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.884970Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.885036Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.885118Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.885632Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.885665Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.885701Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.885738Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.886040Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.886057Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.886079Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.886105Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.886670Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.886718Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.886791Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.886880Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.887254Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.887298Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.887364Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.887407Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.887681Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.887699Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.887727Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.887752Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.888036Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.888056Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888079Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888104Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.888392Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.888404Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888427Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888450Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.888764Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.888799Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888855Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.888925Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.889209Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.889225Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.889250Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.889275Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.889622Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.889652Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.889723Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.889818Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.890190Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.890218Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.890270Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.890355Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.890837Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.890879Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.890946Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.891056Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.891301Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.891316Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.891339Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.891368Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.891739Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.891777Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.891830Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.891921Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.892149Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.892164Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.892190Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.892222Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.892541Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.892555Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.892589Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.892613Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.892927Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.892955Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893005Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893073Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.893338Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.893358Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893383Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893409Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.893834Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.893849Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893875Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.893950Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.894263Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.894275Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.894296Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.894320Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.894641Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.894660Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.894686Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.894765Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.895054Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.895068Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895101Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895129Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.895409Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.895426Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895448Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895482Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.895801Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.895814Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895841Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.895866Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.896161Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.896177Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896202Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896227Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.896531Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.896546Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896570Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896596Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.896873Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.896889Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896914Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.896940Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.897268Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.897290Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.897328Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.897356Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.897634Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.897647Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.897668Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.897690Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.898005Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.898020Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898043Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898070Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.898349Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.898363Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898385Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898410Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.898705Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.898720Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898741Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.898765Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.899042Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.899055Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899078Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899101Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.899404Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.899428Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899449Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899472Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.899750Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.899760Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899780Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.899801Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.900179Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.900191Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.900211Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.900235Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.900532Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.900542Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.900563Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.900586Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.900950Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.900970Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.900995Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.901021Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.901358Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.901373Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.901394Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.901434Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.901724Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.901746Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.901769Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.901792Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.902192Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.902210Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.902234Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.902259Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.902578Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.902592Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.902613Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.902639Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.903079Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.903126Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903170Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903246Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.903549Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.903562Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903587Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903613Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.903920Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.903933Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903957Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.903986Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.904245Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.904268Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.904288Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.904314Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.904611Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.904625Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.904648Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.904674Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.904953Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.904969Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.904992Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.905016Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.905334Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.905348Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.905369Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.905393Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.905709Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.905720Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.905743Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.905765Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.906138Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.906149Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.906170Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.906196Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.906602Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.906639Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.906679Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.906722Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.907131Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.907150Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.907182Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.907208Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.907676Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.907690Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.907714Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.907741Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.908113Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.908139Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.908177Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.908217Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.908608Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.908626Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.908650Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.908680Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.908966Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.908984Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909007Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909036Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.909442Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.909457Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909480Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909503Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.909836Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.909847Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909868Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.909892Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.910240Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.910266Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.910304Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.910391Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.910662Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.910679Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.910706Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.910767Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.911071Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.911085Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911109Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911172Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.911476Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.911487Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911510Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911563Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.911837Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.911859Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911894Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.911968Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.912211Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.912229Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.912262Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.912335Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.912640Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.912652Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.912677Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.912752Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.913007Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.913019Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.913041Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.913097Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.913388Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.913399Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.913421Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.913446Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:13.914462Z  INFO flare_core::common::connections::quic: QUIC 接收到双向流数据: quic_connection_127.0.0.1_56149 - 长度: 210
+2025-09-26T16:38:13.914479Z ERROR flare_core::common::messaging::message_parser: 消息反序列化失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.914510Z ERROR flare_core::common::connections::quic: 消息处理失败: 错误: FRAME_DESERIALIZATION_ERROR: JSON反序列化失败: expected value at line 2 column 1
+2025-09-26T16:38:13.914535Z  INFO flare_core::common::connections::quic: 准备发送QUIC消息数据: quic_connection_127.0.0.1_56149 - 长度: 328
+2025-09-26T16:38:14.886101Z ERROR flare_core::common::connections::quic: QUIC 无法打开双向流: quic_connection_127.0.0.1_56149 - closed by peer: 0
+2025-09-26T16:38:14.886177Z  INFO flare_core::server::event: 服务端: 连接错误: quic_connection_127.0.0.1_56149 - 错误: closed by peer: 0
+2025-09-26T16:38:42.882997Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 100
+2025-09-26T16:39:12.880085Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:39:12.880107Z  INFO flare_core::server::event: 服务端: 连接质量变化: quic_connection_127.0.0.1_56149 - 评分: 10
+2025-09-26T16:39:42.881011Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:39:42.881226Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:40:12.881690Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:40:12.881685Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:40:42.882485Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:40:42.882617Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:41:12.881584Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:41:12.881700Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:41:12.881736Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:41:42.883301Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:41:42.883407Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:41:42.883438Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:42:12.883009Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:42:12.883129Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:42:12.883138Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:42:42.883223Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:42:42.883367Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:42:42.883370Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:43:12.882976Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:43:12.883071Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:43:12.883104Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:43:42.883941Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:43:42.884075Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:43:42.884072Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:44:12.883323Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:44:12.883599Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:44:12.883668Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149
+2025-09-26T16:44:42.884495Z ERROR flare_core::common::connections::quic: 连接连续心跳超时，可能需要断开: quic_connection_127.0.0.1_56149
+2025-09-26T16:44:42.888783Z  INFO flare_core::server::event: 服务端: 统计信息更新: quic_connection_127.0.0.1_56149 - 收到: 0 - 发送: 74 - 质量: 10
+2025-09-26T16:44:42.888905Z  INFO flare_core::server::event: 服务端: 心跳超时: quic_connection_127.0.0.1_56149

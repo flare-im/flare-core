@@ -17,6 +17,7 @@ use flare_core::{
     },
     common::serialization::{SerializationConfig, SerializationFormat},
 };
+use flare_core::server::server::ServerBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_handler = Arc::new(DefServerEventHandler::default());
     
     // 创建AggregationServer实例
-    let server = AggregationServer::with_event_handler(config, event_handler);
+    let server = ServerBuilder::new(config.clone()).with_event_handler(event_handler).build().unwrap();
     
     // 启动服务端
     server.start().await?;

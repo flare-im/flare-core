@@ -48,24 +48,6 @@ pub struct AggregationServer {
 }
 
 impl AggregationServer {
-    /// 创建新的服务器实例
-    pub fn new(config: ServerConfig) -> Self {
-        ServerBuilder::new(config).build().unwrap()
-    }
-    
-    /// 创建带有事件处理器的服务器实例
-    pub fn with_event_handler(config: ServerConfig, event_handler: Arc<dyn ServerEvent>) -> Self {
-        ServerBuilder::new(config)
-            .with_event_handler(event_handler)
-            .build()
-            .unwrap()
-    }
-    
-    /// 创建服务器构建器
-    pub fn builder(config: ServerConfig) -> ServerBuilder {
-        ServerBuilder::new(config)
-    }
-    
     /// 启动服务器
     pub async fn start(&self) -> Result<()> {
         // 设置运行状态
@@ -101,7 +83,7 @@ impl AggregationServer {
         info!("准备启动WebSocket服务");
         if let Some(config) = &self.config.websocket_config {
             info!("WebSocket配置存在，监听地址: {}", config.listen_addr);
-            println!("启动WebSocket服务: {}", config.listen_addr);
+            info!("启动WebSocket服务: {}", config.listen_addr);
             
             // 使用已有的连接管理器而不是创建新的
             let websocket_server = websocket::WebSocketServer::new(
@@ -131,13 +113,11 @@ impl AggregationServer {
     /// 启动QUIC服务
     async fn start_quic(&self) -> Result<()> {
         if let Some(config) = &self.config.quic_config {
-            println!("启动QUIC服务: {}", config.listen_addr);
+            info!("启动QUIC服务: {}", config.listen_addr);
             
-            // 创建QUIC服务器实例
-            let connection_manager = Arc::new(ConnectionManager::new());
             let quic_server = quic::QuicServer::new(
                 self.config.clone(),
-                connection_manager,
+                Arc::clone(&self.connection_manager),
                 Arc::clone(&self.event_handler),
             );
             
@@ -157,7 +137,7 @@ impl AggregationServer {
     
     /// 启动双协议服务
     async fn start_dual_protocol(&self) -> Result<()> {
-        println!("启动双协议模式");
+        info!("启动双协议模式");
         
         // 启动WebSocket服务
         self.start_websocket().await?;
@@ -182,7 +162,7 @@ impl AggregationServer {
             q_server.stop().await;
         }
         
-        println!("服务器已停止");
+        info!("服务器已停止");
         Ok(())
     }
 

@@ -135,7 +135,9 @@ impl ServerConnectionManager for ConnectionManager {
         
         if removed {
             let mut stats = self.stats.write().await;
-            stats.active_connections -= 1;
+            if stats.active_connections > 0 {
+                stats.active_connections -= 1;
+            }
             info!("连接已移除: {}", connection_id);
         } else {
             warn!("尝试移除不存在的连接: {}", connection_id);
@@ -249,7 +251,11 @@ impl ServerConnectionManager for ConnectionManager {
         // 更新统计信息
         if removed_count > 0 {
             let mut stats = self.stats.write().await;
-            stats.active_connections -= removed_count;
+            if stats.active_connections >= removed_count {
+                stats.active_connections -= removed_count;
+            } else {
+                stats.active_connections = 0;
+            }
             info!("清理不活跃连接: {} 个", removed_count);
         }
         
@@ -385,7 +391,11 @@ impl ConnectionManager {
             // 更新统计信息
             if expired_count > 0 {
                 let mut stats = self.stats.write().await;
-                stats.active_connections -= expired_count;
+                if stats.active_connections >= expired_count {
+                    stats.active_connections -= expired_count;
+                } else {
+                    stats.active_connections = 0;
+                }
             }
         }
         

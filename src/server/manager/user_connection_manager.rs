@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
-
+use tracing::log::debug;
 use crate::common::{
     error::Result,
     connections::traits::ServerConnection,
@@ -199,9 +199,12 @@ impl UserConnectionManager {
         };
         
         if !pending_removed {
-            return Err(crate::common::error::FlareError::authentication_expired(
-                format!("待验证连接不存在: {}", connection_id)
-            ));
+            // 打印当前待认证连接列表用于调试
+            let pending_connections: Vec<String> = {
+                let pending = self.pending_auth_connections.read().await;
+                pending.keys().cloned().collect()
+            };
+            debug!("待验证连接不存在: {}，当前待认证连接: {:?}", connection_id, pending_connections);
         }
         
         // 更新统计信息
@@ -297,15 +300,19 @@ impl UserConnectionManager {
                 stats.active_users -= 1;
             }
             
-            // 更新统计信息
+            // 更新统计信息 - 确保不会下溢
             let mut stats = self.stats.write().await;
-            stats.active_connections -= 1;
+            if stats.active_connections > 0 {
+                stats.active_connections -= 1;
+            }
             
             info!("用户连接已移除: 连接={} 用户={} 平台={:?}", connection_id, user_id, platform);
         } else {
-            // 更新统计信息
+            // 更新统计信息 - 确保不会下溢
             let mut stats = self.stats.write().await;
-            stats.active_connections -= 1;
+            if stats.active_connections > 0 {
+                stats.active_connections -= 1;
+            }
             
             info!("连接已移除: {}", connection_id);
         }
@@ -584,7 +591,7 @@ impl UserConnectionManager {
     ) -> Result<()> {
         // 解析平台信息
         let platform_enum = crate::common::connections::enums::Platform::from_str(&platform);
-        
+        debug!("处理认证结果: 连接={} 用户={} 平台={} 认证结果={}",connection_id, user_id, platform, success);
         if success {
             // 认证成功，完成连接认证并绑定用户
             self.complete_authentication(
@@ -663,6 +670,7 @@ impl ServerConnectionManager for UserConnectionManager {
     async fn add_connection(&self, connection: Arc<dyn ServerConnection>) -> Result<()> {
         // 先添加到基础连接管理器
         self.connection_manager.add_connection(connection.clone()).await?;
+        debug!("添加连接: {}", connection.id());
         
         // 添加到待验证连接列表
         self.add_pending_connection(connection.id().to_string()).await?;
