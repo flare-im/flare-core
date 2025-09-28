@@ -4,13 +4,12 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::{info, error, warn, debug};
 
 use flare_core::{
     client::{
         config::{ClientConfig, ProtocolSelection},
-        fast::FastClient,
-        event::ClientEvent,
+        fast::{FastClient, FastClientBuilder, event::FastEvent},
     },
     common::{
         protocol::Frame,
@@ -25,7 +24,7 @@ pub struct CustomClientEventHandler {
 }
 
 #[async_trait::async_trait]
-impl flare_core::common::connections::event::ConnectionEvent for CustomClientEventHandler {
+impl FastEvent for CustomClientEventHandler {
     async fn on_connected(&self, connection_id: &str) {
         info!("[{}] 已连接到服务器: {}", self.name, connection_id);
     }
@@ -38,16 +37,10 @@ impl flare_core::common::connections::event::ConnectionEvent for CustomClientEve
         error!("[{}] 连接错误: {} - 错误: {}", self.name, connection_id, error);
     }
     
-    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
-        info!("[{}] 收到消息: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
-    }
     
-    async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
-        info!("[{}] 消息已发送: {} - 类型: {}", self.name, connection_id, message.get_command_type_str());
-    }
-    
-    async fn on_heartbeat_timeout(&self, connection_id: &str) {
+    async fn on_heartbeat_timeout(&self, connection_id: &str) -> bool {
         info!("[{}] 心跳超时: {}", self.name, connection_id);
+        true // 允许重连
     }
     
     async fn on_heartbeat_ping(&self, connection_id: &str) {
@@ -62,26 +55,25 @@ impl flare_core::common::connections::event::ConnectionEvent for CustomClientEve
         info!("[{}] 连接质量变化: {} - 评分: {}", self.name, connection_id, quality_score);
     }
     
-    async fn on_reconnect_started(&self, connection_id: &str, attempt: u32) {
+    async fn on_reconnect_started(&self, connection_id: &str, attempt: u32) -> bool {
         info!("[{}] 开始重连: {} - 尝试次数: {}", self.name, connection_id, attempt);
+        true // 允许重连
     }
     
     async fn on_reconnected(&self, connection_id: &str, attempt: u32) {
         info!("[{}] 重连成功: {} - 尝试次数: {}", self.name, connection_id, attempt);
     }
     
-    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
+    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) -> bool {
         info!("[{}] 重连失败: {} - 尝试次数: {} - 错误: {}", self.name, connection_id, attempt, error);
+        attempt < 5 // 最多重连5次
     }
     
     async fn on_statistics_updated(&self, connection_id: &str, stats: &flare_core::common::connections::traits::ConnectionStats) {
         info!("[{}] 统计信息更新: {} - 收到消息: {} - 发送消息: {}", 
              self.name, connection_id, stats.messages_received, stats.messages_sent);
     }
-}
-
-#[async_trait::async_trait]
-impl ClientEvent for CustomClientEventHandler {
+    
     async fn on_control_command(&self, cmd: &flare_core::common::protocol::commands::ControlCmd) {
         info!("[{}] 收到控制命令: {:?}", self.name, cmd);
     }
@@ -104,6 +96,38 @@ impl ClientEvent for CustomClientEventHandler {
     
     async fn on_authentication_failed(&self, error: &str) {
         error!("[{}] 认证失败: {}", self.name, error);
+    }
+    
+    async fn on_heartbeat_sent(&self) {
+        info!("[{}] 心跳发送成功", self.name);
+    }
+    
+    async fn on_heartbeat_failed(&self, error: &str) {
+        error!("[{}] 心跳发送失败: {}", self.name, error);
+    }
+    
+    async fn on_auto_reconnect_started(&self, attempt: u32) {
+        info!("[{}] 开始自动重连: 尝试次数 {}", self.name, attempt);
+    }
+    
+    async fn on_auto_reconnect_success(&self, attempt: u32) {
+        info!("[{}] 自动重连成功: 尝试次数 {}", self.name, attempt);
+    }
+    
+    async fn on_auto_reconnect_failed(&self, attempt: u32, error: &str) {
+        error!("[{}] 自动重连失败: 尝试次数 {} - 错误: {}", self.name, attempt, error);
+    }
+    
+    async fn on_connection_quality_monitored(&self, quality_score: u8, latency_ms: u64) {
+        info!("[{}] 连接质量监控: 评分 {} - 延迟 {}ms", self.name, quality_score, latency_ms);
+    }
+    
+    async fn on_connection_state_changed(&self, old_state: &str, new_state: &str) {
+        info!("[{}] 连接状态变化: {} -> {}", self.name, old_state, new_state);
+    }
+    
+    async fn on_protocol_switched(&self, connection_id: &str, from_protocol: &str, to_protocol: &str) {
+        info!("[{}] 协议切换: {} - 从 {} 切换到 {}", self.name, connection_id, from_protocol, to_protocol);
     }
 }
 
@@ -132,11 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_serialization(flare_core::common::serialization::SerializationConfig {
         format: SerializationFormat::Protobuf,
         ..Default::default()
-    })
-    .with_auth_enabled(true) // 启用认证
-    .with_auth_user_id("user_001".to_string())
-    .with_auth_platform("desktop".to_string())
-    .with_auth_token("test_token_123".to_string());
+    });
     
     // 验证配置
     if let Err(e) = config.validate() {
@@ -151,13 +171,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  - 心跳间隔: {}ms", config.heartbeat_interval_ms);
     info!("  - 自动重连: {}", config.enable_auto_reconnect);
     info!("  - 序列化格式: {:?}", config.serialization_config.format);
-    info!("  - 启用认证: {}", config.auth_config.enabled);
     
     // 创建自定义事件处理器
     let event_handler = Arc::new(CustomClientEventHandler::new("FastClient".to_string()));
     
     // 创建 FastClient 实例
-    let mut client = FastClient::with_event_handler(config, event_handler);
+    let mut client = FastClientBuilder::new()
+        .with_websocket_only()  // 仅使用WebSocket协议
+        .with_server_address(flare_core::common::connections::types::Transport::WebSocket, "ws://127.0.0.1:4320".to_string())
+        .with_heartbeat(10000, 30000) // 10秒心跳间隔，30秒监控超时
+        .with_serialization(flare_core::common::serialization::SerializationConfig {
+            format: SerializationFormat::Protobuf,
+            ..Default::default()
+        })
+        .with_auth_enabled(true) // 启用认证
+        .with_auth_user_id("user_001".to_string())
+        .with_auth_platform("desktop".to_string())
+        .with_auth_token("test_token_123".to_string())
+        .with_event_handler(event_handler)
+        .build();
     
     info!("FastClient 实例创建成功");
     
@@ -231,18 +263,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 测试请求-响应模式
     info!("测试请求-响应模式...");
-    let request = Frame::new(
-        flare_core::common::protocol::commands::Command::Message(
+    match client.send_request(
+        |_| Ok(flare_core::common::protocol::commands::Command::Message(
             flare_core::common::protocol::commands::MessageCmd::Data(
                 flare_core::common::protocol::commands::DataCommand::new(
                     "请求服务器信息".as_bytes().to_vec(),
                 )
             )
-        ),
-        "request_001".to_string(),
+        )),
         flare_core::common::protocol::Reliability::AtLeastOnce,
-    );
-    match client.send_request(request).await {
+        None
+    ).await {
         Ok(response) => {
             info!("✅ 收到服务器响应: {:?}", response.get_command_type_str());
         }

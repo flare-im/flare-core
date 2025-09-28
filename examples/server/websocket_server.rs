@@ -8,7 +8,8 @@ use std::time::Duration;
 use flare_core::{
     server::{
         config::{ServerConfig, ProtocolConfig},
-        fast::server::FastServer,
+        server::{AggregationServer, ServerBuilder},
+        event::DefServerEventHandler,
     },
     common::serialization::{SerializationConfig, SerializationFormat},
 };
@@ -42,8 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("序列化配置: {:?}", config.serialization_config);
     
-    // 创建FastServer实例
-    let server = FastServer::new_with_config(config);
+    // 创建事件处理器
+    let event_handler = std::sync::Arc::new(DefServerEventHandler::default());
+    
+    // 创建AggregationServer实例
+    let server = ServerBuilder::new(config)
+        .with_event_handler(event_handler)
+        .build()?;
     
     // 启动服务端
     server.start().await?;

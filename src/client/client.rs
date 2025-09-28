@@ -3,17 +3,17 @@
 //! 提供完整的客户端实现，支持WebSocket和QUIC协议竞速
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
-use std::collections::HashMap;
-use tokio::time::{timeout, Duration};
+use async_trait::async_trait;
 
 use crate::common::{
     error::Result,
     protocol::Frame,
     connections::{
         types::{ConnectionConfig, Transport, ConnectionState},
-        traits::ClientConnection,
+        traits::{ClientConnection, ConnectionStats},
+        event::ConnectionEvent,
         factory::ConnectionFactory,
     },
     serialization::FrameSerializer,
@@ -22,15 +22,36 @@ use crate::common::{
 use super::{
     config::{ClientConfig, ProtocolSelection},
     protocol_racing::ProtocolRacer,
-    auth::ClientAuthManager,
+    messaging::{MessageHandler, SendFunction},
     event::ClientEvent,
-    adapter::ClientEventAdapter,
 };
 
-/// 请求回调
-type RequestCallback = tokio::sync::oneshot::Sender<Result<Frame>>;
+/// 重连配置
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    /// 最大重连次数
+    pub max_attempts: u32,
+    /// 重连间隔（毫秒）
+    pub interval_ms: u64,
+    /// 是否启用自动重连
+    pub enabled: bool,
+}
 
-/// 客户端主类
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            interval_ms: 1000,
+            enabled: true,
+        }
+    }
+}
+
+
+/// 基础客户端
+/// 
+/// 提供核心连接和消息处理功能，作为用户扩展的基础
+/// 支持用户自定义 ClientEvent 处理业务逻辑
 pub struct Client {
     /// 客户端配置
     config: ClientConfig,
@@ -40,385 +61,36 @@ pub struct Client {
     state: Arc<RwLock<ConnectionState>>,
     /// 序列化器
     serializer: Arc<RwLock<Option<Arc<dyn FrameSerializer>>>>,
-    /// 等待响应的请求（message_id -> 回调）
-    pending_requests: Arc<Mutex<HashMap<String, (RequestCallback, std::time::Instant)>>>,
-    /// 请求超时时间（毫秒）
-    request_timeout_ms: u64,
-    /// 认证管理器
-    auth_manager: Arc<ClientAuthManager>,
-    /// 客户端事件处理器
-    event_handler: Arc<dyn ClientEvent>,
+    /// 消息处理器
+    message_handler: Arc<MessageHandler>,
+    /// 用户自定义事件处理器
+    client_event_handler: Arc<RwLock<Option<Arc<dyn ClientEvent>>>>,
+    /// 当前使用的协议
+    current_protocol: Arc<RwLock<Option<Transport>>>,
+    /// 重连配置
+    reconnect_config: ReconnectConfig,
 }
 
 impl Client {
-    /// 创建新的客户端实例
-    /// 
-    /// # 参数
-    /// * `config` - 客户端配置
-    /// 
-    /// # 返回值
-    /// 返回新的客户端实例
-    pub fn new(config: ClientConfig) -> Self {
-        let auth_manager = Arc::new(ClientAuthManager::new(config.auth_config.clone()));
-        let request_timeout_ms = config.request_timeout_ms;
-        let event_handler = Arc::new(ClientEventAdapter::new(Arc::new(super::DefClientEventHandler::default())));
-        
-        let client = Self {
-            config,
-            connection: Arc::new(RwLock::new(None)),
-            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
-            serializer: Arc::new(RwLock::new(None)),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            request_timeout_ms,
-            auth_manager,
-            event_handler,
-        };
-        
-        // 启动响应监听任务
-        client.start_response_listener();
-        
-        client
-    }
+    // ==================== 内部方法 ====================
     
-    /// 创建新的客户端实例，指定事件处理器
-    /// 
-    /// # 参数
-    /// * `config` - 客户端配置
-    /// * `event_handler` - 客户端事件处理器
-    /// 
-    /// # 返回值
-    /// 返回新的客户端实例
-    pub fn with_event_handler(config: ClientConfig, event_handler: Arc<dyn ClientEvent>) -> Self {
-        let auth_manager = Arc::new(ClientAuthManager::new(config.auth_config.clone()));
-        let request_timeout_ms = config.request_timeout_ms;
-        
-        let client = Self {
-            config,
-            connection: Arc::new(RwLock::new(None)),
-            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
-            serializer: Arc::new(RwLock::new(None)),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            request_timeout_ms,
-            auth_manager,
-            event_handler,
-        };
-        
-        // 启动响应监听任务
-        client.start_response_listener();
-        
-        client
-    }
-    
-    /// 获取客户端配置的引用
-    pub fn get_config(&self) -> &ClientConfig {
-        &self.config
-    }
-    
-    /// 设置请求超时时间
-    pub fn with_request_timeout(mut self, timeout_ms: u64) -> Self {
-        self.request_timeout_ms = timeout_ms;
-        self
-    }
-
-    /// 连接到服务器
-    /// 
-    /// 根据配置选择协议连接方式：
-    /// - Auto: 协议竞速，选择最优协议
-    /// - QuicOnly: 仅使用QUIC协议
-    /// - WebSocketOnly: 仅使用WebSocket协议
-    /// 
-    /// # 返回值
-    /// 返回操作结果
-    pub async fn connect(&mut self) -> Result<()> {
-        info!("开始连接到服务器");
-        
-        // 更新状态
-        *self.state.write().await = ConnectionState::Connecting;
-        self.event_handler.on_connected("client").await;
-        
-        // 根据协议选择模式进行连接
-        let connection = match self.config.protocol_selection {
-            ProtocolSelection::Auto => {
-                info!("使用协议竞速模式连接");
-                self.connect_with_racing().await?
-            }
-            ProtocolSelection::QuicOnly => {
-                info!("使用QUIC协议连接");
-                self.connect_single_protocol(Transport::Quic).await?
-            }
-            ProtocolSelection::WebSocketOnly => {
-                info!("使用WebSocket协议连接");
-                self.connect_single_protocol(Transport::WebSocket).await?
-            }
-        };
-        
-        // 保存连接
-        *self.connection.write().await = Some(connection);
-        
-        // 执行认证流程（如果启用）
-        if self.config.auth_config.enabled {
-            self.perform_authentication().await?;
-        } else {
-            // 如果没有启用认证，直接设置为已连接状态
-            *self.state.write().await = ConnectionState::Connected;
-            self.event_handler.on_connected("client").await;
-        }
-        
-        info!("连接建立成功");
-        Ok(())
-    }
-
-    /// 执行认证流程
-    async fn perform_authentication(&self) -> Result<()> {
-        info!("开始执行认证流程");
-        
-        // 重置认证管理器状态
-        self.auth_manager.reset().await;
-        
-        // 更新状态为连接中（表示正在认证）
-        *self.state.write().await = ConnectionState::Connecting;
-        
-        // 创建认证请求消息
-        let auth_request = self.auth_manager.create_auth_request()?;
-        
-        // 发送认证请求
-        if let Some(connection) = &*self.connection.read().await {
-            connection.send_message(auth_request).await?;
-        } else {
-            return Err(crate::common::error::FlareError::connection_failed(
-                "连接不存在".to_string()
-            ));
-        }
-        
-        // 等待认证完成
-        match self.auth_manager.wait_for_authentication().await {
-            Ok(true) => {
-                // 认证成功，更新连接状态
-                *self.state.write().await = ConnectionState::Connected;
-                self.event_handler.on_authenticated().await;
-                info!("认证成功，连接已建立");
-                Ok(())
-            }
-            Ok(false) => {
-                // 认证失败
-                *self.state.write().await = ConnectionState::Disconnected;
-                self.event_handler.on_authentication_failed("认证失败").await;
-                Err(crate::common::error::FlareError::authentication_failed(
-                    "认证失败".to_string()
-                ))
-            }
-            Err(e) => {
-                // 认证过程中发生错误
-                *self.state.write().await = ConnectionState::Disconnected;
-                self.event_handler.on_authentication_failed(&e.to_string()).await;
-                Err(e)
-            }
-        }
-    }
-
-    /// 断开连接
-    /// 
-    /// # 返回值
-    /// 返回操作结果
-    pub async fn disconnect(&mut self) -> Result<()> {
-        info!("开始断开连接");
-        
-        *self.state.write().await = ConnectionState::Disconnecting;
-        self.event_handler.on_disconnected("client", "用户主动断开连接").await;
-        
-        // 清理所有等待的请求
-        {
-            let mut pending = self.pending_requests.lock().await;
-            for (_, (sender, _)) in pending.drain() {
-                let _ = sender.send(Err(crate::common::error::FlareError::connection_failed(
-                    "连接已断开".to_string()
-                )));
-            }
-        }
-        
-        if let Some(connection) = self.connection.write().await.take() {
-            if let Err(e) = connection.disconnect(None).await {
-                warn!("断开连接时发生错误: {}", e);
-            }
-        }
-        
-        *self.state.write().await = ConnectionState::Disconnected;
-        info!("连接已断开");
-        Ok(())
-    }
-
-    /// 发送消息
-    /// 
-    /// # 参数
-    /// * `message` - 要发送的消息帧
-    /// 
-    /// # 返回值
-    /// 返回操作结果
-    pub async fn send_message(&self, message: Frame) -> Result<()> {
-        debug!("发送消息: {:?}", message.get_command_type_str());
-        
-        // 检查连接状态
-        let current_state = *self.state.read().await;
-        if current_state != ConnectionState::Connected {
-            return Err(crate::common::error::FlareError::connection_failed(
-                format!("连接未建立或已断开: {:?}", current_state)
-            ));
-        }
-        
-        // 获取连接并发送消息
-        if let Some(connection) = &*self.connection.read().await {
-            match connection.send_message(message.clone()).await {
-                Ok(()) => {
-                    self.event_handler.on_message_sent("client", &message).await;
-                    Ok(())
-                },
-                Err(e) => {
-                    // 记录错误日志
-                    error!("发送消息失败: {}", e);
-                    
-                    // 如果是连接错误，更新状态
-                    if let Some(error_code) = e.code() {
-                        match error_code {
-                            crate::common::error::ErrorCode::ConnectionFailed |
-                            crate::common::error::ErrorCode::ConnectionClosed |
-                            crate::common::error::ErrorCode::NetworkError => {
-                                // 更新连接状态为断开
-                                *self.state.write().await = ConnectionState::Disconnected;
-                                self.event_handler.on_disconnected("client", &format!("连接错误: {}", e)).await;
-                                error!("连接已断开，状态已更新");
-                            }
-                            _ => {}
-                        }
-                    }
-                    
-                    Err(e)
-                }
-            }
+    /// 设置消息处理器的发送函数
+    async fn setup_message_handler_send_function(&self) {
+        let connection = Arc::clone(&self.connection);
+        let send_function: SendFunction = Arc::new(move |frame| {
+            let connection = Arc::clone(&connection);
+            Box::pin(async move {
+                if let Some(conn) = &*connection.read().await {
+                    conn.send_message(frame).await
         } else {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()
             ))
         }
-    }
-
-    /// 发送请求并等待响应（类似REST接口）
-    /// 
-    /// # 参数
-    /// * `request` - 请求消息帧
-    /// 
-    /// # 返回值
-    /// 返回响应消息帧或错误
-    pub async fn send_request(&self, request: Frame) -> Result<Frame> {
-        debug!("发送请求: {:?}", request.get_command_type_str());
+            })
+        });
         
-        // 检查连接状态
-        let current_state = *self.state.read().await;
-        if current_state != ConnectionState::Connected {
-            return Err(crate::common::error::FlareError::connection_failed(
-                format!("连接未建立或已断开: {:?}", current_state)
-            ));
-        }
-        
-        // 创建一次性通道用于接收响应
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        
-        // 记录请求ID和回调
-        let request_id = request.get_message_id();
-        let request_id_clone = request_id.clone();
-        {
-            let mut pending = self.pending_requests.lock().await;
-            pending.insert(request_id_clone, (sender, std::time::Instant::now()));
-        }
-        
-        // 发送请求
-        let send_result = if let Some(connection) = &*self.connection.read().await {
-            let result = connection.send_message(request.clone()).await;
-            if result.is_ok() {
-                self.event_handler.on_message_sent("client", &request).await;
-            }
-            result
-        } else {
-            Err(crate::common::error::FlareError::connection_failed(
-                "连接不存在".to_string()
-            ))
-        };
-        
-        // 如果发送失败，清理等待的请求
-        if let Err(e) = send_result {
-            let mut pending = self.pending_requests.lock().await;
-            pending.remove(&request_id);
-            return Err(e);
-        }
-        
-        // 等待响应或超时
-        let timeout_duration = Duration::from_millis(self.request_timeout_ms);
-        match timeout(timeout_duration, receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                // 清理等待的请求
-                let mut pending = self.pending_requests.lock().await;
-                pending.remove(&request_id);
-                Err(crate::common::error::FlareError::connection_failed(
-                    "等待响应时通道关闭".to_string()
-                ))
-            },
-            Err(_) => {
-                // 超时，清理等待的请求
-                let mut pending = self.pending_requests.lock().await;
-                pending.remove(&request_id);
-                Err(crate::common::error::FlareError::timeout(
-                    "请求超时".to_string()
-                ))
-            }
-        }
-    }
-
-    /// 发送心跳消息
-    /// 
-    /// # 返回值
-    /// 返回操作结果
-    pub async fn send_heartbeat(&self) -> Result<()> {
-        debug!("发送心跳消息");
-        
-        // 检查连接状态
-        let current_state = *self.state.read().await;
-        if current_state != ConnectionState::Connected {
-            return Err(crate::common::error::FlareError::connection_failed(
-                format!("连接未建立或已断开: {:?}", current_state)
-            ));
-        }
-        
-        // 获取连接并发送心跳
-        if let Some(connection) = &*self.connection.read().await {
-            let heartbeat_msg = Frame::heartbeat("heartbeat".to_string());
-            match connection.send_message(heartbeat_msg.clone()).await {
-                Ok(()) => {
-                    self.event_handler.on_message_sent("client", &heartbeat_msg).await;
-                    Ok(())
-                },
-                Err(e) => Err(e)
-            }
-        } else {
-            Err(crate::common::error::FlareError::connection_failed(
-                "连接不存在".to_string()
-            ))
-        }
-    }
-
-    /// 获取连接状态
-    /// 
-    /// # 返回值
-    /// 返回当前连接状态
-    pub async fn get_state(&self) -> ConnectionState {
-        *self.state.read().await
-    }
-
-    /// 检查是否已连接
-    /// 
-    /// # 返回值
-    /// 如果已连接返回true，否则返回false
-    pub async fn is_connected(&self) -> bool {
-        *self.state.read().await == ConnectionState::Connected
+        self.message_handler.set_send_function(send_function).await;
     }
 
     /// 创建连接配置
@@ -430,7 +102,7 @@ impl Client {
     }
 
     /// 使用协议竞速连接
-    async fn connect_with_racing(&self) -> Result<Box<dyn ClientConnection>> {
+    async fn connect_with_racing(&self) -> Result<super::protocol_racing::RacingResult> {
         info!("使用协议竞速连接");
         
         let racer = ProtocolRacer::new(5000); // 5秒超时
@@ -443,7 +115,7 @@ impl Client {
         match racer.race(base_config, self.config.server_addresses.clone(), protocols).await {
             Ok(result) => {
                 info!("协议竞速成功，选择协议: {:?}", result.protocol_type);
-                Ok(result.connection)
+                Ok(result)
             }
             Err(e) => {
                 error!("协议竞速失败: {}", e);
@@ -477,54 +149,534 @@ impl Client {
         }
     }
     
-    /// 启动响应监听任务
-    fn start_response_listener(&self) {
-        // 客户端不直接监听响应，而是通过事件处理器处理
-        // 响应会在连接的事件处理器中处理并发送到pending_requests通道
+    /// 处理接收到的消息
+    pub async fn handle_message(&self, message: Frame) {
+        let message_id = message.get_message_id();
+        debug!("收到消息: ID={}", message_id);
+        
+        // 使用统一消息处理器处理消息
+        if let Err(e) = self.message_handler.handle_message(message.clone()).await {
+            warn!("处理消息失败: {}", e);
+        }
+        
+        // 如果有用户自定义事件处理器，分发到具体的事件方法
+        if let Some(handler) = &*self.client_event_handler.read().await {
+            self.dispatch_message_to_client_event(handler, &message).await;
+        }
     }
     
-    /// 处理接收到的响应消息
-    pub async fn handle_response(&self, response: Frame) {
-        let response_id = response.get_message_id();
-        debug!("收到响应消息: ID={}", response_id);
-        
-        // 触发消息接收事件
-        self.event_handler.on_message_received("client", &response).await;
-        
-        // 检查是否是认证响应
-        if let crate::common::protocol::commands::Command::Control(
-            crate::common::protocol::commands::ControlCmd::AuthResponse(_)
-        ) = &response.command {
-            // 处理认证响应
-            if let Err(e) = self.auth_manager.handle_auth_response(&response).await {
-                error!("处理认证响应失败: {}", e);
+    /// 将消息分发给 ClientEvent 处理器
+    async fn dispatch_message_to_client_event(&self, handler: &Arc<dyn ClientEvent>, message: &Frame) {
+        let command = message.get_command();
+        match command {
+            crate::common::protocol::commands::Command::Control(cmd) => {
+                handler.on_control_command(&cmd).await;
             }
-            return;
+            crate::common::protocol::commands::Command::Message(cmd) => {
+                handler.on_message_command(&cmd).await;
+            }
+            crate::common::protocol::commands::Command::Notification(cmd) => {
+                handler.on_notification_command(&cmd).await;
+            }
+            crate::common::protocol::commands::Command::Event(cmd) => {
+                handler.on_event_command(&cmd).await;
+            }
         }
-        
-        // 查找等待此响应的请求
-        let mut pending = self.pending_requests.lock().await;
-        if let Some((sender, _)) = pending.remove(&response_id) {
-            // 发送响应给等待的请求
-            let _ = sender.send(Ok(response));
+    }
+    
+    /// 触发 ClientEvent 的连接事件
+    async fn trigger_client_event<F, R>(&self, event_fn: F) -> Option<R>
+    where
+        F: FnOnce(Arc<dyn ClientEvent>) -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send>>,
+    {
+        if let Some(handler) = &*self.client_event_handler.read().await {
+            Some(event_fn(Arc::clone(handler)).await)
         } else {
-            debug!("收到未请求的响应消息: ID={}", response_id);
+            None
         }
+    }
+    
+    /// 触发 ClientEvent 的连接事件（无返回值）
+    async fn trigger_client_event_void<F>(&self, event_fn: F)
+    where
+        F: FnOnce(Arc<dyn ClientEvent>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    {
+        if let Some(handler) = &*self.client_event_handler.read().await {
+            event_fn(Arc::clone(handler)).await;
+        }
+    }
+    
+
+    // ==================== 基础方法 ====================
+    
+    /// 创建新的客户端实例
+    /// 
+    /// # 参数
+    /// * `config` - 客户端配置
+    /// 
+    /// # 返回值
+    /// 返回新的客户端实例
+    pub fn new(config: ClientConfig) -> Self {
+        // 创建消息处理器
+        let message_handler = Arc::new(MessageHandler::new(
+            std::time::Duration::from_millis(config.request_timeout_ms)
+        ));
+        
+        Self {
+            config,
+            connection: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            serializer: Arc::new(RwLock::new(None)),
+            message_handler,
+            client_event_handler: Arc::new(RwLock::new(None)),
+            current_protocol: Arc::new(RwLock::new(None)),
+            reconnect_config: ReconnectConfig::default(),
+        }
+    }
+    
+    /// 创建新的客户端实例，指定客户端事件处理器
+    /// 
+    /// # 参数
+    /// * `config` - 客户端配置
+    /// * `client_event_handler` - 客户端事件处理器
+    /// 
+    /// # 返回值
+    /// 返回新的客户端实例
+    pub fn with_client_event_handler(config: ClientConfig, client_event_handler: Arc<dyn ClientEvent>) -> Self {
+        // 创建消息处理器
+        let message_handler = Arc::new(MessageHandler::new(
+            std::time::Duration::from_millis(config.request_timeout_ms)
+        ));
+        
+        Self {
+            config,
+            connection: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            serializer: Arc::new(RwLock::new(None)),
+            message_handler,
+            client_event_handler: Arc::new(RwLock::new(Some(client_event_handler))),
+            current_protocol: Arc::new(RwLock::new(None)),
+            reconnect_config: ReconnectConfig::default(),
+        }
+    }
+    
+    /// 创建新的客户端实例，指定连接事件处理器
+    /// 
+    /// # 参数
+    /// * `config` - 客户端配置
+    /// * `connection_event_handler` - 连接事件处理器
+    /// 
+    /// # 返回值
+    /// 返回新的客户端实例
+    pub fn with_event_handler(config: ClientConfig, connection_event_handler: Arc<dyn ConnectionEvent>) -> Self {
+        // 创建消息处理器
+        let message_handler = Arc::new(MessageHandler::new(
+            std::time::Duration::from_millis(config.request_timeout_ms)
+        ));
+        
+        // 设置连接事件处理器
+        let message_handler_clone = Arc::clone(&message_handler);
+        tokio::spawn(async move {
+            message_handler_clone.set_connection_event_handler(connection_event_handler).await;
+        });
+        
+        Self {
+            config,
+            connection: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            serializer: Arc::new(RwLock::new(None)),
+            message_handler,
+            client_event_handler: Arc::new(RwLock::new(None)),
+            current_protocol: Arc::new(RwLock::new(None)),
+            reconnect_config: ReconnectConfig::default(),
+        }
+    }
+    
+    /// 获取客户端配置的引用
+    pub fn get_config(&self) -> &ClientConfig {
+        &self.config
+    }
+    
+    /// 设置连接事件处理器
+    pub async fn set_connection_event_handler(&self, handler: Arc<dyn ConnectionEvent>) {
+        self.message_handler.set_connection_event_handler(handler).await;
+    }
+    
+    /// 设置客户端事件处理器
+    /// 
+    /// # 参数
+    /// * `client_event_handler` - 客户端事件处理器
+    pub async fn set_client_event_handler(&self, client_event_handler: Arc<dyn ClientEvent>) {
+        *self.client_event_handler.write().await = Some(client_event_handler);
+    }
+    
+    /// 设置重连配置
+    /// 
+    /// # 参数
+    /// * `reconnect_config` - 重连配置
+    pub fn set_reconnect_config(&mut self, reconnect_config: ReconnectConfig) {
+        self.reconnect_config = reconnect_config;
+    }
+    
+    /// 获取当前使用的协议
+    /// 
+    /// # 返回值
+    /// 返回当前使用的协议，如果未连接则返回None
+    pub async fn get_current_protocol(&self) -> Option<Transport> {
+        *self.current_protocol.read().await
+    }
+    
+    /// 设置当前协议
+    async fn set_current_protocol(&self, protocol: Transport) {
+        *self.current_protocol.write().await = Some(protocol);
+    }
+    
+    /// 触发协议切换事件
+    async fn trigger_protocol_switch(&self, connection_id: &str, from_protocol: &str, to_protocol: &str) {
+        if let Some(handler) = &*self.client_event_handler.read().await {
+            let connection_id = connection_id.to_string();
+            let from_protocol = from_protocol.to_string();
+            let to_protocol = to_protocol.to_string();
+            self.trigger_client_event(move |handler| {
+                Box::pin(async move {
+                    handler.on_protocol_switched(&connection_id, &from_protocol, &to_protocol).await;
+                })
+            }).await;
+        }
+    }
+    
+    /// 获取消息处理器
+    pub fn get_message_handler(&self) -> Arc<MessageHandler> {
+        Arc::clone(&self.message_handler)
+    }
+    
+    /// 获取连接状态
+    /// 
+    /// # 返回值
+    /// 返回当前连接状态
+    pub async fn get_state(&self) -> ConnectionState {
+        *self.state.read().await
+    }
+
+    /// 检查是否已连接
+    /// 
+    /// # 返回值
+    /// 如果已连接返回true，否则返回false
+    pub async fn is_connected(&self) -> bool {
+        *self.state.read().await == ConnectionState::Connected
+    }
+    
+    /// 获取连接统计信息
+    /// 
+    /// # 返回值
+    /// 返回连接统计信息，如果未连接则返回None
+    pub async fn get_connection_stats(&self) -> Option<ConnectionStats> {
+        if let Some(connection) = &*self.connection.read().await {
+            Some(connection.stats())
+        } else {
+            None
+        }
+    }
+    
+    /// 获取等待中的请求数量
+    /// 
+    /// # 返回值
+    /// 返回当前等待响应的请求数量
+    pub async fn get_pending_requests_count(&self) -> usize {
+        self.message_handler.get_pending_count().await
     }
     
     /// 清理超时的请求
+    /// 
+    /// 清理所有超时的等待响应请求
     pub async fn cleanup_timeout_requests(&self) {
-        let mut pending = self.pending_requests.lock().await;
-        let now = std::time::Instant::now();
-        let timeout_duration = Duration::from_millis(self.request_timeout_ms);
+        self.message_handler.cleanup_timeout_requests().await;
+    }
+    
+    /// 获取客户端ID
+    /// 
+    /// # 返回值
+    /// 返回客户端的唯一标识符
+    pub fn get_client_id(&self) -> String {
+        format!("client_{}", self.config.server_addresses.values().next().unwrap_or(&"unknown".to_string()))
+    }
+    
+    /// 检查连接健康状态
+    /// 
+    /// # 返回值
+    /// 返回连接是否健康
+    pub async fn is_healthy(&self) -> bool {
+        if !self.is_connected().await {
+            return false;
+        }
         
-        pending.retain(|_, (_, timestamp)| {
-            if now.duration_since(*timestamp) > timeout_duration {
-                false // 移除超时的请求
-            } else {
-                true // 保留未超时的请求
+        // 检查是否有连接对象
+        if self.connection.read().await.is_none() {
+            return false;
+        }
+        
+        // 可以添加更多健康检查逻辑，比如心跳检查等
+        true
+    }
+    
+    /// 获取客户端状态信息
+    /// 
+    /// # 返回值
+    /// 返回包含客户端状态信息的字符串
+    pub async fn get_status_info(&self) -> String {
+        let state = self.get_state().await;
+        let is_connected = self.is_connected().await;
+        let is_healthy = self.is_healthy().await;
+        let pending_requests = self.get_pending_requests_count().await;
+        let client_id = self.get_client_id();
+        let message_handler_status = self.message_handler.get_status_info().await;
+        
+        format!(
+            "客户端状态: ID={}, 状态={:?}, 已连接={}, 健康={}, 等待请求={}, {}",
+            client_id, state, is_connected, is_healthy, pending_requests, message_handler_status
+        )
+    }
+
+    // ==================== 连接方法 ====================
+
+    /// 连接到服务器
+    /// 
+    /// 根据配置选择协议连接方式：
+    /// - Auto: 协议竞速，选择最优协议
+    /// - QuicOnly: 仅使用QUIC协议
+    /// - WebSocketOnly: 仅使用WebSocket协议
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn connect(&mut self) -> Result<()> {
+        // 检查是否已经连接
+        if self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端已经连接，请先断开现有连接".to_string()
+            ));
+        }
+        
+        info!("开始连接到服务器: {:?}", self.config.server_addresses);
+        
+        // 更新状态
+        *self.state.write().await = ConnectionState::Connecting;
+        
+        // 根据协议选择模式进行连接
+        let (connection, protocol) = match self.config.protocol_selection {
+            ProtocolSelection::Auto => {
+                info!("使用协议竞速模式连接");
+                let result = self.connect_with_racing().await?;
+                (result.connection, result.protocol_type)
             }
-        });
+            ProtocolSelection::QuicOnly => {
+                info!("使用QUIC协议连接");
+                let connection = self.connect_single_protocol(Transport::Quic).await?;
+                (connection, Transport::Quic)
+            }
+            ProtocolSelection::WebSocketOnly => {
+                info!("使用WebSocket协议连接");
+                let connection = self.connect_single_protocol(Transport::WebSocket).await?;
+                (connection, Transport::WebSocket)
+            }
+        };
+        
+        // 记录当前协议
+        self.set_current_protocol(protocol).await;
+        
+        // 设置连接的事件处理器为当前 Client 实例
+        let mut connection = connection;
+        connection.set_event_handler(Arc::new(self.clone())).await;
+        
+        // 设置消息处理器的发送函数
+        self.setup_message_handler_send_function().await;
+        
+        // 保存连接
+        *self.connection.write().await = Some(connection);
+        
+        // 设置为已连接状态
+        *self.state.write().await = ConnectionState::Connected;
+        
+        info!("连接建立成功，客户端ID: {}", self.get_client_id());
+        Ok(())
+    }
+
+    /// 断开连接
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn disconnect(&mut self) -> Result<()> {
+        // 检查是否已经断开
+        if !self.is_connected().await {
+            warn!("客户端已经断开连接");
+            return Ok(());
+        }
+        
+        info!("开始断开连接，客户端ID: {}", self.get_client_id());
+        
+        *self.state.write().await = ConnectionState::Disconnecting;
+        
+        // 清理消息处理器中的等待请求
+        let pending_count = self.message_handler.get_pending_count().await;
+        if pending_count > 0 {
+            info!("清理 {} 个等待中的请求", pending_count);
+            self.message_handler.clear_all_requests().await;
+        }
+        
+        // 断开底层连接
+        if let Some(connection) = self.connection.write().await.take() {
+            if let Err(e) = connection.disconnect(None).await {
+                warn!("断开连接时发生错误: {}", e);
+                // 即使断开连接出错，也要更新状态
+            }
+        }
+        
+        *self.state.write().await = ConnectionState::Disconnected;
+        info!("连接已断开");
+        Ok(())
+    }
+    
+    /// 重连到服务器
+    /// 
+    /// 先断开现有连接，然后重新连接
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn reconnect(&mut self) -> Result<()> {
+        info!("开始重连，客户端ID: {}", self.get_client_id());
+        
+        // 先断开现有连接
+        if self.is_connected().await {
+            if let Err(e) = self.disconnect().await {
+                warn!("断开连接时发生错误，继续重连: {}", e);
+            }
+        }
+        
+        // 等待一小段时间
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        
+        // 重新连接
+        self.connect().await
+    }
+
+    /// 发送心跳消息
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn send_heartbeat(&self) -> Result<()> {
+        debug!("发送心跳消息");
+        
+        // 检查连接状态
+        let current_state = *self.state.read().await;
+        if current_state != ConnectionState::Connected {
+            return Err(crate::common::error::FlareError::connection_failed(
+                format!("连接未建立或已断开: {:?}", current_state)
+            ));
+        }
+        
+        // 获取连接并发送心跳
+        if let Some(connection) = &*self.connection.read().await {
+            let heartbeat_msg = Frame::heartbeat("heartbeat".to_string());
+            connection.send_message(heartbeat_msg).await
+        } else {
+            Err(crate::common::error::FlareError::connection_failed(
+                "连接不存在".to_string()
+            ))
+        }
+    }
+
+    // ==================== 消息相关方法 ====================
+
+    /// 发送等待响应的消息
+    pub async fn send_request<F>(
+        &self,
+        create_command: F,
+        reliability: crate::common::protocol::Reliability,
+        custom_timeout: Option<std::time::Duration>,
+    ) -> Result<Frame>
+    where
+        F: FnOnce(String) -> Result<crate::common::protocol::commands::Command>,
+    {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法发送消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_request(create_command, reliability, custom_timeout).await
+    }
+    
+    /// 发送无需等待响应的消息
+    pub async fn send_fire_and_forget<F>(
+        &self,
+        create_command: F,
+        reliability: crate::common::protocol::Reliability,
+    ) -> Result<()>
+    where
+        F: FnOnce(String) -> Result<crate::common::protocol::commands::Command>,
+    {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法发送消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_fire_and_forget(create_command, reliability).await
+    }
+    
+    /// 发送控制消息
+    pub async fn send_control(&self, control_cmd: crate::common::protocol::commands::ControlCmd) -> Result<()> {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法发送控制消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_control(control_cmd).await
+    }
+    
+    /// 发送通知消息
+    pub async fn send_notification(&self, notification_cmd: crate::common::protocol::commands::NotificationCmd) -> Result<()> {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法发送通知消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_notification(notification_cmd).await
+    }
+    
+    /// 发送事件消息
+    pub async fn send_event(&self, event_cmd: crate::common::protocol::commands::EventCmd) -> Result<()> {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法发送事件消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_event(event_cmd).await
+    }
+    
+    /// 批量发送消息
+    /// 
+    /// # 参数
+    /// * `frames` - 要发送的消息帧列表
+    /// 
+    /// # 返回值
+    /// 返回发送结果，包含成功和失败的消息数量
+    pub async fn send_batch(&self, frames: Vec<Frame>) -> Result<(usize, usize)> {
+        // 检查连接状态
+        if !self.is_connected().await {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "客户端未连接，无法批量发送消息".to_string()
+            ));
+        }
+        
+        self.message_handler.send_batch(frames).await
     }
 }
 
@@ -536,10 +688,219 @@ impl Clone for Client {
             connection: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             serializer: self.serializer.clone(),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            request_timeout_ms: self.request_timeout_ms,
-            auth_manager: self.auth_manager.clone(),
-            event_handler: self.event_handler.clone(),
+            message_handler: Arc::clone(&self.message_handler),
+            client_event_handler: Arc::clone(&self.client_event_handler),
+            current_protocol: Arc::new(RwLock::new(None)),
+            reconnect_config: self.reconnect_config.clone(),
+        }
+    }
+}
+
+// 实现 ConnectionEvent trait
+#[async_trait]
+impl ConnectionEvent for Client {
+    async fn on_connected(&self, connection_id: &str) {
+        info!("客户端连接已建立: {}", connection_id);
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_connected(&connection_id).await;
+            })
+        }).await;
+    }
+
+    async fn on_disconnected(&self, connection_id: &str, reason: &str) {
+        info!("客户端连接已断开: {} - 原因: {}", connection_id, reason);
+        
+        // 更新状态
+        *self.state.write().await = ConnectionState::Disconnected;
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        let reason = reason.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_disconnected(&connection_id, &reason).await;
+            })
+        }).await;
+    }
+
+    async fn on_error(&self, connection_id: &str, error: &str) {
+        error!("客户端连接错误: {} - 错误: {}", connection_id, error);
+        
+        // 更新状态
+        *self.state.write().await = ConnectionState::Failed;
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        let error = error.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_error(&connection_id, &error).await;
+            })
+        }).await;
+    }
+
+    async fn on_message_received(&self, connection_id: &str, message: &Frame) {
+        debug!("客户端收到消息: {} - 类型: {}", connection_id, message.get_command_type_str());
+        
+        // 处理消息
+        self.handle_message(message.clone()).await;
+    }
+
+    async fn on_message_sent(&self, connection_id: &str, message: &Frame) {
+        debug!("客户端发送消息: {} - 类型: {}", connection_id, message.get_command_type_str());
+    }
+
+    async fn on_heartbeat_timeout(&self, connection_id: &str) {
+        warn!("客户端心跳超时: {}", connection_id);
+        
+        // 触发 ClientEvent 回调，让用户决定是否重连
+        let should_reconnect = self.trigger_client_event(move |handler| {
+            let connection_id = connection_id.to_string();
+            Box::pin(async move {
+                handler.on_heartbeat_timeout(&connection_id).await
+            })
+        }).await.unwrap_or(true); // 默认重连
+        
+        if should_reconnect && self.reconnect_config.enabled {
+            info!("心跳超时，开始重连");
+            // 这里可以触发重连逻辑
+        }
+    }
+
+    async fn on_heartbeat_ping(&self, connection_id: &str) {
+        debug!("客户端收到心跳ping: {}", connection_id);
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_heartbeat_ping(&connection_id).await;
+            })
+        }).await;
+    }
+
+    async fn on_heartbeat_pong(&self, connection_id: &str) {
+        debug!("客户端收到心跳pong: {}", connection_id);
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_heartbeat_pong(&connection_id).await;
+            })
+        }).await;
+    }
+
+    async fn on_quality_changed(&self, connection_id: &str, quality_score: u8) {
+        info!("客户端连接质量变化: {} - 评分: {}", connection_id, quality_score);
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_quality_changed(&connection_id, quality_score).await;
+            })
+        }).await;
+    }
+
+    async fn on_reconnect_started(&self, connection_id: &str, attempt: u32) {
+        info!("客户端开始重连: {} - 尝试次数: {}", connection_id, attempt);
+        
+        // 触发 ClientEvent 回调，让用户决定是否允许重连
+        let should_reconnect = self.trigger_client_event(move |handler| {
+            let connection_id = connection_id.to_string();
+            Box::pin(async move {
+                handler.on_reconnect_started(&connection_id, attempt).await
+            })
+        }).await.unwrap_or(true); // 默认允许重连
+        
+        if !should_reconnect {
+            warn!("用户取消重连: {}", connection_id);
+            *self.state.write().await = ConnectionState::Disconnected;
+        }
+    }
+
+    async fn on_reconnected(&self, connection_id: &str, attempt: u32) {
+        info!("客户端重连成功: {} - 尝试次数: {}", connection_id, attempt);
+        
+        // 更新状态
+        *self.state.write().await = ConnectionState::Connected;
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_reconnected(&connection_id, attempt).await;
+            })
+        }).await;
+    }
+
+    async fn on_reconnect_failed(&self, connection_id: &str, attempt: u32, error: &str) {
+        error!("客户端重连失败: {} - 尝试次数: {} - 错误: {}", connection_id, attempt, error);
+        
+        // 触发 ClientEvent 回调，让用户决定是否继续重连
+        let should_continue = self.trigger_client_event(move |handler| {
+            let connection_id = connection_id.to_string();
+            let error = error.to_string();
+            Box::pin(async move {
+                handler.on_reconnect_failed(&connection_id, attempt, &error).await
+            })
+        }).await.unwrap_or(attempt < self.reconnect_config.max_attempts); // 默认检查重连次数
+        
+        if should_continue {
+            warn!("继续重连尝试: {}", connection_id);
+        } else {
+            error!("重连失败，停止重连: {}", connection_id);
+            *self.state.write().await = ConnectionState::Failed;
+        }
+    }
+
+    async fn on_statistics_updated(&self, connection_id: &str, stats: &ConnectionStats) {
+        debug!("客户端统计信息更新: {} - 收到: {} - 发送: {} - 质量: {}", 
+               connection_id, stats.messages_received, stats.messages_sent, stats.quality_score);
+        
+        // 触发 ClientEvent 回调
+        let connection_id = connection_id.to_string();
+        let stats = stats.clone();
+        self.trigger_client_event_void(move |handler| {
+            Box::pin(async move {
+                handler.on_statistics_updated(&connection_id, &stats).await;
+            })
+        }).await;
+    }
+}
+
+/// Client 构建器
+pub struct ClientBuilder {
+    config: ClientConfig,
+    client_event_handler: Option<Arc<dyn ClientEvent>>,
+}
+
+impl ClientBuilder {
+    /// 创建新的 ClientBuilder
+    pub fn new(config: ClientConfig) -> Self {
+        Self {
+            config,
+            client_event_handler: None,
+        }
+    }
+    
+    /// 设置客户端事件处理器
+    pub fn with_client_event_handler(mut self, handler: Arc<dyn ClientEvent>) -> Self {
+        self.client_event_handler = Some(handler);
+        self
+    }
+    
+    /// 构建 Client 实例
+    pub fn build(self) -> Client {
+        if let Some(handler) = self.client_event_handler {
+            Client::with_client_event_handler(self.config, handler)
+        } else {
+            Client::new(self.config)
         }
     }
 }

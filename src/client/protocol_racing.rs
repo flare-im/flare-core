@@ -36,8 +36,6 @@ impl std::fmt::Debug for RacingResult {
 
 /// 协议竞速器
 pub struct ProtocolRacer {
-    /// 连接工厂
-    factory: ConnectionFactory,
     /// 竞速超时时间（毫秒）
     timeout_ms: u64,
 }
@@ -46,7 +44,6 @@ impl ProtocolRacer {
     /// 创建新的协议竞速器
     pub fn new(timeout_ms: u64) -> Self {
         Self {
-            factory: ConnectionFactory::new(),
             timeout_ms,
         }
     }
@@ -88,7 +85,6 @@ impl ProtocolRacer {
         let start_time = Instant::now();
         
         for (config, protocol_type) in protocol_configs {
-            let factory = self.factory.clone();
             let handle = tokio::spawn(async move {
                 let connect_start = Instant::now();
                 match ConnectionFactory::create_client(config).await {

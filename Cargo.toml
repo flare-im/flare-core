@@ -49,12 +49,9 @@ name = "websocket_client"
 path = "examples/client/websocket_client.rs"
 
 [[example]]
-name = "protocol_race_client"
-path = "examples/client/protocol_race_client.rs"
-
-[[example]]
 name = "fast_client_example"
 path = "examples/client/fast_client_example.rs"
+
 
 
 # Server examples
@@ -77,6 +74,7 @@ path = "examples/server/connection_test.rs"
 [[example]]
 name = "fast_server_example"
 path = "examples/server/fast_server_example.rs"
+
 
 
 # === 示例配置说明 ===

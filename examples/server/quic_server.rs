@@ -12,12 +12,11 @@ use rustls::crypto::ring;
 use flare_core::{
     server::{
         config::{ServerConfig, ProtocolConfig, TlsConfig},
-        server::AggregationServer,
+        server::{AggregationServer, ServerBuilder},
         event::DefServerEventHandler,
     },
     common::serialization::{SerializationConfig, SerializationFormat},
 };
-use flare_core::server::server::ServerBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -10,7 +10,7 @@ use crate::common::{
 use serde::{Deserialize, Serialize};
 
 // 添加认证配置的引用
-use crate::client::auth::AuthConfig;
+// 认证配置已移至 fast 模块
 
 /// 协议选择模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,8 +54,7 @@ pub struct ClientConfig {
     pub serialization_config: SerializationConfig,
     /// 请求超时时间（毫秒）
     pub request_timeout_ms: u64,
-    /// 认证配置
-    pub auth_config: AuthConfig,
+    // 认证配置已移至 FastClient
 }
 
 impl Default for ClientConfig {
@@ -76,7 +75,7 @@ impl Default for ClientConfig {
             enable_auto_heartbeat_response: true,
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
-            auth_config: AuthConfig::default(),
+            // 认证配置已移至 FastClient
         }
     }
 }
@@ -100,7 +99,7 @@ impl ClientConfig {
             enable_auto_heartbeat_response: true,
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
-            auth_config: AuthConfig::default(),
+            // 认证配置已移至 FastClient
         }
     }
     
@@ -160,40 +159,9 @@ impl ClientConfig {
     }
     
     /// 设置认证配置
-    pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
-        self.auth_config = auth_config;
-        self
-    }
+    // 认证配置方法已移至 FastClient
     
-    /// 启用认证
-    pub fn with_auth_enabled(mut self, enabled: bool) -> Self {
-        self.auth_config.enabled = enabled;
-        self
-    }
-    
-    /// 设置认证用户ID
-    pub fn with_auth_user_id(mut self, user_id: String) -> Self {
-        self.auth_config.user_id = Some(user_id);
-        self
-    }
-    
-    /// 设置认证平台
-    pub fn with_auth_platform(mut self, platform: String) -> Self {
-        self.auth_config.platform = Some(platform);
-        self
-    }
-    
-    /// 设置认证令牌
-    pub fn with_auth_token(mut self, token: String) -> Self {
-        self.auth_config.token = Some(token);
-        self
-    }
-    
-    /// 设置认证超时时间
-    pub fn with_auth_timeout(mut self, timeout_ms: u64) -> Self {
-        self.auth_config.timeout_ms = timeout_ms;
-        self
-    }
+    // 认证相关方法已移至 FastClient
     
     /// 设置重连参数
     pub fn with_reconnect_params(mut self, max_attempts: u32, delay_ms: u64) -> Self {
@@ -248,12 +216,10 @@ impl ClientConfig {
             client_config.auto_reconnect = self.enable_auto_reconnect;
             client_config.max_reconnect_attempts = self.max_reconnect_attempts;
             client_config.reconnect_delay_ms = self.reconnect_delay_ms;
-            client_config.user_id = self.auth_config.user_id.clone();
-            client_config.token = self.auth_config.token.clone();
-            // 设置平台信息
-            if let Some(platform_str) = &self.auth_config.platform {
-                client_config.platform = Some(crate::common::connections::types::Platform::from_str(platform_str));
-            }
+            // 认证信息已移至 FastClient
+            // client_config.user_id = None;
+            // client_config.token = None;
+            // client_config.platform = None;
         }
         
         conn_config
@@ -321,15 +287,7 @@ impl ClientConfig {
             return Err("重连延迟必须大于0".to_string());
         }
         
-        // 检查认证配置的合理性
-        if self.auth_config.enabled {
-            if self.auth_config.user_id.is_none() {
-                return Err("启用认证时，用户ID不能为空".to_string());
-            }
-            if self.auth_config.timeout_ms == 0 {
-                return Err("认证超时必须大于0".to_string());
-            }
-        }
+        // 认证配置检查已移至 FastClient
         
         // 检查请求超时的合理性
         if self.request_timeout_ms == 0 {
@@ -387,7 +345,7 @@ impl ClientConfig {
             .with_heartbeat(30000, 90000) // 30秒心跳间隔，90秒监控超时
             .with_request_timeout(15000) // 15秒请求超时
             .with_reconnect_params(5, 3000) // 最多重连5次，3秒延迟
-            .with_auth_enabled(true) // 启用认证
+            // 认证配置已移至 FastClient
             .with_serialization(crate::common::serialization::SerializationConfig {
                 format: crate::common::serialization::SerializationFormat::Protobuf,
                 ..Default::default()

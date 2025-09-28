@@ -5,16 +5,15 @@
 pub mod client;
 pub mod config;
 pub mod protocol_racing;
-pub mod auth;
+// auth 模块已移至 fast 模块
 pub mod fast;
 pub mod event;
-pub mod adapter;
+pub mod messaging;
 
 // 重新导出主要类型
-pub use client::Client;
+pub use client::{Client, ClientBuilder};
 pub use config::{ClientConfig, ProtocolSelection};
-pub use auth::{AuthConfig, AuthState};
-pub use fast::{FastClient, FastClientBuilder};
+pub use fast::{FastClient, FastClientBuilder, FastEvent, DefFastEventHandler};
 pub use event::{ClientEvent, DefClientEventHandler};
-pub use adapter::ClientEventAdapter;
+pub use messaging::MessageHandler;
 pub use crate::common::connections::types::Transport;
