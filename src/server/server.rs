@@ -9,6 +9,7 @@ use crate::common::{
 use crate::server::{manager::{
     traits::ServerConnectionManager,
     ConnectionManager,
+    connection_manager::HeartbeatConfig,
 }, event::ServerEvent, ServerEventAdapter, config::{ServerConfig, ServerType}, websocket, quic, DefServerEventHandler};
 
 /// 服务器trait
@@ -73,6 +74,10 @@ impl AggregationServer {
                 self.start_dual_protocol().await?;
             },
         }
+        
+        // 启动连接管理器的所有任务
+        self.connection_manager.start_tasks().await;
+        info!("连接管理器任务已启动");
         
         info!("服务器启动完成");
         Ok(())
@@ -151,6 +156,10 @@ impl AggregationServer {
     /// 停止服务器
     pub async fn stop(&self) -> Result<()> {
         self.is_running.store(false, Ordering::Relaxed);
+        
+        // 停止连接管理器的所有任务
+        self.connection_manager.stop_tasks().await;
+        info!("连接管理器任务已停止");
         
         // 停止WebSocket服务
         if let Some(ws_server) = &*self.websocket_server.read().await {
@@ -254,8 +263,15 @@ impl ServerBuilder {
         let connection_manager = if let Some(manager) = self.connection_manager {
             manager
         } else {
-            // 创建默认的连接管理器
-            Arc::new(ConnectionManager::new())
+            // 根据ServerConfig创建心跳配置
+            let heartbeat_config = HeartbeatConfig {
+                check_interval: std::time::Duration::from_millis(self.config.heartbeat_interval_ms),
+                connection_timeout: std::time::Duration::from_millis(self.config.heartbeat_timeout_ms),
+                enable_auto_cleanup: true,
+            };
+            
+            // 创建带配置的连接管理器
+            Arc::new(ConnectionManager::with_heartbeat_config(heartbeat_config))
         };
 
         Ok(AggregationServer {

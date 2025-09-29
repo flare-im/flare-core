@@ -40,6 +40,15 @@ pub trait ServerConnectionManager: Send + Sync {
     
     /// 获取连接统计信息
     async fn get_connection_stats(&self) -> ServerStats;
+    
+    /// 启动所有管理任务
+    async fn start_tasks(&self);
+    
+    /// 停止所有管理任务
+    async fn stop_tasks(&self);
+    
+    /// 检查任务是否正在运行
+    async fn are_tasks_running(&self) -> bool;
 }
 
 /// 服务端统计信息

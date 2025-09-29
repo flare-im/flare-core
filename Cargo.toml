@@ -119,7 +119,7 @@ path = "examples/server/fast_server_example.rs"
 
 [dependencies]
 # 异步运行时（核心功能）
-tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal"] }
+tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal", "io-std"] }
 
 # 序列化（协议需要）
 serde = { version = "1.0.210", features = ["derive"] }
@@ -148,6 +148,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"], optional =
 
 # 错误处理（核心功能）
 thiserror = "2.0.15"
+
+# 终端检测（客户端示例需要）
+atty = "0.2.14"
 
 # 异步trait（连接接口需要）
 async-trait = "0.1.83"

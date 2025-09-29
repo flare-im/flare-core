@@ -38,18 +38,14 @@ pub struct ClientConfig {
     pub transport: Transport,
     /// 协议选择模式
     pub protocol_selection: ProtocolSelection,
-    /// 是否启用自动重连
-    pub enable_auto_reconnect: bool,
-    /// 最大重连尝试次数
+    /// 最大重连尝试次数（0表示不重连）
     pub max_reconnect_attempts: u32,
     /// 重连延迟（毫秒）
     pub reconnect_delay_ms: u64,
     /// 心跳间隔（毫秒）
     pub heartbeat_interval_ms: u64,
-    /// 心跳监控超时（毫秒）
-    pub heartbeat_monitor_timeout_ms: u64,
-    /// 是否启用自动心跳响应
-    pub enable_auto_heartbeat_response: bool,
+    /// 心跳超时（毫秒）
+    pub heartbeat_timeout_ms: u64,
     /// 序列化配置
     pub serialization_config: SerializationConfig,
     /// 请求超时时间（毫秒）
@@ -67,12 +63,10 @@ impl Default for ClientConfig {
             server_addresses,
             transport: Transport::WebSocket,
             protocol_selection: ProtocolSelection::Auto,
-            enable_auto_reconnect: true,
-            max_reconnect_attempts: 5,
-            reconnect_delay_ms: 1000,
-            heartbeat_interval_ms: 10000,
-            heartbeat_monitor_timeout_ms: 30000,
-            enable_auto_heartbeat_response: true,
+            max_reconnect_attempts: 5, // 默认重连5次
+            reconnect_delay_ms: 2000,  // 默认2秒重连延迟
+            heartbeat_interval_ms: 15000, // 默认15秒心跳间隔
+            heartbeat_timeout_ms: 60000,  // 默认60秒心跳超时
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
             // 认证配置已移至 FastClient
@@ -91,12 +85,10 @@ impl ClientConfig {
             server_addresses,
             transport: Transport::WebSocket,
             protocol_selection: ProtocolSelection::Auto,
-            enable_auto_reconnect: true,
-            max_reconnect_attempts: 5,
-            reconnect_delay_ms: 1000,
-            heartbeat_interval_ms: 10000,
-            heartbeat_monitor_timeout_ms: 30000,
-            enable_auto_heartbeat_response: true,
+            max_reconnect_attempts: 5, // 默认重连5次
+            reconnect_delay_ms: 2000,  // 默认2秒重连延迟
+            heartbeat_interval_ms: 15000, // 默认15秒心跳间隔
+            heartbeat_timeout_ms: 60000,  // 默认60秒心跳超时
             serialization_config: SerializationConfig::default(),
             request_timeout_ms: 5000, // 默认5秒超时
             // 认证配置已移至 FastClient
@@ -142,7 +134,7 @@ impl ClientConfig {
     /// 设置心跳间隔和超时
     pub fn with_heartbeat(mut self, interval_ms: u64, timeout_ms: u64) -> Self {
         self.heartbeat_interval_ms = interval_ms;
-        self.heartbeat_monitor_timeout_ms = timeout_ms;
+        self.heartbeat_timeout_ms = timeout_ms;
         self
     }
 
@@ -166,6 +158,24 @@ impl ClientConfig {
     /// 设置重连参数
     pub fn with_reconnect_params(mut self, max_attempts: u32, delay_ms: u64) -> Self {
         self.max_reconnect_attempts = max_attempts;
+        self.reconnect_delay_ms = delay_ms;
+        self
+    }
+    
+    /// 设置自动重连（简化方法）
+    pub fn with_auto_reconnect(mut self, max_attempts: u32) -> Self {
+        self.max_reconnect_attempts = max_attempts;
+        self
+    }
+    
+    /// 禁用自动重连
+    pub fn without_auto_reconnect(mut self) -> Self {
+        self.max_reconnect_attempts = 0;
+        self
+    }
+    
+    /// 设置重连延迟
+    pub fn with_reconnect_delay(mut self, delay_ms: u64) -> Self {
         self.reconnect_delay_ms = delay_ms;
         self
     }
@@ -205,7 +215,7 @@ impl ClientConfig {
         
         // 设置心跳配置
         conn_config.heartbeat_interval_ms = self.heartbeat_interval_ms;
-        conn_config.heartbeat_timeout_ms = self.heartbeat_monitor_timeout_ms / 3; // 心跳超时为监控超时的1/3
+        conn_config.heartbeat_timeout_ms = self.heartbeat_timeout_ms;
         
         // 设置序列化配置
         conn_config.serialization_config = Some(self.serialization_config.clone());
@@ -213,7 +223,7 @@ impl ClientConfig {
         // 设置客户端特有配置
         if let Some(client_config) = &mut conn_config.client_config {
             client_config.enable_tls = false; // 默认不启用TLS，可根据需要调整
-            client_config.auto_reconnect = self.enable_auto_reconnect;
+            client_config.auto_reconnect = self.max_reconnect_attempts > 0;
             client_config.max_reconnect_attempts = self.max_reconnect_attempts;
             client_config.reconnect_delay_ms = self.reconnect_delay_ms;
             // 认证信息已移至 FastClient
@@ -274,17 +284,13 @@ impl ClientConfig {
             return Err("心跳间隔必须大于0".to_string());
         }
         
-        if self.heartbeat_monitor_timeout_ms <= self.heartbeat_interval_ms {
-            return Err("心跳监控超时必须大于心跳间隔".to_string());
+        if self.heartbeat_timeout_ms <= self.heartbeat_interval_ms {
+            return Err("心跳超时必须大于心跳间隔".to_string());
         }
         
         // 检查重连配置的合理性
-        if self.enable_auto_reconnect && self.max_reconnect_attempts == 0 {
-            return Err("启用自动重连时，最大重连次数必须大于0".to_string());
-        }
-        
-        if self.reconnect_delay_ms == 0 {
-            return Err("重连延迟必须大于0".to_string());
+        if self.max_reconnect_attempts > 0 && self.reconnect_delay_ms == 0 {
+            return Err("启用重连时，重连延迟必须大于0".to_string());
         }
         
         // 认证配置检查已移至 FastClient
@@ -302,8 +308,9 @@ impl ClientConfig {
     /// 针对高吞吐量场景优化的配置
     pub fn high_performance() -> Self {
         Self::default()
-            .with_heartbeat(30000, 90000) // 30秒心跳间隔，90秒监控超时
+            .with_heartbeat(30000, 90000) // 30秒心跳间隔，90秒超时
             .with_request_timeout(10000) // 10秒请求超时
+            .with_auto_reconnect(3) // 最多重连3次
             .with_serialization(crate::common::serialization::SerializationConfig {
                 format: crate::common::serialization::SerializationFormat::Protobuf,
                 ..Default::default()
@@ -315,8 +322,9 @@ impl ClientConfig {
     /// 针对实时通信场景优化的配置
     pub fn low_latency() -> Self {
         Self::default()
-            .with_heartbeat(5000, 15000) // 5秒心跳间隔，15秒监控超时
+            .with_heartbeat(5000, 15000) // 5秒心跳间隔，15秒超时
             .with_request_timeout(3000) // 3秒请求超时
+            .with_auto_reconnect(5) // 最多重连5次
             .with_serialization(crate::common::serialization::SerializationConfig {
                 format: crate::common::serialization::SerializationFormat::Cbor,
                 ..Default::default()
@@ -328,9 +336,10 @@ impl ClientConfig {
     /// 针对长时间连接场景优化的配置
     pub fn stable() -> Self {
         Self::default()
-            .with_heartbeat(60000, 180000) // 1分钟心跳间隔，3分钟监控超时
+            .with_heartbeat(60000, 180000) // 1分钟心跳间隔，3分钟超时
             .with_request_timeout(30000) // 30秒请求超时
-            .with_reconnect_params(10, 5000) // 最多重连10次，5秒延迟
+            .with_auto_reconnect(10) // 最多重连10次
+            .with_reconnect_delay(5000) // 5秒重连延迟
             .with_serialization(crate::common::serialization::SerializationConfig {
                 format: crate::common::serialization::SerializationFormat::Json,
                 ..Default::default()
@@ -342,9 +351,10 @@ impl ClientConfig {
     /// 针对生产环境优化的综合配置
     pub fn production() -> Self {
         Self::default()
-            .with_heartbeat(30000, 90000) // 30秒心跳间隔，90秒监控超时
+            .with_heartbeat(30000, 90000) // 30秒心跳间隔，90秒超时
             .with_request_timeout(15000) // 15秒请求超时
-            .with_reconnect_params(5, 3000) // 最多重连5次，3秒延迟
+            .with_auto_reconnect(5) // 最多重连5次
+            .with_reconnect_delay(3000) // 3秒重连延迟
             // 认证配置已移至 FastClient
             .with_serialization(crate::common::serialization::SerializationConfig {
                 format: crate::common::serialization::SerializationFormat::Protobuf,

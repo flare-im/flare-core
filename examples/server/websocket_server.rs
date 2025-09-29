@@ -2,8 +2,6 @@
 //!
 //! 演示如何创建和运行WebSocket服务端
 
-use tokio::time::sleep;
-use std::time::Duration;
 
 use flare_core::{
     server::{
@@ -21,18 +19,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
     
-    // 创建服务端配置
-    let mut config = ServerConfig::default_websocket();
-    config = config.with_websocket_config(
-        ProtocolConfig::new()
-            .with_listen_addr("127.0.0.1:8080".to_string())
-            .with_max_connections(1000)
-    );
-    config = config.with_connection_timeout_ms(30000);
-    config = config.with_heartbeat_interval_ms(10000);
-    config = config.with_auth_timeout_ms(30000);
-    // 设置使用Protobuf序列化
-    config = config.with_serialization_format(SerializationFormat::Protobuf);
+    // 创建服务端配置 - 优化长时间连接稳定性
+    let config = ServerConfig::default_websocket()
+        .with_websocket_config(
+            ProtocolConfig::new()
+                .with_listen_addr("127.0.0.1:8080".to_string())
+                .with_max_connections(1000)
+        )
+        .with_connection_timeout_ms(120000)  // 2分钟连接超时
+        .with_heartbeat_interval_ms(15000)   // 15秒心跳间隔
+        .with_heartbeat_timeout_ms(60000)    // 60秒心跳超时，与客户端匹配
+        .with_heartbeat_monitoring(60000, 30000) // 1分钟心跳监控超时，30秒清理间隔
+        .with_auth_timeout_ms(30000)
+        .with_serialization_format(SerializationFormat::Protobuf);
     
     // 打印配置信息用于调试
     tracing::info!("服务器配置: {:?}", config);
@@ -57,11 +56,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("WebSocket服务端已启动，监听地址: 127.0.0.1:8080");
     println!("按 Ctrl+C 停止服务端");
     
-    // 运行一段时间
-    sleep(Duration::from_secs(600)).await;
+    // 等待中断信号或长时间运行
+    println!("服务端正在运行，按 Ctrl+C 停止...");
+    
+    // 使用 tokio::signal::ctrl_c() 等待中断信号
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => {
+            println!("\n收到停止信号，正在关闭服务端...");
+        }
+        Err(e) => {
+            eprintln!("等待中断信号时出错: {}", e);
+        }
+    }
     
     // 停止服务端
-    server.stop().await;
+    let _ = server.stop().await;
     
     Ok(())
 }

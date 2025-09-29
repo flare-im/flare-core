@@ -514,6 +514,24 @@ impl UserConnectionManager {
         &self.connection_manager
     }
     
+    /// 启动用户连接管理器的专有任务
+    /// 
+    /// 启动认证超时清理任务
+    async fn start_user_specific_tasks(&self) {
+        // 启动认证超时清理任务
+        self.start_auth_timeout_cleanup_task().await;
+        info!("用户连接管理器专有任务已启动");
+    }
+    
+    /// 停止用户连接管理器的专有任务
+    /// 
+    /// 停止认证超时清理任务
+    async fn stop_user_specific_tasks(&self) {
+        // 这里可以添加停止认证超时清理任务的逻辑
+        // 目前认证超时清理任务没有句柄，所以暂时不需要停止
+        info!("用户连接管理器专有任务已停止");
+    }
+    
     /// 向指定用户发送消息
     pub async fn send_message_to_user(&self, user_id: &str, message: Frame) -> Result<usize> {
         let connections = self.get_user_connections(user_id).await;
@@ -717,5 +735,32 @@ impl ServerConnectionManager for UserConnectionManager {
     /// 获取连接统计信息
     async fn get_connection_stats(&self) -> super::traits::ServerStats {
         self.connection_manager.get_connection_stats().await
+    }
+    
+    /// 启动所有管理任务
+    async fn start_tasks(&self) {
+        // 启动基础连接管理器的任务（心跳检测和定时清理）
+        self.connection_manager.start_tasks().await;
+        
+        // 启动用户连接管理器的专有任务（认证超时清理）
+        self.start_user_specific_tasks().await;
+        
+        info!("用户连接管理器所有任务已启动");
+    }
+    
+    /// 停止所有管理任务
+    async fn stop_tasks(&self) {
+        // 停止用户连接管理器的专有任务
+        self.stop_user_specific_tasks().await;
+        
+        // 停止基础连接管理器的任务
+        self.connection_manager.stop_tasks().await;
+        
+        info!("用户连接管理器所有任务已停止");
+    }
+    
+    /// 检查任务是否正在运行
+    async fn are_tasks_running(&self) -> bool {
+        self.connection_manager.are_tasks_running().await
     }
 }

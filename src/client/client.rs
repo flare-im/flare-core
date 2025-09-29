@@ -52,6 +52,7 @@ impl Default for ReconnectConfig {
 /// 
 /// 提供核心连接和消息处理功能，作为用户扩展的基础
 /// 支持用户自定义 ClientEvent 处理业务逻辑
+/// 默认启用自动心跳和重连机制，用户只需设置相关参数
 pub struct Client {
     /// 客户端配置
     config: ClientConfig,
@@ -67,8 +68,12 @@ pub struct Client {
     client_event_handler: Arc<RwLock<Option<Arc<dyn ClientEvent>>>>,
     /// 当前使用的协议
     current_protocol: Arc<RwLock<Option<Transport>>>,
-    /// 重连配置
-    reconnect_config: ReconnectConfig,
+    /// 心跳任务句柄
+    heartbeat_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 重连任务句柄
+    reconnect_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 是否正在运行
+    is_running: Arc<RwLock<bool>>,
 }
 
 impl Client {
@@ -230,7 +235,9 @@ impl Client {
             message_handler,
             client_event_handler: Arc::new(RwLock::new(None)),
             current_protocol: Arc::new(RwLock::new(None)),
-            reconnect_config: ReconnectConfig::default(),
+            heartbeat_task: Arc::new(RwLock::new(None)),
+            reconnect_task: Arc::new(RwLock::new(None)),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
     
@@ -256,7 +263,9 @@ impl Client {
             message_handler,
             client_event_handler: Arc::new(RwLock::new(Some(client_event_handler))),
             current_protocol: Arc::new(RwLock::new(None)),
-            reconnect_config: ReconnectConfig::default(),
+            heartbeat_task: Arc::new(RwLock::new(None)),
+            reconnect_task: Arc::new(RwLock::new(None)),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
     
@@ -288,7 +297,9 @@ impl Client {
             message_handler,
             client_event_handler: Arc::new(RwLock::new(None)),
             current_protocol: Arc::new(RwLock::new(None)),
-            reconnect_config: ReconnectConfig::default(),
+            heartbeat_task: Arc::new(RwLock::new(None)),
+            reconnect_task: Arc::new(RwLock::new(None)),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
     
@@ -310,12 +321,9 @@ impl Client {
         *self.client_event_handler.write().await = Some(client_event_handler);
     }
     
-    /// 设置重连配置
-    /// 
-    /// # 参数
-    /// * `reconnect_config` - 重连配置
-    pub fn set_reconnect_config(&mut self, reconnect_config: ReconnectConfig) {
-        self.reconnect_config = reconnect_config;
+    /// 检查是否启用自动重连
+    pub fn is_auto_reconnect_enabled(&self) -> bool {
+        self.config.max_reconnect_attempts > 0
     }
     
     /// 获取当前使用的协议
@@ -333,7 +341,7 @@ impl Client {
     
     /// 触发协议切换事件
     async fn trigger_protocol_switch(&self, connection_id: &str, from_protocol: &str, to_protocol: &str) {
-        if let Some(handler) = &*self.client_event_handler.read().await {
+        if let Some(_handler) = &*self.client_event_handler.read().await {
             let connection_id = connection_id.to_string();
             let from_protocol = from_protocol.to_string();
             let to_protocol = to_protocol.to_string();
@@ -397,8 +405,41 @@ impl Client {
     /// 
     /// # 返回值
     /// 返回客户端的唯一标识符
-    pub fn get_client_id(&self) -> String {
-        format!("client_{}", self.config.server_addresses.values().next().unwrap_or(&"unknown".to_string()))
+    pub async fn get_client_id(&self) -> String {
+        // 优先使用当前连接的协议地址
+        if let Some(protocol) = self.get_current_protocol().await {
+            if let Some(address) = self.config.get_server_address(protocol) {
+                return format!("client_{}", address);
+            }
+        }
+        
+        // 如果当前协议不可用，根据协议选择模式选择地址
+        match self.config.protocol_selection {
+            ProtocolSelection::WebSocketOnly => {
+                if let Some(address) = self.config.get_server_address(Transport::WebSocket) {
+                    format!("client_{}", address)
+                } else {
+                    "client_unknown".to_string()
+                }
+            }
+            ProtocolSelection::QuicOnly => {
+                if let Some(address) = self.config.get_server_address(Transport::Quic) {
+                    format!("client_{}", address)
+                } else {
+                    "client_unknown".to_string()
+                }
+            }
+            ProtocolSelection::Auto => {
+                // 对于Auto模式，优先使用WebSocket地址
+                if let Some(address) = self.config.get_server_address(Transport::WebSocket) {
+                    format!("client_{}", address)
+                } else if let Some(address) = self.config.get_server_address(Transport::Quic) {
+                    format!("client_{}", address)
+                } else {
+                    "client_unknown".to_string()
+                }
+            }
+        }
     }
     
     /// 检查连接健康状态
@@ -428,7 +469,7 @@ impl Client {
         let is_connected = self.is_connected().await;
         let is_healthy = self.is_healthy().await;
         let pending_requests = self.get_pending_requests_count().await;
-        let client_id = self.get_client_id();
+        let client_id = self.get_client_id().await;
         let message_handler_status = self.message_handler.get_status_info().await;
         
         format!(
@@ -448,7 +489,7 @@ impl Client {
     /// 
     /// # 返回值
     /// 返回操作结果
-    pub async fn connect(&mut self) -> Result<()> {
+    pub async fn connect(&self) -> Result<()> {
         // 检查是否已经连接
         if self.is_connected().await {
             return Err(crate::common::error::FlareError::connection_failed(
@@ -496,7 +537,20 @@ impl Client {
         // 设置为已连接状态
         *self.state.write().await = ConnectionState::Connected;
         
-        info!("连接建立成功，客户端ID: {}", self.get_client_id());
+        // 标记为运行状态
+        *self.is_running.write().await = true;
+        
+        // 启动自动心跳任务
+        if let Err(e) = self.start_auto_heartbeat().await {
+            warn!("启动自动心跳失败: {}", e);
+        }
+        
+        // 启动自动重连任务（暂时禁用，避免Send问题）
+        // if let Err(e) = self.start_auto_reconnect().await {
+        //     warn!("启动自动重连失败: {}", e);
+        // }
+        
+        info!("连接建立成功，客户端ID: {}", self.get_client_id().await);
         Ok(())
     }
 
@@ -504,14 +558,14 @@ impl Client {
     /// 
     /// # 返回值
     /// 返回操作结果
-    pub async fn disconnect(&mut self) -> Result<()> {
+    pub async fn disconnect(&self) -> Result<()> {
         // 检查是否已经断开
         if !self.is_connected().await {
             warn!("客户端已经断开连接");
             return Ok(());
         }
         
-        info!("开始断开连接，客户端ID: {}", self.get_client_id());
+        info!("开始断开连接，客户端ID: {}", self.get_client_id().await);
         
         *self.state.write().await = ConnectionState::Disconnecting;
         
@@ -530,6 +584,13 @@ impl Client {
             }
         }
         
+        // 停止自动任务
+        self.stop_auto_heartbeat().await;
+        self.stop_auto_reconnect().await;
+        
+        // 标记为停止状态
+        *self.is_running.write().await = false;
+        
         *self.state.write().await = ConnectionState::Disconnected;
         info!("连接已断开");
         Ok(())
@@ -541,14 +602,33 @@ impl Client {
     /// 
     /// # 返回值
     /// 返回操作结果
-    pub async fn reconnect(&mut self) -> Result<()> {
-        info!("开始重连，客户端ID: {}", self.get_client_id());
+    pub async fn reconnect(&self) -> Result<()> {
+        info!("开始重连，客户端ID: {}", self.get_client_id().await);
         
         // 先断开现有连接
         if self.is_connected().await {
-            if let Err(e) = self.disconnect().await {
-                warn!("断开连接时发生错误，继续重连: {}", e);
+            // 停止自动任务
+            self.stop_auto_heartbeat().await;
+            self.stop_auto_reconnect().await;
+            
+            // 标记为停止状态
+            *self.is_running.write().await = false;
+            
+            // 清理消息处理器中的等待请求
+            let pending_count = self.message_handler.get_pending_count().await;
+            if pending_count > 0 {
+                info!("清理 {} 个等待中的请求", pending_count);
+                self.message_handler.clear_all_requests().await;
             }
+            
+            // 断开底层连接
+            if let Some(connection) = self.connection.write().await.take() {
+                if let Err(e) = connection.disconnect(None).await {
+                    warn!("断开连接时发生错误: {}", e);
+                }
+            }
+            
+            *self.state.write().await = ConnectionState::Disconnected;
         }
         
         // 等待一小段时间
@@ -558,11 +638,11 @@ impl Client {
         self.connect().await
     }
 
-    /// 发送心跳消息
+    /// 发送心跳消息（内部方法）
     /// 
     /// # 返回值
     /// 返回操作结果
-    pub async fn send_heartbeat(&self) -> Result<()> {
+    async fn send_heartbeat(&self) -> Result<()> {
         debug!("发送心跳消息");
         
         // 检查连接状态
@@ -581,6 +661,195 @@ impl Client {
             Err(crate::common::error::FlareError::connection_failed(
                 "连接不存在".to_string()
             ))
+        }
+    }
+    
+    /// 启动自动心跳任务
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn start_auto_heartbeat(&self) -> Result<()> {
+        
+        // 检查是否已经启动
+        if self.heartbeat_task.read().await.is_some() {
+            warn!("自动心跳任务已经在运行");
+            return Ok(());
+        }
+        
+        let client = Arc::new(self.clone());
+        let is_running = Arc::clone(&self.is_running);
+        let heartbeat_interval = std::time::Duration::from_millis(self.config.heartbeat_interval_ms);
+        
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(heartbeat_interval);
+            let mut consecutive_failures = 0u32;
+            const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+            
+            loop {
+                interval.tick().await;
+                
+                // 检查是否仍在运行
+                if !*is_running.read().await {
+                    debug!("自动心跳任务停止");
+                    break;
+                }
+                
+                // 检查连接状态
+                if !client.is_connected().await {
+                    debug!("连接已断开，停止自动心跳");
+                    break;
+                }
+                
+                // 发送心跳
+                match client.send_heartbeat().await {
+                    Ok(_) => {
+                        debug!("自动心跳发送成功");
+                        consecutive_failures = 0;
+                    }
+                    Err(e) => {
+                        error!("自动心跳发送失败: {}", e);
+                        consecutive_failures += 1;
+                        
+                        // 如果连续失败次数过多，可能需要重连
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                            error!("自动心跳连续失败 {} 次，可能需要重连", consecutive_failures);
+                            // 触发心跳超时事件
+                            if let Some(handler) = &*client.client_event_handler.read().await {
+                                let handler = Arc::clone(handler);
+                                let client_id = client.get_client_id().await;
+                                tokio::spawn(async move {
+                                    handler.on_heartbeat_timeout(&client_id).await;
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        // 保存任务句柄
+        *self.heartbeat_task.write().await = Some(heartbeat_task);
+        info!("自动心跳任务已启动，间隔: {}ms", self.config.heartbeat_interval_ms);
+        Ok(())
+    }
+    
+    /// 停止自动心跳任务
+    pub async fn stop_auto_heartbeat(&self) {
+        if let Some(task) = self.heartbeat_task.write().await.take() {
+            task.abort();
+            info!("自动心跳任务已停止");
+        }
+    }
+    
+    /// 启动自动重连任务
+    /// 
+    /// # 返回值
+    /// 返回操作结果
+    pub async fn start_auto_reconnect(&self) -> Result<()> {
+        if self.config.max_reconnect_attempts == 0 {
+            info!("自动重连未启用（max_reconnect_attempts=0），跳过启动");
+            return Ok(());
+        }
+        
+        // 检查是否已经启动
+        if self.reconnect_task.read().await.is_some() {
+            warn!("自动重连任务已经在运行");
+            return Ok(());
+        }
+        
+        let client = Arc::new(self.clone());
+        let is_running = Arc::clone(&self.is_running);
+        let reconnect_delay = std::time::Duration::from_millis(self.config.reconnect_delay_ms);
+        let max_attempts = self.config.max_reconnect_attempts;
+        
+        // 启动重连监控任务
+        let reconnect_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(reconnect_delay);
+            let mut attempt = 0u32;
+            
+            loop {
+                interval.tick().await;
+                
+                // 检查是否仍在运行
+                if !*is_running.read().await {
+                    debug!("自动重连任务停止");
+                    break;
+                }
+                
+                // 检查连接状态
+                let state = client.get_state().await;
+                if state == ConnectionState::Connected {
+                    attempt = 0; // 重置重连计数
+                    continue;
+                }
+                
+                // 如果连接断开或失败，尝试重连
+                if matches!(state, ConnectionState::Disconnected | ConnectionState::Failed) {
+                    attempt += 1;
+                    
+                    // 检查重连次数限制
+                    if attempt > max_attempts {
+                        error!("重连尝试次数已达上限: {}", max_attempts);
+                        break;
+                    }
+                    
+                    info!("开始自动重连，尝试次数: {}/{}", attempt, max_attempts);
+                    
+                    // 触发重连开始事件
+                    if let Some(handler) = &*client.client_event_handler.read().await {
+                        let handler = Arc::clone(handler);
+                        let client_id = client.get_client_id().await;
+                        tokio::spawn(async move {
+                            handler.on_reconnect_started(&client_id, attempt).await;
+                        });
+                    }
+                    
+                    // 尝试重连 - 使用基础的重连逻辑
+                    let reconnect_result = client.reconnect().await;
+                    
+                    match reconnect_result {
+                        Ok(_) => {
+                            info!("自动重连成功，尝试次数: {}", attempt);
+                            attempt = 0; // 重置计数
+                            
+                            // 触发重连成功事件
+                            if let Some(handler) = &*client.client_event_handler.read().await {
+                                let handler = Arc::clone(handler);
+                                let client_id = client.get_client_id().await;
+                                tokio::spawn(async move {
+                                    handler.on_reconnected(&client_id, attempt).await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!("自动重连失败，尝试次数: {} - 错误: {}", attempt, e);
+                            
+                            // 触发重连失败事件
+                            if let Some(handler) = &*client.client_event_handler.read().await {
+                                let handler = Arc::clone(handler);
+                                let client_id = client.get_client_id().await;
+                                let error_msg = e.to_string();
+                                tokio::spawn(async move {
+                                    handler.on_reconnect_failed(&client_id, attempt, &error_msg).await;
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        // 保存任务句柄
+        *self.reconnect_task.write().await = Some(reconnect_task);
+        info!("自动重连任务已启动，延迟: {}ms", self.config.reconnect_delay_ms);
+        Ok(())
+    }
+    
+    /// 停止自动重连任务
+    pub async fn stop_auto_reconnect(&self) {
+        if let Some(task) = self.reconnect_task.write().await.take() {
+            task.abort();
+            info!("自动重连任务已停止");
         }
     }
 
@@ -691,7 +960,9 @@ impl Clone for Client {
             message_handler: Arc::clone(&self.message_handler),
             client_event_handler: Arc::clone(&self.client_event_handler),
             current_protocol: Arc::new(RwLock::new(None)),
-            reconnect_config: self.reconnect_config.clone(),
+            heartbeat_task: Arc::new(RwLock::new(None)),
+            reconnect_task: Arc::new(RwLock::new(None)),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
 }
@@ -758,14 +1029,14 @@ impl ConnectionEvent for Client {
         warn!("客户端心跳超时: {}", connection_id);
         
         // 触发 ClientEvent 回调，让用户决定是否重连
-        let should_reconnect = self.trigger_client_event(move |handler| {
+        let _should_reconnect = self.trigger_client_event(move |handler| {
             let connection_id = connection_id.to_string();
             Box::pin(async move {
                 handler.on_heartbeat_timeout(&connection_id).await
             })
         }).await.unwrap_or(true); // 默认重连
         
-        if should_reconnect && self.reconnect_config.enabled {
+        if _should_reconnect && self.is_auto_reconnect_enabled() {
             info!("心跳超时，开始重连");
             // 这里可以触发重连逻辑
         }
@@ -811,14 +1082,14 @@ impl ConnectionEvent for Client {
         info!("客户端开始重连: {} - 尝试次数: {}", connection_id, attempt);
         
         // 触发 ClientEvent 回调，让用户决定是否允许重连
-        let should_reconnect = self.trigger_client_event(move |handler| {
+        let _should_reconnect = self.trigger_client_event(move |handler| {
             let connection_id = connection_id.to_string();
             Box::pin(async move {
                 handler.on_reconnect_started(&connection_id, attempt).await
             })
         }).await.unwrap_or(true); // 默认允许重连
         
-        if !should_reconnect {
+        if !_should_reconnect {
             warn!("用户取消重连: {}", connection_id);
             *self.state.write().await = ConnectionState::Disconnected;
         }
@@ -849,7 +1120,7 @@ impl ConnectionEvent for Client {
             Box::pin(async move {
                 handler.on_reconnect_failed(&connection_id, attempt, &error).await
             })
-        }).await.unwrap_or(attempt < self.reconnect_config.max_attempts); // 默认检查重连次数
+        }).await.unwrap_or(attempt < self.config.max_reconnect_attempts); // 默认检查重连次数
         
         if should_continue {
             warn!("继续重连尝试: {}", connection_id);

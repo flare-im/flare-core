@@ -346,6 +346,12 @@ impl ServerConfig {
         self
     }
     
+    /// 设置心跳超时时间
+    pub fn with_heartbeat_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.heartbeat_timeout_ms = timeout_ms;
+        self
+    }
+    
     /// 设置最大连接数
     pub fn with_max_connections(mut self, max_connections: usize) -> Self {
         self.max_connections = max_connections;

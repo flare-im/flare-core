@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::io::{self, AsyncBufReadExt};
 use tracing::{info, error, warn, debug};
 
 use flare_core::{
     client::{
-        Client,
         config::{ClientConfig, ProtocolSelection},
         event::ClientEvent,
         ClientBuilder,
@@ -17,7 +17,7 @@ use flare_core::{
         connections::{
             types::{Transport},
         },
-        protocol::{Reliability, Frame, commands::{Command, MessageCmd, MessageSendCommand}},
+        protocol::{Reliability, commands::{Command, MessageCmd, MessageSendCommand}},
         serialization::{SerializationFormat, SerializationConfig},
     },
 };
@@ -197,15 +197,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 设置事件处理器
     let event_handler = Arc::new(WebSocketClientEventHandler::new("Client WebSocket客户端".to_string()));
     
-    // 创建客户端配置
+    // 创建客户端配置 - 简化配置，心跳和重连默认启用
     let config = ClientConfig::default()
         .with_protocol_selection(ProtocolSelection::WebSocketOnly)
         .with_server_address(Transport::WebSocket, "ws://127.0.0.1:8080".to_string())
-        .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
-        .with_serialization(serialization_config);
+        .with_heartbeat(15000, 60000)  // 15秒心跳，60秒超时
+        .with_serialization(serialization_config)
+        .with_auto_reconnect(10)       // 最多重连10次
+        .with_reconnect_delay(2000);   // 2秒重连延迟
     
     // 创建客户端实例
-    let mut client = ClientBuilder::new(config)
+    let client = ClientBuilder::new(config)
         .with_client_event_handler(event_handler)
         .build();
     
@@ -228,64 +230,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    // 发送测试消息
-    info!("发送测试消息...");
-    for i in 1..=5 {
-        let message_id = format!("msg_{}", i);
-        let send_cmd = MessageSendCommand::new(
-            format!("Hello from Client WebSocket client! Message #{}", i).into_bytes()
-        );
-        let command = Command::Message(MessageCmd::Send(send_cmd));
-        
-        if let Err(e) = client.send_fire_and_forget(
-            |_| Ok(command.clone()),
-            Reliability::AtLeastOnce
-        ).await {
-            error!("发送测试消息 #{} 失败: {}", i, e);
-        } else {
-            info!("测试消息 #{} 已发送", i);
-        }
-        
-        // 等待一段时间
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
+    // 客户端现在有自动心跳和重连功能，无需手动管理
+    info!("客户端已启用自动心跳和重连功能");
+    info!("- 自动心跳间隔: {}ms", client.get_config().heartbeat_interval_ms);
+    info!("- 心跳超时: {}ms", client.get_config().heartbeat_timeout_ms);
+    info!("- 自动重连: {}", if client.is_auto_reconnect_enabled() { 
+        format!("启用 (最多{}次)", client.get_config().max_reconnect_attempts) 
+    } else { "禁用".to_string() });
+    info!("- 重连延迟: {}ms", client.get_config().reconnect_delay_ms);
     
-    // 启动心跳任务
-    info!("启动心跳任务...");
-    let client_clone = client.clone();
-    let heartbeat_interval = std::time::Duration::from_secs(5); // 5秒心跳间隔
-    
-    let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(heartbeat_interval);
+    // 启动交互式模式
+    info!("启动用户输入处理（交互式模式）...");
+    let client_input = client.clone();
+    let input_task = tokio::spawn(async move {
+        let stdin = io::stdin();
+        let mut reader = io::BufReader::new(stdin);
+        let mut line = String::new();
+        
+        println!("\n=== WebSocket 客户端交互模式 ===");
+        println!("输入消息发送到服务器，输入 'quit' 或 'exit' 退出");
+        println!("输入 'status' 查看连接状态");
+        println!("输入 'ping' 查看心跳状态（自动心跳已启用）");
+        println!("=====================================\n");
+        
         loop {
-            interval.tick().await;
-            
-            // 检查连接状态
-            if client_clone.is_connected().await {
-                match client_clone.send_heartbeat().await {
-                    Ok(_) => {
-                        info!("心跳发送成功");
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    // EOF
+                    info!("输入流结束");
+                    break;
+                }
+                Ok(_) => {
+                    let input = line.trim();
+                    
+                    // 处理特殊命令
+                    match input.to_lowercase().as_str() {
+                        "quit" | "exit" => {
+                            info!("用户请求退出");
+                            break;
+                        }
+                        "status" => {
+                            let is_connected = client_input.is_connected().await;
+                            let state = client_input.get_state().await;
+                            println!("连接状态: {:?}, 已连接: {}", state, is_connected);
+                            continue;
+                        }
+                        "ping" => {
+                            let is_connected = client_input.is_connected().await;
+                            let config = client_input.get_config();
+                            println!("💓 心跳状态: {}", if is_connected { "正常" } else { "断开" });
+                            println!("   - 心跳间隔: {}ms", config.heartbeat_interval_ms);
+                            println!("   - 心跳超时: {}ms", config.heartbeat_timeout_ms);
+                            continue;
+                        }
+                        "" => continue, // 空输入跳过
+                        _ => {} // 继续处理普通消息
                     }
-                    Err(e) => {
-                        error!("心跳发送失败: {}", e);
+                    
+                    // 发送用户输入的消息
+                    let send_cmd = MessageSendCommand::new(input.as_bytes().to_vec());
+                    let command = Command::Message(MessageCmd::Send(send_cmd));
+                    
+                    match client_input.send_fire_and_forget(
+                        |_| Ok(command),
+                        Reliability::AtLeastOnce
+                    ).await {
+                        Ok(_) => {
+                            println!("✅ 消息已发送: {}", input);
+                        }
+                        Err(e) => {
+                            println!("❌ 发送消息失败: {}", e);
+                        }
                     }
                 }
-            } else {
-                warn!("连接已断开，停止心跳任务");
-                break;
+                Err(e) => {
+                    error!("读取用户输入失败: {}", e);
+                    break;
+                }
             }
         }
     });
     
-    // 等待一段时间以接收响应
-    info!("等待 30 秒接收服务器响应...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    // 等待用户输入任务完成
+    info!("等待用户输入...");
+    input_task.await?;
     
-    // 停止心跳任务
-    info!("停止心跳任务...");
-    heartbeat_task.abort();
-    
-    // 停止客户端
+    // 停止客户端（自动心跳和重连任务会自动停止）
     info!("正在停止客户端...");
     if let Err(e) = client.disconnect().await {
         error!("停止客户端时发生错误: {}", e);

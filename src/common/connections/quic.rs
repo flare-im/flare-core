@@ -214,17 +214,8 @@ impl QuicConnection {
             let stats = Arc::clone(&stats);
             let heartbeat_interval = Duration::from_millis(config.heartbeat_interval_ms);
             
-            // 根据角色选择心跳超时配置
-            let heartbeat_timeout = if config.role == crate::common::connections::types::ConnectionRole::Client {
-                Duration::from_millis(config.heartbeat_timeout_ms)
-            } else {
-                // 服务端使用服务端特定配置
-                if let Some(server_config) = &config.server_config {
-                    Duration::from_millis(server_config.heartbeat_monitor_timeout_ms)
-                } else {
-                    Duration::from_millis(config.heartbeat_timeout_ms) // 回退到默认值
-                }
-            };
+            // 统一使用heartbeat_timeout_ms配置，确保服务端和客户端使用相同的超时时间
+            let heartbeat_timeout = Duration::from_millis(config.heartbeat_timeout_ms);
             
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(heartbeat_interval);

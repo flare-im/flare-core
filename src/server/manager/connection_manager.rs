@@ -77,6 +77,8 @@ pub struct ConnectionManager {
     heartbeat_config: HeartbeatConfig,
     /// 心跳检测任务句柄
     heartbeat_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 清理任务句柄
+    cleanup_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// 是否正在运行
     is_running: Arc<RwLock<bool>>,
 }
@@ -273,6 +275,21 @@ impl ServerConnectionManager for ConnectionManager {
             uptime: stats.uptime(),
         }
     }
+    
+    /// 启动所有管理任务
+    async fn start_tasks(&self) {
+        self.start_all_tasks().await;
+    }
+    
+    /// 停止所有管理任务
+    async fn stop_tasks(&self) {
+        self.stop_all_tasks().await;
+    }
+    
+    /// 检查任务是否正在运行
+    async fn are_tasks_running(&self) -> bool {
+        self.are_tasks_running().await
+    }
 }
 
 impl ConnectionManager {
@@ -305,6 +322,7 @@ impl ConnectionManager {
             })),
             heartbeat_config: config,
             heartbeat_task: Arc::new(RwLock::new(None)),
+            cleanup_task: Arc::new(RwLock::new(None)),
             is_running: Arc::new(RwLock::new(false)),
         }
         // 注意：心跳任务需要在异步环境中手动启动
@@ -441,6 +459,90 @@ impl ConnectionManager {
     pub async fn is_heartbeat_running(&self) -> bool {
         let is_running = self.is_running.read().await;
         *is_running
+    }
+    
+    /// 启动所有管理任务
+    /// 
+    /// 启动心跳检测和定时清理任务
+    pub async fn start_all_tasks(&self) {
+        // 启动心跳任务
+        self.start_heartbeat_task().await;
+        
+        // 启动清理任务
+        self.start_cleanup_task().await;
+        
+        info!("所有连接管理任务已启动");
+    }
+    
+    /// 停止所有管理任务
+    /// 
+    /// 停止心跳检测和定时清理任务
+    pub async fn stop_all_tasks(&self) {
+        // 停止心跳任务
+        self.stop_heartbeat_task().await;
+        
+        // 停止清理任务
+        self.stop_cleanup_task().await;
+        
+        info!("所有连接管理任务已停止");
+    }
+    
+    /// 检查所有任务是否正在运行
+    /// 
+    /// # 返回值
+    /// 
+    /// 如果任务正在运行则返回true，否则返回false
+    pub async fn are_tasks_running(&self) -> bool {
+        let is_running = self.is_running.read().await;
+        *is_running
+    }
+    
+    /// 启动定时清理任务
+    /// 
+    /// 定期清理不活跃的连接
+    pub async fn start_cleanup_task(&self) {
+        if !self.heartbeat_config.enable_auto_cleanup {
+            return;
+        }
+        
+        let manager = self.clone();
+        let cleanup_interval = self.heartbeat_config.check_interval; // 使用心跳检测间隔作为清理间隔
+        
+        let cleanup_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                interval.tick().await;
+                
+                // 检查是否仍在运行
+                {
+                    let is_running = manager.is_running.read().await;
+                    if !*is_running {
+                        break;
+                    }
+                }
+                
+                // 执行清理
+                let timeout = manager.heartbeat_config.connection_timeout;
+                let removed_count = manager.cleanup_inactive_connections(timeout).await;
+                if removed_count > 0 {
+                    info!("定时清理了 {} 个不活跃连接", removed_count);
+                }
+            }
+        });
+        
+        // 保存清理任务句柄
+        *self.cleanup_task.write().await = Some(cleanup_task);
+        info!("定时清理任务已启动，间隔: {:?}", cleanup_interval);
+    }
+    
+    /// 停止定时清理任务
+    /// 
+    /// 停止定时清理任务
+    pub async fn stop_cleanup_task(&self) {
+        if let Some(task) = self.cleanup_task.write().await.take() {
+            task.abort();
+            info!("定时清理任务已停止");
+        }
     }
 }
 

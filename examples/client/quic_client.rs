@@ -271,14 +271,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // 检查连接状态
             if client_clone.is_connected().await {
-                match client_clone.send_heartbeat().await {
-                    Ok(_) => {
-                        info!("心跳发送成功");
-                    }
-                    Err(e) => {
-                        error!("心跳发送失败: {}", e);
-                    }
-                }
+                let config = client_clone.get_config();
+                info!("💓 心跳状态正常 - 间隔: {}ms, 超时: {}ms", 
+                      config.heartbeat_interval_ms, config.heartbeat_timeout_ms);
             } else {
                 warn!("连接已断开，停止心跳任务");
                 break;

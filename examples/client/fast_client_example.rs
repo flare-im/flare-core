@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  - WebSocket地址: {:?}", config.get_server_address(flare_core::common::connections::types::Transport::WebSocket));
     info!("  - QUIC地址: {:?}", config.get_server_address(flare_core::common::connections::types::Transport::Quic));
     info!("  - 心跳间隔: {}ms", config.heartbeat_interval_ms);
-    info!("  - 自动重连: {}", config.enable_auto_reconnect);
+    info!("  - 自动重连: {}次", config.max_reconnect_attempts);
     info!("  - 序列化格式: {:?}", config.serialization_config.format);
     
     // 创建自定义事件处理器
