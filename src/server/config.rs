@@ -20,6 +20,10 @@ pub struct TlsConfig {
     pub cert_path: String,
     /// 私钥文件路径
     pub key_path: String,
+    /// 是否要求客户端证书（双向TLS）
+    pub require_client_auth: bool,
+    /// 客户端CA证书路径（用于验证客户端证书）
+    pub client_ca_cert_path: Option<String>,
 }
 
 impl TlsConfig {
@@ -28,6 +32,8 @@ impl TlsConfig {
         Self {
             cert_path,
             key_path,
+            require_client_auth: false,
+            client_ca_cert_path: None,
         }
     }
 }
@@ -547,6 +553,8 @@ impl ServerConfig {
                 let mut quic_protocol_config = conn_config.protocol_config.quic.clone();
                 quic_protocol_config.server.cert_path = tls_config.cert_path.clone();
                 quic_protocol_config.server.key_path = tls_config.key_path.clone();
+                quic_protocol_config.server.require_client_auth = tls_config.require_client_auth;
+                quic_protocol_config.server.client_ca_cert_path = tls_config.client_ca_cert_path.clone();
                 
                 // 应用性能配置到QUIC配置
                 if self.performance_config.enable_zero_copy {

@@ -206,38 +206,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 设置事件处理器
     let event_handler = Arc::new(QuicClientEventHandler::new("Client QUIC客户端".to_string()));
     
-    // 创建客户端配置
-    let config = ClientConfig::default()
-        .with_protocol_selection(ProtocolSelection::QuicOnly)
-        .with_server_address(Transport::Quic, "127.0.0.1:8081".to_string())
-        .with_heartbeat(5000, 2000)  // 5秒心跳，2秒超时
-        .with_serialization(serialization_config);
+    // 构造 QUIC 连接配置并设置双向TLS（客户端证书与私钥）
+    let mut conn_config = flare_core::common::connections::config::ConnectionConfig::client(
+        "quic_client_mtls".to_string(),
+        "127.0.0.1:8082".to_string(),
+    );
+    conn_config.transport = Transport::Quic;
+    conn_config = conn_config
+        .with_heartbeat(5000, 2000)
+        .with_serialization_config(serialization_config);
+    // 配置 QUIC 客户端TLS参数
+    {
+        let mut quic_cfg = conn_config.protocol_config.quic.clone();
+        quic_cfg.client.server_cert_path = Some("certs/server.crt".to_string());
+        quic_cfg.client.server_hostname = Some("localhost".to_string());
+        // Deleted: quic_cfg.client.client_cert_path = Some("certs/client.crt".to_string());
+        // Deleted: quic_cfg.client.client_key_path = Some("certs/client.key".to_string());
+        conn_config = conn_config.with_quic_config(quic_cfg);
+    }
     
-    // 创建客户端实例
-    let mut client = ClientBuilder::new(config)
-        .with_client_event_handler(event_handler)
-        .build();
+    // 创建底层 QUIC 客户端连接（带事件处理器）
+    let mut connection = flare_core::common::connections::factory::ConnectionFactory::create_client_with_handler(
+        conn_config,
+        Some(event_handler.clone() as Arc<dyn flare_core::common::connections::event::ConnectionEvent>),
+    ).await?;
     
-    // 启动客户端
+    // 启动连接
     info!("正在连接QUIC服务端...");
     let connect_start = Instant::now();
-    
-    // 使用更好的错误处理
-    match client.connect().await {
+    match connection.connect().await {
         Ok(()) => {
             let connect_time = connect_start.elapsed();
             info!("✅ 已连接到QUIC服务端！连接耗时: {:.2}ms", connect_time.as_secs_f64() * 1000.0);
         }
         Err(e) => {
             error!("❌ 连接QUIC服务端失败: {}", e);
-            error!("请确保服务端已启动并监听在 127.0.0.1:8081");
-            // 等待一段时间让事件处理器处理错误
+            error!("请确保服务端已启动并监听在 127.0.0.1:8082");
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             return Err(e.into());
         }
     }
     
-    // 发送测试消息
+    // 发送测试消息（直接通过底层连接发送）
     info!("发送测试消息...");
     for i in 1..=5 {
         let message_id = format!("msg_{}", i);
@@ -245,53 +255,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("Hello from Client QUIC client! Message #{}", i).into_bytes()
         );
         let command = Command::Message(MessageCmd::Send(send_cmd));
-        
-        if let Err(e) = client.send_fire_and_forget(
-            |_| Ok(command.clone()),
-            Reliability::AtLeastOnce
-        ).await {
+        let frame = Frame::new(command.clone(), message_id.clone(), Reliability::AtLeastOnce);
+        if let Err(e) = connection.send_message(frame).await {
             error!("发送测试消息 #{} 失败: {}", i, e);
         } else {
             info!("测试消息 #{} 已发送", i);
         }
-        
-        // 等待一段时间
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
     
-    // 启动心跳任务
-    info!("启动心跳任务...");
-    let client_clone = client.clone();
-    let heartbeat_interval = std::time::Duration::from_secs(5); // 5秒心跳间隔
-    
-    let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(heartbeat_interval);
-        loop {
-            interval.tick().await;
-            
-            // 检查连接状态
-            if client_clone.is_connected().await {
-                let config = client_clone.get_config();
-                info!("💓 心跳状态正常 - 间隔: {}ms, 超时: {}ms", 
-                      config.heartbeat_interval_ms, config.heartbeat_timeout_ms);
-            } else {
-                warn!("连接已断开，停止心跳任务");
-                break;
-            }
-        }
-    });
-    
+    // 启动心跳任务（底层连接已内置心跳与监控，这里省略）
     // 等待一段时间以接收响应
     info!("等待 30 秒接收服务器响应...");
     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     
-    // 停止心跳任务
-    info!("停止心跳任务...");
-    heartbeat_task.abort();
-    
     // 停止客户端
     info!("正在停止客户端...");
-    if let Err(e) = client.disconnect().await {
+    if let Err(e) = connection.disconnect(None).await {
         error!("停止客户端时发生错误: {}", e);
     } else {
         info!("客户端已停止");

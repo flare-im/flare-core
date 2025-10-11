@@ -17,7 +17,7 @@ use crate::common::{error::Result, connections::{
 use crate::Connection;
 use quinn::{Endpoint, ClientConfig, ServerConfig};
 use rustls::client::danger::ServerCertVerifier;
-use rustls_pemfile::certs;
+use rustls_pemfile::{certs, private_key};
 use tokio::net::TcpStream;
 use tokio_tungstenite::accept_async;
 
@@ -183,10 +183,10 @@ impl ConnectionFactory {
             // 读取服务器证书
             let cert_file = fs::File::open(cert_path)
                 .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法读取服务器证书文件 {}: {}", cert_path, e)))?;
-            let cert_reader = &mut BufReader::new(cert_file);
+            let mut cert_reader = BufReader::new(cert_file);
 
             // 解析证书
-            let cert_der = certs(cert_reader)
+            let cert_der = certs(&mut cert_reader)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| crate::common::error::FlareError::connection_failed(format!("解析服务器证书失败: {}", e)))?;
 
@@ -197,11 +197,42 @@ impl ConnectionFactory {
                     .map_err(|e| crate::common::error::FlareError::connection_failed(format!("添加证书到根证书存储失败: {}", e)))?;
             }
 
-            // 使用quinn的with_root_certificates方法
-            let client_config = ClientConfig::with_root_certificates(Arc::new(root_store))
-                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建客户端配置失败: {}", e)))?;
+            // 如果提供了客户端证书与私钥，则启用双向TLS
+            let rustls_cfg = if let (Some(client_cert_path), Some(client_key_path)) =
+                (quic_config.client_cert_path.as_ref(), quic_config.client_key_path.as_ref())
+            {
+                // 读取客户端证书与私钥
+                let client_cert_file = fs::File::open(client_cert_path)
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法读取客户端证书文件 {}: {}", client_cert_path, e)))?;
+                let client_key_file = fs::File::open(client_key_path)
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法读取客户端私钥文件 {}: {}", client_key_path, e)))?;
 
-            Ok(client_config)
+                let mut cc_reader = BufReader::new(client_cert_file);
+                let mut ck_reader = BufReader::new(client_key_file);
+
+                let client_chain = certs(&mut cc_reader)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("解析客户端证书失败: {}", e)))?;
+                let client_key = rustls_pemfile::private_key(&mut ck_reader)?
+                    .ok_or_else(|| crate::common::error::FlareError::connection_failed("未找到客户端私钥".to_string()))?;
+
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_client_auth_cert(client_chain, client_key)
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("构建客户端TLS配置失败(双向TLS): {}", e)))?
+            } else {
+                // 仅服务端验证，不携带客户端证书
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth()
+            };
+
+            let quinn_config = ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(rustls_cfg)
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("QUIC 客户端配置失败: {}", e)))?
+            ));
+
+            Ok(quinn_config)
         } else {
             // 默认使用跳过验证的配置
             let client_config_builder = rustls::ClientConfig::builder()
@@ -454,10 +485,34 @@ impl ConnectionFactory {
             .map_err(|e| crate::common::error::FlareError::connection_failed(format!("解析服务端证书失败: {}", e)))?;
         let key = rustls_pemfile::private_key(key_reader)?.unwrap();
         
-        let server_crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)
-            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建服务端TLS配置失败: {}", e)))?;
+        let server_crypto = if quic_config.require_client_auth {
+            // 加载客户端CA证书
+            let ca_path = quic_config.client_ca_cert_path.as_ref()
+                .ok_or_else(|| crate::common::error::FlareError::connection_failed("启用客户端证书校验但未提供CA证书路径".to_string()))?;
+            let ca_file = fs::File::open(ca_path)
+                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("无法读取客户端CA证书文件 {}: {}", ca_path, e)))?;
+            let mut ca_reader = BufReader::new(ca_file);
+            let ca_certs = rustls_pemfile::certs(&mut ca_reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("解析客户端CA证书失败: {}", e)))?;
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in ca_certs {
+                root_store.add(rustls::pki_types::CertificateDer::from(cert))
+                    .map_err(|e| crate::common::error::FlareError::connection_failed(format!("添加CA证书到根证书存储失败: {}", e)))?;
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+                .build()
+                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建客户端证书验证器失败: {}", e)))?;
+            rustls::ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert_chain, key)
+                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建服务端TLS配置失败: {}", e)))?
+        } else {
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, key)
+                .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建服务端TLS配置失败: {}", e)))?
+        };
         
         let server_cfg = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| crate::common::error::FlareError::connection_failed(format!("创建QUIC服务端配置失败: {}", e)))?));

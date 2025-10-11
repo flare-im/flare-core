@@ -100,6 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.protocol_config.quic.client.server_cert_path = Some("certs/server.crt".to_string());
     config.protocol_config.quic.client.skip_server_verification = false; // 启用服务器验证
     config.protocol_config.quic.client.server_hostname = Some("localhost".to_string()); // 设置服务器主机名
+    // 配置客户端证书与私钥（双向TLS）
+    config.protocol_config.quic.client.client_cert_path = Some("certs/client.crt".to_string());
+    config.protocol_config.quic.client.client_key_path = Some("certs/client.key".to_string());
     
     // 使用ConnectionFactory创建QUIC客户端连接
     let mut client_connection = ConnectionFactory::create_client(config).await?;

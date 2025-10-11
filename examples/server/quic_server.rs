@@ -36,10 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cert_path = "certs/server.crt";  // 请替换为实际的证书路径
     let key_path = "certs/server.key";    // 请替换为实际的私钥路径
     
-    let tls_config = TlsConfig::new(
+    let mut tls_config = TlsConfig::new(
         cert_path.to_string(),
         key_path.to_string(),
     );
+    // 禁用客户端证书校验，仅验证服务端证书
+    tls_config.require_client_auth = false;
+    tls_config.client_ca_cert_path = None;
     
     // 创建服务端配置
     let mut config = ServerConfig::default_quic(
@@ -50,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 更新QUIC配置
     config = config.with_quic_config(
         ProtocolConfig::new()
-            .with_listen_addr("127.0.0.1:8081".to_string())
+            .with_listen_addr("127.0.0.1:8082".to_string())
             .with_max_connections(1000)
             .with_tls_config(tls_config)
     );

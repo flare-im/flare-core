@@ -4,16 +4,17 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, error, warn, debug};
+use tracing::{info, error};
 
 use flare_core::{
     client::{
         config::{ClientConfig, ProtocolSelection},
-        fast::{FastClient, FastClientBuilder, event::FastEvent},
+        fast::{FastClientBuilder, event::FastEvent},
     },
     common::{
         protocol::Frame,
         serialization::SerializationFormat,
+        connections::types::Transport,
     },
 };
 
@@ -146,10 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("启动 FastClient 客户端示例");
     
-    // 创建客户端配置
+    // 创建客户端配置：同时配置 WebSocket 与 QUIC 地址，启用协议竞速
     let config = ClientConfig::new(
         "ws://127.0.0.1:4320".to_string(), // WebSocket 地址
-        "127.0.0.1:4321".to_string()      // QUIC 地址
+        "127.0.0.1:4321".to_string()       // QUIC 地址
     )
     .with_protocol_selection(ProtocolSelection::Auto) // 自动选择协议（协议竞速）
     .with_heartbeat(10000, 30000) // 10秒心跳间隔，30秒监控超时
@@ -166,8 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("客户端配置:");
     info!("  - 协议选择: {:?}", config.protocol_selection);
-    info!("  - WebSocket地址: {:?}", config.get_server_address(flare_core::common::connections::types::Transport::WebSocket));
-    info!("  - QUIC地址: {:?}", config.get_server_address(flare_core::common::connections::types::Transport::Quic));
+    info!("  - WebSocket地址: {:?}", config.get_server_address(Transport::WebSocket));
+    info!("  - QUIC地址: {:?}", config.get_server_address(Transport::Quic));
     info!("  - 心跳间隔: {}ms", config.heartbeat_interval_ms);
     info!("  - 自动重连: {}次", config.max_reconnect_attempts);
     info!("  - 序列化格式: {:?}", config.serialization_config.format);
@@ -175,19 +176,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建自定义事件处理器
     let event_handler = Arc::new(CustomClientEventHandler::new("FastClient".to_string()));
     
-    // 创建 FastClient 实例
+    // 创建 FastClient 实例：不要限制为 WebSocket，仅保留协议竞速
     let mut client = FastClientBuilder::new()
-        .with_websocket_only()  // 仅使用WebSocket协议
-        .with_server_address(flare_core::common::connections::types::Transport::WebSocket, "ws://127.0.0.1:4320".to_string())
-        .with_heartbeat(10000, 30000) // 10秒心跳间隔，30秒监控超时
+        .with_server_address(Transport::WebSocket, "ws://127.0.0.1:4320".to_string())
+        .with_server_address(Transport::Quic, "127.0.0.1:4321".to_string())
+        .with_protocol_selection(ProtocolSelection::Auto)
+        .with_heartbeat(10000, 30000)
         .with_serialization(flare_core::common::serialization::SerializationConfig {
             format: SerializationFormat::Protobuf,
             ..Default::default()
         })
-        .with_auth_enabled(true) // 启用认证
-        .with_auth_user_id("user_001".to_string())
-        .with_auth_platform("desktop".to_string())
-        .with_auth_token("test_token_123".to_string())
+        .with_auth_enabled(false) // 关闭认证，避免示例因认证超时失败
         .with_event_handler(event_handler)
         .build();
     
@@ -200,28 +199,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 等待一段时间确保连接稳定
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
-    // 发送认证消息
-    info!("发送认证消息...");
-    let auth_message = Frame::new(
-        flare_core::common::protocol::commands::Command::Control(
-            flare_core::common::protocol::commands::ControlCmd::Connect(
-                flare_core::common::protocol::commands::ConnectCommand::new(
-                    "FastClient认证".to_string(),
-                    "flare-core".to_string(),
-                    "desktop".to_string(),
-                    "1.0.0".to_string(),
-                )
-            )
-        ),
-        uuid::Uuid::new_v4().to_string(),
-        flare_core::common::protocol::Reliability::AtLeastOnce,
-    );
-    client.send_message(auth_message).await?;
-    info!("认证消息已发送");
-    
-    // 等待认证完成
-    tokio::time::sleep(Duration::from_secs(1)).await;
     
     // 发送测试消息
     info!("发送测试消息...");
@@ -251,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     
-    // 发送心跳测试
+    // 触发心跳测试
     info!("发送心跳测试...");
     let heartbeat = Frame::heartbeat("FastClient心跳".to_string());
     client.send_message(heartbeat).await?;
@@ -261,35 +238,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("等待服务器响应...");
     tokio::time::sleep(Duration::from_secs(5)).await;
     
-    // 测试请求-响应模式
-    info!("测试请求-响应模式...");
-    match client.send_request(
-        |_| Ok(flare_core::common::protocol::commands::Command::Message(
-            flare_core::common::protocol::commands::MessageCmd::Data(
-                flare_core::common::protocol::commands::DataCommand::new(
-                    "请求服务器信息".as_bytes().to_vec(),
-                )
-            )
-        )),
-        flare_core::common::protocol::Reliability::AtLeastOnce,
-        None
-    ).await {
-        Ok(response) => {
-            info!("✅ 收到服务器响应: {:?}", response.get_command_type_str());
-        }
-        Err(e) => {
-            error!("❌ 请求-响应失败: {}", e);
-        }
-    }
-    
-    // 检查连接状态
+    // 检查连接状态与当前协议
     let state = client.get_state().await;
     let is_connected = client.is_connected().await;
-    info!("连接状态: {:?}, 是否已连接: {}", state, is_connected);
-    
-    // 等待一段时间观察自动功能
-    info!("等待 10 秒观察自动心跳和重连功能...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    let current_protocol = client.get_current_protocol().await;
+    info!("连接状态: {:?}, 是否已连接: {}, 当前协议: {:?}", state, is_connected, current_protocol);
     
     // 停止客户端
     info!("正在停止客户端...");

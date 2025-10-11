@@ -139,6 +139,10 @@ pub struct QuicClientConfig {
     pub skip_server_verification: bool,
     /// 服务器主机名（用于 SNI 和证书验证）
     pub server_hostname: Option<String>,
+    /// 客户端证书路径（用于双向TLS）
+    pub client_cert_path: Option<String>,
+    /// 客户端私钥路径（用于双向TLS）
+    pub client_key_path: Option<String>,
 }
 
 /// QUIC 服务端配置
@@ -158,6 +162,10 @@ pub struct QuicServerConfig {
     pub key_path: String,
     /// 服务端主机名（用于证书验证）
     pub server_hostname: Option<String>,
+    /// 是否要求客户端证书（双向TLS）
+    pub require_client_auth: bool,
+    /// 客户端CA证书路径（用于验证客户端证书）
+    pub client_ca_cert_path: Option<String>,
 }
 
 /// QUIC 配置（统一配置，根据角色使用不同部分）
@@ -226,6 +234,8 @@ impl Default for QuicClientConfig {
             server_cert_path: None,
             skip_server_verification: false,
             server_hostname: Some("localhost".to_string()),
+            client_cert_path: None,
+            client_key_path: None,
         }
     }
 }
@@ -240,6 +250,8 @@ impl Default for QuicServerConfig {
             cert_path: "certs/server.crt".to_string(),
             key_path: "certs/server.key".to_string(),
             server_hostname: Some("localhost".to_string()),
+            require_client_auth: false,
+            client_ca_cert_path: None,
         }
     }
 }
