@@ -11,71 +11,17 @@ homepage = "https://flare-core.dev"
 documentation = "https://docs.rs/flare-core"
 readme = "README.md"
 
-# Common examples
 [[example]]
-name = "quic_client_example"
-path = "examples/common/quic_client_example.rs"
-
+name = "chat_room_server"
+path = "examples/chat_room/server.rs"
 
 [[example]]
-name = "quic_server_example"
-path = "examples/common/quic_server_example.rs"
+name = "chat_room_client"
+path = "examples/chat_room/client.rs"
 
 [[example]]
-name = "cert_generator"
-path = "examples/common/cert_generator.rs"
-
-
-[[example]]
-name = "websocket_client_example"
-path = "examples/common/websocket_client_example.rs"
-
-[[example]]
-name = "websocket_server_example"
-path = "examples/common/websocket_server_example.rs"
-
-[[example]]
-name = "quic_custom_hostname_example"
-path = "examples/common/quic_custom_hostname_example.rs"
-
-
-# Client examples
-[[example]]
-name = "quic_client"
-path = "examples/client/quic_client.rs"
-
-[[example]]
-name = "websocket_client"
-path = "examples/client/websocket_client.rs"
-
-[[example]]
-name = "fast_client_example"
-path = "examples/client/fast_client_example.rs"
-
-
-
-# Server examples
-[[example]]
-name = "quic_server"
-path = "examples/server/quic_server.rs"
-
-[[example]]
-name = "websocket_server"
-path = "examples/server/websocket_server.rs"
-
-[[example]]
-name = "config_example"
-path = "examples/server/config_example.rs"
-
-[[example]]
-name = "connection_test"
-path = "examples/server/connection_test.rs"
-
-[[example]]
-name = "fast_server_example"
-path = "examples/server/fast_server_example.rs"
-
-
+name = "architecture_demo"
+path = "examples/architecture_demo.rs"
 
 # === 示例配置说明 ===
 #
@@ -131,7 +77,7 @@ prost-types = "0.14.1"
 
 # 网络相关（默认可用）
 quinn = "0.11"
-tokio-tungstenite = "0.27.0"
+tokio-tungstenite = "0.28.0"
 
 # TLS（与网络功能配合）
 rustls = { version = "0.23.31", features = ["ring"] }
@@ -165,6 +111,7 @@ flate2 = "1.0.28"
 
 # 随机数生成（测试用）
 fastrand = "2.0"
+rand = "0.9"
 
 # UUID生成
 uuid = { version = "1.0", features = ["v4"] }
@@ -186,6 +133,10 @@ hex = "0.4.3"
 
 # 并发哈希映射（服务器连接管理需要）
 dashmap = "6.0.1"
+
+# 字节缓冲区（零拷贝优化需要）
+bytes = "1.7.0"
+futures = "0.3"
 
 [build-dependencies]
 prost-build = "0.13.0"

@@ -261,13 +261,11 @@ pub struct NotificationCommand {
 pub struct ErrorCommand {
     #[prost(int32, tag = "1")]
     pub status: i32,
-    #[prost(uint32, tag = "2")]
-    pub code: u32,
-    #[prost(string, tag = "3")]
+    #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
-    #[prost(string, tag = "4")]
+    #[prost(string, tag = "3")]
     pub reason: ::prost::alloc::string::String,
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub details: ::prost::alloc::string::String,
 }
 /// 事件命令

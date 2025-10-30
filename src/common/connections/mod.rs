@@ -1,24 +1,21 @@
-//! 连接模块
-//! 
-//! 提供统一的连接抽象和多种协议实现
+//! 通用连接模块
+//!
+//! 该模块提供了统一的连接抽象层，屏蔽底层协议（WebSocket、QUIC等）的差异，
+//! 提供一致的API和功能。
 
+pub mod config;
+pub mod enums;
 pub mod traits;
 pub mod types;
-pub mod event;
+pub mod stats;
+pub mod monitor;
+pub mod heartbeat;
 pub mod factory;
-pub mod builder;
+pub mod enhanced;
 pub mod manager;
-pub mod pool;
+pub mod base;
 pub mod websocket;
 pub mod quic;
-pub mod enums;
-pub mod config;
-
-// 重新导出常用的类型，保持对外接口稳定
-pub use traits::{Connection, ClientConnection, ServerConnection, ConnectionEvent};
-pub use types::{ConnectionConfig, ConnectionState, Transport, ConnectionRole};
-pub use event::{DefConnectionEventHandler};
-pub use factory::ConnectionFactory;
-pub use builder::ConnectionBuilder;
-pub use manager::ConnectionManager;
-pub use pool::ConnectionPool;
+pub mod reconnect;
+pub mod ratelimit;
+pub mod reliable;

@@ -1,19 +1,22 @@
 //! 客户端模块
-//! 
-//! 提供完整的客户端实现，支持WebSocket和QUIC协议竞速
+//!
+//! # 职责
+//! - 客户端连接实现（WebSocket, QUIC）
+//! - 协议竞速（Protocol Racing）
+//! - 自动重连（Auto Reconnect）
+//! - 客户端认证
+//!
+//! # 模块组织
+//! - `protocol_racer`: 协议竞速器
+//! - `reconnect`: 重连逻辑
+//! - `auth`: 认证模块
+//! - `fast`: 高性能客户端实现
+//! - `enhanced_client`: 增强型客户端
+//! - `connections`: 客户端连接实现
 
-pub mod client;
-pub mod config;
-pub mod protocol_racing;
-// auth 模块已移至 fast 模块
-pub mod fast;
-pub mod event;
-pub mod messaging;
-
-// 重新导出主要类型
-pub use client::{Client, ClientBuilder};
-pub use config::{ClientConfig, ProtocolSelection};
-pub use fast::{FastClient, FastClientBuilder, FastEvent, DefFastEventHandler};
-pub use event::{ClientEvent, DefClientEventHandler};
-pub use messaging::MessageHandler;
-pub use crate::common::connections::types::Transport;
+pub mod protocol_racer;   // 协议竞速
+pub mod reconnect;        // 重连逻辑
+pub mod auth;             // 认证
+pub mod fast;             // 高性能客户端
+pub mod enhanced_client;  // 增强型客户端
+pub mod connections;      // 客户端连接实现

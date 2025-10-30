@@ -1,598 +1,480 @@
-use thiserror::Error;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+//! 统一错误类型定义
+//!
+//! 设计原则：
+//! 1. **细粒度分类**：错误类型足够具体，便于上层精准处理
+//! 2. **上下文丰富**：包含详细的错误信息和可选的源错误
+//! 3. **易于使用**：提供便捷的构造方法
+//! 4. **标准兼容**：实现 std::error::Error trait
+//!
+//! # 使用示例
+//!
+//! ```rust
+//! use flare_core::common::error::FlareError;
+//!
+//! // 简单错误
+//! let err = FlareError::connection_failed("Connection timeout");
+//!
+//! // 带源错误的错误
+//! let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
+//! let err = FlareError::connection_failed_with_source("Failed to connect", io_err);
+//!
+//! // 匹配错误类型
+//! match err {
+//!     FlareError::ConnectionFailed { .. } => { /* 处理连接错误 */ },
+//!     FlareError::Timeout { .. } => { /* 处理超时 */ },
+//!     _ => { /* 其他错误 */ }
+//! }
+//! ```
 
-/// 错误代码枚举 - 用于国际化
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ErrorCode {
-    // 连接相关错误 (1000-1999)
-    ConnectionFailed = 1000,
-    ConnectionTimeout = 1001,
-    ConnectionClosed = 1002,
-    ConnectionRefused = 1003,
-    ConnectionLimitExceeded = 1004,
-    NotConnected = 1005,
-    
-    // 认证相关错误 (2000-2999)
-    AuthenticationFailed = 2000,
-    AuthenticationExpired = 2001,
-    AuthenticationInvalid = 2002,
-    AuthenticationRequired = 2003,
-    PermissionDenied = 2004,
-    
-    // 协议相关错误 (3000-3999)
-    ProtocolError = 3000,
-    ProtocolVersionMismatch = 3001,
-    ProtocolNotSupported = 3002,
-    MessageFormatError = 3003,
-    MessageTooLarge = 3004,
-    
-    // 消息相关错误 (4000-4999)
-    MessageSendFailed = 4000,
-    MessageDeliveryFailed = 4001,
-    MessageNotFound = 4002,
-    MessageExpired = 4003,
-    MessageRateLimitExceeded = 4004,
-    
-    // 用户相关错误 (5000-5999)
-    UserNotFound = 5000,
-    UserOffline = 5001,
-    UserBlocked = 5002,
-    UserQuotaExceeded = 5003,
-    UserSessionLimitExceeded = 5004,
-    
-    // 系统相关错误 (6000-6999)
-    InternalError = 6000,
-    ServiceUnavailable = 6001,
-    ResourceExhausted = 6002,
-    ConfigurationError = 6003,
-    DatabaseError = 6004,
-    
-    // 网络相关错误 (7000-7999)
-    NetworkError = 7000,
-    NetworkTimeout = 7001,
-    NetworkUnreachable = 7002,
-    NetworkConnectionLost = 7003,
-    
-    // 序列化相关错误 (8000-8999)
-    SerializationError = 8000,
-    DeserializationError = 8001,
-    EncodingError = 8002,
-    
-    // 通用错误 (9000-9999)
-    GeneralError = 9000,
-    InvalidParameter = 9001,
-    OperationNotSupported = 9002,
-    OperationFailed = 9003,
-    OperationTimeout = 9004,
-}
+use std::error::Error;
+use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::io;
 
-impl ErrorCode {
-    /// 获取错误代码的数字值
-    pub fn as_u32(&self) -> u32 {
-        *self as u32
-    }
-    
-    /// 从数字值创建错误代码
-    pub fn from_u32(code: u32) -> Option<Self> {
-        match code {
-            1000 => Some(ErrorCode::ConnectionFailed),
-            1001 => Some(ErrorCode::ConnectionTimeout),
-            1002 => Some(ErrorCode::ConnectionClosed),
-            1003 => Some(ErrorCode::ConnectionRefused),
-            1004 => Some(ErrorCode::ConnectionLimitExceeded),
-            1005 => Some(ErrorCode::NotConnected),
-            2000 => Some(ErrorCode::AuthenticationFailed),
-            2001 => Some(ErrorCode::AuthenticationExpired),
-            2002 => Some(ErrorCode::AuthenticationInvalid),
-            2003 => Some(ErrorCode::AuthenticationRequired),
-            2004 => Some(ErrorCode::PermissionDenied),
-            3000 => Some(ErrorCode::ProtocolError),
-            3001 => Some(ErrorCode::ProtocolVersionMismatch),
-            3002 => Some(ErrorCode::ProtocolNotSupported),
-            3003 => Some(ErrorCode::MessageFormatError),
-            3004 => Some(ErrorCode::MessageTooLarge),
-            4000 => Some(ErrorCode::MessageSendFailed),
-            4001 => Some(ErrorCode::MessageDeliveryFailed),
-            4002 => Some(ErrorCode::MessageNotFound),
-            4003 => Some(ErrorCode::MessageExpired),
-            4004 => Some(ErrorCode::MessageRateLimitExceeded),
-            5000 => Some(ErrorCode::UserNotFound),
-            5001 => Some(ErrorCode::UserOffline),
-            5002 => Some(ErrorCode::UserBlocked),
-            5003 => Some(ErrorCode::UserQuotaExceeded),
-            5004 => Some(ErrorCode::UserSessionLimitExceeded),
-            6000 => Some(ErrorCode::InternalError),
-            6001 => Some(ErrorCode::ServiceUnavailable),
-            6002 => Some(ErrorCode::ResourceExhausted),
-            6003 => Some(ErrorCode::ConfigurationError),
-            6004 => Some(ErrorCode::DatabaseError),
-            7000 => Some(ErrorCode::NetworkError),
-            7001 => Some(ErrorCode::NetworkTimeout),
-            7002 => Some(ErrorCode::NetworkUnreachable),
-            7003 => Some(ErrorCode::NetworkConnectionLost),
-            8000 => Some(ErrorCode::SerializationError),
-            8001 => Some(ErrorCode::DeserializationError),
-            8002 => Some(ErrorCode::EncodingError),
-            8003 => Some(ErrorCode::DeserializationError),
-            9000 => Some(ErrorCode::GeneralError),
-            9001 => Some(ErrorCode::InvalidParameter),
-            9002 => Some(ErrorCode::OperationNotSupported),
-            9003 => Some(ErrorCode::OperationFailed),
-            9004 => Some(ErrorCode::OperationTimeout),
-            _ => None,
-        }
-    }
-    
-    /// 获取错误代码的英文标识符
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ErrorCode::ConnectionFailed => "CONNECTION_FAILED",
-            ErrorCode::ConnectionTimeout => "CONNECTION_TIMEOUT",
-            ErrorCode::ConnectionClosed => "CONNECTION_CLOSED",
-            ErrorCode::ConnectionRefused => "CONNECTION_REFUSED",
-            ErrorCode::ConnectionLimitExceeded => "CONNECTION_LIMIT_EXCEEDED",
-            ErrorCode::NotConnected => "NOT_CONNECTED",
-            ErrorCode::AuthenticationFailed => "AUTHENTICATION_FAILED",
-            ErrorCode::AuthenticationExpired => "AUTHENTICATION_EXPIRED",
-            ErrorCode::AuthenticationInvalid => "AUTHENTICATION_INVALID",
-            ErrorCode::AuthenticationRequired => "AUTHENTICATION_REQUIRED",
-            ErrorCode::PermissionDenied => "PERMISSION_DENIED",
-            ErrorCode::ProtocolError => "PROTOCOL_ERROR",
-            ErrorCode::ProtocolVersionMismatch => "PROTOCOL_VERSION_MISMATCH",
-            ErrorCode::ProtocolNotSupported => "PROTOCOL_NOT_SUPPORTED",
-            ErrorCode::MessageFormatError => "MESSAGE_FORMAT_ERROR",
-            ErrorCode::MessageTooLarge => "MESSAGE_TOO_LARGE",
-            ErrorCode::MessageSendFailed => "MESSAGE_SEND_FAILED",
-            ErrorCode::MessageDeliveryFailed => "MESSAGE_DELIVERY_FAILED",
-            ErrorCode::MessageNotFound => "MESSAGE_NOT_FOUND",
-            ErrorCode::MessageExpired => "MESSAGE_EXPIRED",
-            ErrorCode::MessageRateLimitExceeded => "MESSAGE_RATE_LIMIT_EXCEEDED",
-            ErrorCode::UserNotFound => "USER_NOT_FOUND",
-            ErrorCode::UserOffline => "USER_OFFLINE",
-            ErrorCode::UserBlocked => "USER_BLOCKED",
-            ErrorCode::UserQuotaExceeded => "USER_QUOTA_EXCEEDED",
-            ErrorCode::UserSessionLimitExceeded => "USER_SESSION_LIMIT_EXCEEDED",
-            ErrorCode::InternalError => "INTERNAL_ERROR",
-            ErrorCode::ServiceUnavailable => "SERVICE_UNAVAILABLE",
-            ErrorCode::ResourceExhausted => "RESOURCE_EXHAUSTED",
-            ErrorCode::ConfigurationError => "CONFIGURATION_ERROR",
-            ErrorCode::DatabaseError => "DATABASE_ERROR",
-            ErrorCode::NetworkError => "NETWORK_ERROR",
-            ErrorCode::NetworkTimeout => "NETWORK_TIMEOUT",
-            ErrorCode::NetworkUnreachable => "NETWORK_UNREACHABLE",
-            ErrorCode::NetworkConnectionLost => "NETWORK_CONNECTION_LOST",
-            ErrorCode::SerializationError => "SERIALIZATION_ERROR",
-            ErrorCode::DeserializationError => "FRAME_DESERIALIZATION_ERROR",
-            ErrorCode::EncodingError => "ENCODING_ERROR",
-            ErrorCode::GeneralError => "GENERAL_ERROR",
-            ErrorCode::InvalidParameter => "INVALID_PARAMETER",
-            ErrorCode::OperationNotSupported => "OPERATION_NOT_SUPPORTED",
-            ErrorCode::OperationFailed => "OPERATION_FAILED",
-            ErrorCode::OperationTimeout => "OPERATION_TIMEOUT",
-        }
-    }
-}
-
-/// 国际化错误信息结构
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalizedError {
-    /// 错误代码
-    pub code: ErrorCode,
-    /// 错误原因（用于国际化）
-    pub reason: String,
-    /// 错误详情（可选，用于调试）
-    pub details: Option<String>,
-    /// 错误参数（用于国际化插值）
-    pub params: Option<HashMap<String, String>>,
-    /// 错误时间戳
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-}
-
-impl LocalizedError {
-    /// 创建新的本地化错误
-    pub fn new(code: ErrorCode, reason: impl Into<String>) -> Self {
-        Self {
-            code,
-            reason: reason.into(),
-            details: None,
-            params: None,
-            timestamp: chrono::Utc::now(),
-        }
-    }
-    
-    /// 添加错误详情
-    pub fn with_details(mut self, details: impl Into<String>) -> Self {
-        self.details = Some(details.into());
-        self
-    }
-    
-    /// 添加错误参数
-    pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
-        self.params = Some(params);
-        self
-    }
-    
-    /// 添加单个参数
-    pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        if self.params.is_none() {
-            self.params = Some(HashMap::new());
-        }
-        if let Some(ref mut params) = self.params {
-            params.insert(key.into(), value.into());
-        }
-        self
-    }
-    
-    /// 获取错误代码的数字值
-    pub fn code_value(&self) -> u32 {
-        self.code.as_u32()
-    }
-    
-    /// 获取错误代码的字符串标识符
-    pub fn code_str(&self) -> &'static str {
-        self.code.as_str()
-    }
-}
-
-impl std::fmt::Display for LocalizedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code.as_str(), self.reason)
-    }
-}
-
-/// Flare IM 统一错误类型
-#[derive(Error, Debug, Clone)]
+/// Flare 统一错误类型
+///
+/// 所有错误都携带详细的上下文信息，便于调试和错误处理。
+#[derive(Debug, Clone)]
 pub enum FlareError {
-    /// 本地化错误
-    #[error("错误: {0}")]
-    Localized(LocalizedError),
-    
-    /// 系统错误（用于内部错误，不暴露给用户）
-    #[error("系统错误: {0}")]
-    System(String),
-    
-    /// 配置错误
-    #[error("配置错误: {0}")]
-    InvalidConfiguration(String),
-    
-    /// 网络错误
-    #[error("网络错误: {0}")]
-    NetworkError(String),
-    
-    /// 协议错误
-    #[error("协议错误: {0}")]
-    ProtocolError(String),
-    
     /// 连接失败
-    #[error("连接失败: {0}")]
-    ConnectionFailed(String),
-    
-    /// 认证错误
-    #[error("认证错误: {0}")]
-    AuthenticationError(String),
-    
-    /// 不支持的格式
-    #[error("不支持的格式: {0}")]
-    UnsupportedFormat(String),
-    
-    /// 解码错误
-    #[error("解码错误: {0}")]
-    DecodeError(String),
+    ///
+    /// 包括建立连接失败、握手失败、TLS 错误等
+    ConnectionFailed {
+        message: String,
+        // 注意：source 不实现 Clone，但我们可以在 Clone 时丢弃它
+        #[allow(dead_code)]
+        source: Option<String>,  // 改为 String 以支持 Clone
+    },
+
+    /// 连接超时
+    ///
+    /// 连接建立、读取、写入等操作超时
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
+
+    /// 序列化/反序列化错误
+    ///
+    /// JSON、Protobuf、MsgPack 等格式的编解码错误
+    SerializationError {
+        message: String,
+        #[allow(dead_code)]
+        source: Option<String>,  // 改为 String 以支持 Clone
+    },
+
+    /// 消息发送失败
+    ///
+    /// 消息队列已满、连接已关闭等
+    MessageSendFailed {
+        message: String,
+        reason: Option<String>,
+    },
+
+    /// 心跳超时
+    ///
+    /// 连续多次心跳未响应
+    HeartbeatTimeout {
+        missed_count: u32,
+        threshold: u32,
+    },
+
+    /// 认证失败
+    ///
+    /// 用户名密码错误、Token 无效等
+    AuthenticationFailed {
+        message: String,
+    },
+
+    /// 限流错误
+    ///
+    /// 超过速率限制
+    RateLimitExceeded {
+        limit: u64,
+        window_ms: u64,
+    },
+
+    /// 配置错误
+    ///
+    /// 配置参数非法、缺少必要配置等
+    ConfigError {
+        message: String,
+    },
+
+    /// I/O 错误
+    ///
+    /// 底层 I/O 操作失败
+    IoError {
+        message: String,
+        kind: String,  // io::ErrorKind 的字符串表示
+    },
+
+    /// 协议错误
+    ///
+    /// 协议格式错误、版本不匹配等
+    ProtocolError {
+        message: String,
+    },
+
+    /// 状态错误
+    ///
+    /// 操作与当前状态不兼容（如断开状态下发送消息）
+    InvalidState {
+        current_state: String,
+        operation: String,
+    },
+
+    /// 其他未分类错误
+    Other {
+        message: String,
+    },
 }
 
 impl FlareError {
+    // ============================================================================
+    // 便捷构造方法
+    // ============================================================================
+
     /// 创建连接失败错误
-    pub fn connection_failed(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::ConnectionFailed, reason))
+    pub fn connection_failed<S: Into<String>>(message: S) -> Self {
+        FlareError::ConnectionFailed {
+            message: message.into(),
+            source: None,
+        }
     }
-    
-    /// 创建连接超时错误
-    pub fn connection_timeout(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::ConnectionTimeout, reason))
+
+    /// 创建带源错误的连接失败错误
+    pub fn connection_failed_with_source<S: Into<String>, E: Error + Send + Sync + 'static>(
+        message: S,
+        source: E,
+    ) -> Self {
+        FlareError::ConnectionFailed {
+            message: message.into(),
+            source: Some(source.to_string()),  // 转换为 String
+        }
     }
-    
+
     /// 创建超时错误
-    pub fn timeout(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::OperationTimeout, reason))
+    pub fn timeout<S: Into<String>>(operation: S, timeout_ms: u64) -> Self {
+        FlareError::Timeout {
+            operation: operation.into(),
+            timeout_ms,
+        }
     }
-    
-    /// 创建认证失败错误
-    pub fn authentication_failed(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::AuthenticationFailed, reason))
-    }
-    
-    /// 创建认证过期错误
-    pub fn authentication_expired(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::AuthenticationExpired, reason))
-    }
-    
-    /// 创建协议错误
-    pub fn protocol_error(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::ProtocolError, reason))
-    }
-    
-    /// 创建消息发送失败错误
-    pub fn message_send_failed(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::MessageSendFailed, reason))
-    }
-    
-    /// 创建用户不存在错误
-    pub fn user_not_found(user_id: impl Into<String>) -> Self {
-        let mut params = HashMap::new();
-        params.insert("user_id".to_string(), user_id.into());
-        FlareError::Localized(
-            LocalizedError::new(ErrorCode::UserNotFound, "用户不存在")
-                .with_params(params)
-        )
-    }
-    
-    /// 创建用户离线错误
-    pub fn user_offline(user_id: impl Into<String>) -> Self {
-        let mut params = HashMap::new();
-        params.insert("user_id".to_string(), user_id.into());
-        FlareError::Localized(
-            LocalizedError::new(ErrorCode::UserOffline, "用户离线")
-                .with_params(params)
-        )
-    }
-    
-    /// 创建内部错误
-    pub fn internal_error(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::InternalError, reason))
-    }
-    
-    /// 创建网络错误
-    pub fn network_error(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::NetworkError, reason))
-    }
-    
+
     /// 创建序列化错误
-    pub fn serialization_error(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::SerializationError, reason))
-    }
-    
-    /// 创建反序列化错误
-    pub fn deserialization_failed(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::DeserializationError, reason))
-    }
-    
-    /// 创建不支持的格式错误
-    pub fn unsupported_format(reason: impl Into<String>) -> Self {
-        FlareError::UnsupportedFormat(reason.into())
-    }
-    
-    /// 创建解码错误
-    pub fn decode_error(reason: impl Into<String>) -> Self {
-        FlareError::DecodeError(reason.into())
-    }
-    
-    /// 创建通用错误
-    pub fn general_error(reason: impl Into<String>) -> Self {
-        FlareError::Localized(LocalizedError::new(ErrorCode::GeneralError, reason))
-    }
-    
-    /// 获取本地化错误信息
-    pub fn localized(&self) -> Option<&LocalizedError> {
-        match self {
-            FlareError::Localized(localized) => Some(localized),
-            FlareError::System(_) => None,
-            FlareError::InvalidConfiguration(_) => None,
-            FlareError::NetworkError(_) => None,
-            FlareError::ProtocolError(_) => None,
-            FlareError::ConnectionFailed(_) => None,
-            FlareError::AuthenticationError(_) => None,
-            FlareError::UnsupportedFormat(_) => None,
-            FlareError::DecodeError(_) => None,
+    pub fn serialization_error<S: Into<String>>(message: S) -> Self {
+        FlareError::SerializationError {
+            message: message.into(),
+            source: None,
         }
     }
-    
-    /// 获取错误代码
-    pub fn code(&self) -> Option<ErrorCode> {
-        match self {
-            FlareError::Localized(localized) => Some(localized.code),
-            FlareError::System(_) => None,
-            FlareError::InvalidConfiguration(_) => None,
-            FlareError::NetworkError(_) => None,
-            FlareError::ProtocolError(_) => None,
-            FlareError::ConnectionFailed(_) => None,
-            FlareError::AuthenticationError(_) => None,
-            FlareError::UnsupportedFormat(_) => None,
-            FlareError::DecodeError(_) => None,
+
+    /// 创建带源错误的序列化错误
+    pub fn serialization_error_with_source<S: Into<String>, E: Error + Send + Sync + 'static>(
+        message: S,
+        source: E,
+    ) -> Self {
+        FlareError::SerializationError {
+            message: message.into(),
+            source: Some(source.to_string()),  // 转换为 String
         }
     }
-    
-    /// 获取错误原因
-    pub fn reason(&self) -> &str {
-        match self {
-            FlareError::Localized(localized) => &localized.reason,
-            FlareError::System(msg) => msg,
-            FlareError::InvalidConfiguration(msg) => msg,
-            FlareError::NetworkError(err) => err,
-            FlareError::ProtocolError(msg) => msg,
-            FlareError::ConnectionFailed(msg) => msg,
-            FlareError::AuthenticationError(msg) => msg,
-            FlareError::UnsupportedFormat(msg) => msg,
-            FlareError::DecodeError(msg) => msg,
+
+    /// 创建消息发送失败错误
+    pub fn message_send_failed<S: Into<String>>(message: S) -> Self {
+        FlareError::MessageSendFailed {
+            message: message.into(),
+            reason: None,
         }
     }
-    
-    /// 转换为本地化错误
-    pub fn to_localized(self) -> LocalizedError {
+
+    /// 创建心跳超时错误
+    pub fn heartbeat_timeout(missed_count: u32, threshold: u32) -> Self {
+        FlareError::HeartbeatTimeout {
+            missed_count,
+            threshold,
+        }
+    }
+
+    /// 创建认证失败错误
+    pub fn authentication_failed<S: Into<String>>(message: S) -> Self {
+        FlareError::AuthenticationFailed {
+            message: message.into(),
+        }
+    }
+
+    /// 创建限流错误
+    pub fn rate_limit_exceeded(limit: u64, window_ms: u64) -> Self {
+        FlareError::RateLimitExceeded { limit, window_ms }
+    }
+
+    /// 创建配置错误
+    pub fn config_error<S: Into<String>>(message: S) -> Self {
+        FlareError::ConfigError {
+            message: message.into(),
+        }
+    }
+
+    /// 创建 I/O 错误
+    pub fn io_error<S: Into<String>>(message: S, source: io::Error) -> Self {
+        FlareError::IoError {
+            message: message.into(),
+            kind: format!("{:?}", source.kind()),
+        }
+    }
+
+    /// 创建协议错误
+    pub fn protocol_error<S: Into<String>>(message: S) -> Self {
+        FlareError::ProtocolError {
+            message: message.into(),
+        }
+    }
+
+    /// 创建状态错误
+    pub fn invalid_state<S1: Into<String>, S2: Into<String>>(
+        current_state: S1,
+        operation: S2,
+    ) -> Self {
+        FlareError::InvalidState {
+            current_state: current_state.into(),
+            operation: operation.into(),
+        }
+    }
+
+    /// 创建其他错误
+    pub fn other<S: Into<String>>(message: S) -> Self {
+        FlareError::Other {
+            message: message.into(),
+        }
+    }
+
+    /// 创建压缩错误
+    pub fn compression_error<S: Into<String>>(message: S) -> Self {
+        FlareError::SerializationError {
+            message: format!("压缩错误: {}", message.into()),
+            source: None,
+        }
+    }
+
+    /// 创建输入无效错误
+    pub fn invalid_input<S: Into<String>>(message: S) -> Self {
+        FlareError::Other {
+            message: format!("输入无效: {}", message.into()),
+        }
+    }
+
+    // ============================================================================
+    // 兼容性方法（保持向后兼容）
+    // ============================================================================
+
+    /// 兼容旧代码：general_error
+    pub fn general_error<S: Into<String>>(s: S) -> Self {
+        FlareError::Other {
+            message: s.into(),
+        }
+    }
+
+    /// 兼容旧代码：deserialization_failed
+    pub fn deserialization_failed<S: Into<String>>(s: S) -> Self {
+        FlareError::SerializationError {
+            message: s.into(),
+            source: None,
+        }
+    }
+
+    // ============================================================================
+    // 辅助方法
+    // ============================================================================
+
+    /// 判断是否为可重试错误
+    ///
+    /// # 返回
+    /// - `true`: 错误可能是暂时性的，可以重试
+    /// - `false`: 错误是永久性的，重试无意义
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            FlareError::ConnectionFailed { .. }  // 连接失败通常可以重试
+                | FlareError::Timeout { .. }
+                | FlareError::HeartbeatTimeout { .. }
+                | FlareError::IoError { .. }
+                | FlareError::RateLimitExceeded { .. }
+        )
+    }
+
+    /// 判断是否为网络相关错误
+    pub fn is_network_error(&self) -> bool {
+        matches!(
+            self,
+            FlareError::ConnectionFailed { .. }
+                | FlareError::Timeout { .. }
+                | FlareError::IoError { .. }
+        )
+    }
+
+    /// 判断是否为认证相关错误
+    pub fn is_auth_error(&self) -> bool {
+        matches!(self, FlareError::AuthenticationFailed { .. })
+    }
+}
+
+impl Display for FlareError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            FlareError::Localized(localized) => localized,
-            FlareError::System(msg) => LocalizedError::new(ErrorCode::GeneralError, msg),
-            FlareError::InvalidConfiguration(msg) => LocalizedError::new(ErrorCode::ConfigurationError, msg),
-            FlareError::NetworkError(err) => LocalizedError::new(ErrorCode::NetworkError, err),
-            FlareError::ProtocolError(msg) => LocalizedError::new(ErrorCode::ProtocolError, msg),
-            FlareError::ConnectionFailed(msg) => LocalizedError::new(ErrorCode::ConnectionFailed, msg),
-            FlareError::AuthenticationError(msg) => LocalizedError::new(ErrorCode::AuthenticationFailed, msg),
-            FlareError::UnsupportedFormat(msg) => LocalizedError::new(ErrorCode::GeneralError, msg),
-            FlareError::DecodeError(msg) => LocalizedError::new(ErrorCode::DeserializationError, msg),
+            FlareError::ConnectionFailed { message, .. } => {
+                write!(f, "Connection failed: {}", message)
+            }
+            FlareError::Timeout {
+                operation,
+                timeout_ms,
+            } => {
+                write!(f, "Operation '{}' timed out after {}ms", operation, timeout_ms)
+            }
+            FlareError::SerializationError { message, .. } => {
+                write!(f, "Serialization error: {}", message)
+            }
+            FlareError::MessageSendFailed { message, reason } => {
+                if let Some(r) = reason {
+                    write!(f, "Message send failed: {} (reason: {})", message, r)
+                } else {
+                    write!(f, "Message send failed: {}", message)
+                }
+            }
+            FlareError::HeartbeatTimeout {
+                missed_count,
+                threshold,
+            } => {
+                write!(
+                    f,
+                    "Heartbeat timeout: {}/{} missed",
+                    missed_count, threshold
+                )
+            }
+            FlareError::AuthenticationFailed { message } => {
+                write!(f, "Authentication failed: {}", message)
+            }
+            FlareError::RateLimitExceeded { limit, window_ms } => {
+                write!(
+                    f,
+                    "Rate limit exceeded: {} requests per {}ms",
+                    limit, window_ms
+                )
+            }
+            FlareError::ConfigError { message } => {
+                write!(f, "Configuration error: {}", message)
+            }
+            FlareError::IoError { message, .. } => {
+                write!(f, "I/O error: {}", message)
+            }
+            FlareError::ProtocolError { message } => {
+                write!(f, "Protocol error: {}", message)
+            }
+            FlareError::InvalidState {
+                current_state,
+                operation,
+            } => {
+                write!(
+                    f,
+                    "Invalid state: cannot '{}' in state '{}'",
+                    operation, current_state
+                )
+            }
+            FlareError::Other { message } => {
+                write!(f, "Error: {}", message)
+            }
         }
     }
 }
 
-/// 客户端错误类型
-pub type ClientError = FlareError;
-
-/// 服务端错误类型
-pub type ServerError = FlareError;
-
-/// 结果类型别名
-pub type Result<T> = std::result::Result<T, FlareError>;
-
-// 从其他错误类型转换
-impl From<&str> for FlareError {
-    fn from(err: &str) -> Self {
-        FlareError::general_error(err)
+impl Error for FlareError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        // 由于我们不再存储原始 source，这里返回 None
+        None
     }
 }
 
-impl From<String> for FlareError {
-    fn from(err: String) -> Self {
-        FlareError::general_error(err)
-    }
-}
+// ============================================================================
+// 类型转换
+// ============================================================================
 
-impl From<std::io::Error> for FlareError {
-    fn from(err: std::io::Error) -> Self {
-        FlareError::NetworkError(err.to_string())
+impl From<io::Error> for FlareError {
+    fn from(err: io::Error) -> Self {
+        FlareError::IoError {
+            message: err.to_string(),
+            kind: format!("{:?}", err.kind()),
+        }
     }
 }
 
 impl From<serde_json::Error> for FlareError {
     fn from(err: serde_json::Error) -> Self {
-        FlareError::serialization_error(err.to_string())
+        FlareError::serialization_error_with_source("JSON error", err)
     }
 }
 
-impl From<tokio::time::error::Elapsed> for FlareError {
-    fn from(_: tokio::time::error::Elapsed) -> Self {
-        FlareError::connection_timeout("操作超时")
-    }
-}
-
-// 移除对不存在依赖的 From 实现
-// impl From<quinn::ConnectionError> for FlareError {
-//     fn from(err: quinn::ConnectionError) -> Self {
-//         FlareError::ConnectionFailed(err.to_string())
-//     }
-// }
-
-// impl From<tokio_tungstenite::tungstenite::Error> for FlareError {
-//     fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
-//         FlareError::ConnectionFailed(err.to_string())
-//     }
-// }
-
-// 错误构建器
-pub struct ErrorBuilder {
-    code: ErrorCode,
-    reason: String,
-    details: Option<String>,
-    params: Option<HashMap<String, String>>,
-}
-
-impl ErrorBuilder {
-    /// 创建新的错误构建器
-    pub fn new(code: ErrorCode, reason: impl Into<String>) -> Self {
-        Self {
-            code,
-            reason: reason.into(),
-            details: None,
-            params: None,
-        }
-    }
-    
-    /// 添加错误详情
-    pub fn details(mut self, details: impl Into<String>) -> Self {
-        self.details = Some(details.into());
-        self
-    }
-    
-    /// 添加错误参数
-    pub fn params(mut self, params: HashMap<String, String>) -> Self {
-        self.params = Some(params);
-        self
-    }
-    
-    /// 添加单个参数
-    pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        if self.params.is_none() {
-            self.params = Some(HashMap::new());
-        }
-        if let Some(ref mut params) = self.params {
-            params.insert(key.into(), value.into());
-        }
-        self
-    }
-    
-    /// 构建错误
-    pub fn build(self) -> FlareError {
-        let mut localized = LocalizedError::new(self.code, self.reason);
-        if let Some(details) = self.details {
-            localized = localized.with_details(details);
-        }
-        if let Some(params) = self.params {
-            localized = localized.with_params(params);
-        }
-        FlareError::Localized(localized)
-    }
-}
+// ============================================================================
+// 单元测试
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_error_code() {
-        assert_eq!(ErrorCode::ConnectionFailed.as_u32(), 1000);
-        assert_eq!(ErrorCode::AuthenticationFailed.as_u32(), 2000);
-        assert_eq!(ErrorCode::ConnectionFailed.as_str(), "CONNECTION_FAILED");
+    fn test_connection_failed() {
+        let err = FlareError::connection_failed("Connection refused");
+        assert!(err.to_string().contains("Connection failed"));
+        assert!(err.is_network_error());
+        assert!(err.is_retryable());
     }
-    
+
     #[test]
-    fn test_error_code_from_u32() {
-        assert_eq!(ErrorCode::from_u32(1000), Some(ErrorCode::ConnectionFailed));
-        assert_eq!(ErrorCode::from_u32(9999), None);
+    fn test_timeout() {
+        let err = FlareError::timeout("connect", 5000);
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("5000ms"));
+        assert!(err.is_retryable());
     }
-    
+
     #[test]
-    fn test_localized_error() {
-        let error = LocalizedError::new(ErrorCode::UserNotFound, "用户不存在")
-            .with_param("user_id", "user123")
-            .with_details("详细错误信息");
-        
-        assert_eq!(error.code, ErrorCode::UserNotFound);
-        assert_eq!(error.reason, "用户不存在");
-        assert_eq!(error.details, Some("详细错误信息".to_string()));
-        assert_eq!(error.params.as_ref().unwrap().get("user_id"), Some(&"user123".to_string()));
+    fn test_heartbeat_timeout() {
+        let err = FlareError::heartbeat_timeout(3, 3);
+        assert!(err.to_string().contains("3/3"));
+        assert!(err.is_retryable());
     }
-    
+
     #[test]
-    fn test_flare_error() {
-        let error = FlareError::user_not_found("user123");
-        let localized = error.localized().unwrap();
-        
-        assert_eq!(localized.code, ErrorCode::UserNotFound);
-        assert_eq!(localized.reason, "用户不存在");
-        assert_eq!(localized.params.as_ref().unwrap().get("user_id"), Some(&"user123".to_string()));
+    fn test_invalid_state() {
+        let err = FlareError::invalid_state("Disconnected", "send_message");
+        assert!(err.to_string().contains("Invalid state"));
+        assert!(!err.is_retryable());
     }
-    
+
     #[test]
-    fn test_error_builder() {
-        let error = ErrorBuilder::new(ErrorCode::MessageSendFailed, "消息发送失败")
-            .param("message_id", "msg123")
-            .param("user_id", "user456")
-            .details("网络连接中断")
-            .build();
-        
-        let localized = error.localized().unwrap();
-        assert_eq!(localized.code, ErrorCode::MessageSendFailed);
-        assert_eq!(localized.reason, "消息发送失败");
-        assert_eq!(localized.details, Some("网络连接中断".to_string()));
-        assert_eq!(localized.params.as_ref().unwrap().get("message_id"), Some(&"msg123".to_string()));
-        assert_eq!(localized.params.as_ref().unwrap().get("user_id"), Some(&"user456".to_string()));
+    fn test_with_source() {
+        let io_err = io::Error::new(io::ErrorKind::TimedOut, "timeout");
+        let err = FlareError::connection_failed_with_source("Failed", io_err);
+        // source 现在是 String，可以 clone
+        let _cloned = err.clone();
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "not found");
+        let err: FlareError = io_err.into();
+        assert!(matches!(err, FlareError::IoError { .. }));
+    }
+
+    #[test]
+    fn test_retryable() {
+        assert!(FlareError::timeout("op", 1000).is_retryable());
+        assert!(!FlareError::protocol_error("bad format").is_retryable());
+    }
+
+    #[test]
+    fn test_auth_error() {
+        let err = FlareError::authentication_failed("invalid token");
+        assert!(err.is_auth_error());
+        assert!(!err.is_network_error());
     }
 }

@@ -1,4 +1,4 @@
-use crate::common::serialization::{SerializationConfig, SerializationFormat};
+use crate::common::parsing::PayloadCodec;
 use crate::common::connections::config::ConnectionConfig;
 use crate::common::connections::enums::Transport;
 
@@ -170,6 +170,7 @@ impl Default for ServerSecurityConfig {
 }
 
 
+
 /// 服务器配置
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -200,7 +201,8 @@ pub struct ServerConfig {
     /// 连接清理间隔（毫秒）
     pub cleanup_interval_ms: u64,
     /// 序列化配置
-    pub serialization_config: SerializationConfig,
+    /// 序列化编解码器
+    pub serialization_codec: PayloadCodec,
     /// 性能优化配置
     pub performance_config: ServerPerformanceConfig,
     /// 安全配置
@@ -241,7 +243,7 @@ impl ServerConfig {
             auto_heartbeat_response: true,
             heartbeat_monitor_timeout_ms: 20000,
             cleanup_interval_ms: 60000,
-            serialization_config: SerializationConfig::default(),
+            serialization_codec: PayloadCodec::default(),
             performance_config: ServerPerformanceConfig::default(),
             security_config: ServerSecurityConfig::default(),
         }
@@ -272,7 +274,7 @@ impl ServerConfig {
             auto_heartbeat_response: true,
             heartbeat_monitor_timeout_ms: 20000,
             cleanup_interval_ms: 60000,
-            serialization_config: SerializationConfig::default(),
+            serialization_codec: PayloadCodec::default(),
             performance_config: ServerPerformanceConfig::default(),
             security_config: ServerSecurityConfig::default(),
         }
@@ -308,7 +310,7 @@ impl ServerConfig {
             auto_heartbeat_response: true,
             heartbeat_monitor_timeout_ms: 20000,
             cleanup_interval_ms: 60000,
-            serialization_config: SerializationConfig::default(),
+            serialization_codec: PayloadCodec::default(),
             performance_config: ServerPerformanceConfig::default(),
             security_config: ServerSecurityConfig::default(),
         }
@@ -370,15 +372,9 @@ impl ServerConfig {
         self
     }
     
-    /// 设置序列化配置
-    pub fn with_serialization_config(mut self, config: SerializationConfig) -> Self {
-        self.serialization_config = config;
-        self
-    }
-    
-    /// 设置序列化格式
-    pub fn with_serialization_format(mut self, format: SerializationFormat) -> Self {
-        self.serialization_config.format = format;
+    /// 设置序列化编觧码器
+    pub fn with_serialization_codec(mut self, codec: PayloadCodec) -> Self {
+        self.serialization_codec = codec;
         self
     }
     
@@ -458,8 +454,9 @@ impl ServerConfig {
     }
     
     /// 获取序列化配置
-    pub fn get_serialization_config(&self) -> &SerializationConfig {
-        &self.serialization_config
+    /// 获取序列化编解码器
+    pub fn get_serialization_codec(&self) -> PayloadCodec {
+        self.serialization_codec
     }
     
     /// 转换为连接配置
@@ -500,71 +497,38 @@ impl ServerConfig {
     
     /// 创建WebSocket连接配置
     fn create_websocket_connection_config(&self, connection_id: String, listen_addr: String) -> ConnectionConfig {
-        let mut conn_config = ConnectionConfig::server(connection_id, listen_addr)
-            .with_timeout(self.connection_timeout_ms)
-            .with_heartbeat(self.heartbeat_interval_ms, self.heartbeat_timeout_ms)
-            .with_buffer(self.buffer_size, self.security_config.max_message_size)
-            .with_serialization_config(self.serialization_config.clone())
-            .with_heartbeat_monitoring(
-                self.heartbeat_monitor_timeout_ms,
-                self.cleanup_interval_ms
-            );
-        
-        // 设置服务端特有配置
-        if let Some(server_config) = &mut conn_config.server_config {
-            server_config.auto_heartbeat_response = self.auto_heartbeat_response;
-            server_config.heartbeat_monitor_timeout_ms = self.heartbeat_monitor_timeout_ms;
-            server_config.cleanup_interval_ms = self.cleanup_interval_ms;
-        }
-        
-        // 设置传输类型
+        let mut conn_config = ConnectionConfig::default();
+        conn_config.id = Some(connection_id);
         conn_config.transport = Transport::WebSocket;
-        conn_config.max_missed_heartbeats = self.max_missed_heartbeats;
-        
+        conn_config.remote_addr = Some(listen_addr);
+        conn_config.heartbeat_interval_ms = Some(self.heartbeat_interval_ms);
+        conn_config.heartbeat_timeout_ms = Some(self.heartbeat_interval_ms / 2); // 使用心跳间隔的一半作为超时
+        conn_config.max_missed_heartbeats = Some(self.max_missed_heartbeats);
         conn_config
     }
     
     /// 创建QUIC连接配置
-    fn create_quic_connection_config(&self, connection_id: String, quic_config: &ProtocolConfig) -> ConnectionConfig {
-        let mut conn_config = ConnectionConfig::server(connection_id, quic_config.listen_addr.clone())
-            .with_timeout(self.connection_timeout_ms)
-            .with_heartbeat(self.heartbeat_interval_ms, self.heartbeat_timeout_ms)
-            .with_buffer(self.buffer_size, self.security_config.max_message_size)
-            .with_serialization_config(self.serialization_config.clone())
-            .with_heartbeat_monitoring(
-                self.heartbeat_monitor_timeout_ms,
-                self.cleanup_interval_ms
-            );
-        
-        // 设置服务端特有配置
-        if let Some(server_config) = &mut conn_config.server_config {
-            server_config.auto_heartbeat_response = self.auto_heartbeat_response;
-            server_config.heartbeat_monitor_timeout_ms = self.heartbeat_monitor_timeout_ms;
-            server_config.cleanup_interval_ms = self.cleanup_interval_ms;
-        }
-        
-        // 设置QUIC传输类型
+    fn create_quic_connection_config(&self, connection_id: String, quic_cfg: &ProtocolConfig) -> ConnectionConfig {
+        let mut conn_config = ConnectionConfig::default();
+        conn_config.id = Some(connection_id);
         conn_config.transport = Transport::Quic;
-        conn_config.max_missed_heartbeats = self.max_missed_heartbeats;
-        
-        // 如果启用了TLS，设置QUIC配置
-        if quic_config.enable_tls {
-            if let Some(tls_config) = &quic_config.tls_config {
-                let mut quic_protocol_config = conn_config.protocol_config.quic.clone();
-                quic_protocol_config.server.cert_path = tls_config.cert_path.clone();
-                quic_protocol_config.server.key_path = tls_config.key_path.clone();
-                quic_protocol_config.server.require_client_auth = tls_config.require_client_auth;
-                quic_protocol_config.server.client_ca_cert_path = tls_config.client_ca_cert_path.clone();
-                
-                // 应用性能配置到QUIC配置
-                if self.performance_config.enable_zero_copy {
-                    quic_protocol_config.server.max_concurrent_streams = self.performance_config.batch_size as u32;
-                }
-                
-                conn_config = conn_config.with_quic_config(quic_protocol_config);
+        conn_config.remote_addr = Some(quic_cfg.listen_addr.clone());
+        conn_config.heartbeat_interval_ms = Some(self.heartbeat_interval_ms);
+        conn_config.heartbeat_timeout_ms = Some(self.heartbeat_interval_ms / 2); // 使用心跳间隔的一半作为超时
+        conn_config.max_missed_heartbeats = Some(self.max_missed_heartbeats);
+
+        // 配置 QUIC 子配置（仅服务端部分）
+        let mut quic_server = crate::common::connections::config::QuicServerConfig::default();
+        if quic_cfg.enable_tls {
+            if let Some(tls) = &quic_cfg.tls_config {
+                quic_server.cert_path = Some(tls.cert_path.clone());
+                quic_server.key_path = Some(tls.key_path.clone());
+                quic_server.require_client_auth = tls.require_client_auth;
+                quic_server.client_ca_cert_path = tls.client_ca_cert_path.clone();
             }
         }
-        
+        let quic_config = crate::common::connections::config::QuicConfig { client: None, server: Some(quic_server) };
+        conn_config.protocol_config = Some(crate::common::connections::config::ProtocolConfig { websocket: None, quic: Some(quic_config) });
         conn_config
     }
     
@@ -572,22 +536,14 @@ impl ServerConfig {
     /// 
     /// 专门用于创建WebSocket连接配置，即使服务器类型不是WebSocket
     pub fn to_websocket_connection_config(&self, connection_id: String) -> Option<ConnectionConfig> {
-        if let Some(ws_config) = &self.websocket_config {
-            Some(self.create_websocket_connection_config(connection_id, ws_config.listen_addr.clone()))
-        } else {
-            None
-        }
+        self.websocket_config.as_ref().map(|ws_config| self.create_websocket_connection_config(connection_id, ws_config.listen_addr.clone()))
     }
     
     /// 转换为QUIC连接配置
     /// 
     /// 专门用于创建QUIC连接配置，即使服务器类型不是QUIC
     pub fn to_quic_connection_config(&self, connection_id: String) -> Option<ConnectionConfig> {
-        if let Some(quic_config) = &self.quic_config {
-            Some(self.create_quic_connection_config(connection_id, quic_config))
-        } else {
-            None
-        }
+        self.quic_config.as_ref().map(|quic_config| self.create_quic_connection_config(connection_id, quic_config))
     }
     
     /// 创建高性能服务器配置

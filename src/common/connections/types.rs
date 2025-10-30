@@ -1,26 +1,15 @@
-//! 连接类型定义
-//! 
-//! 定义连接相关的枚举、结构体和配置
-
-// 重新导出枚举和配置类型
-pub use crate::common::connections::enums::*;
-pub use crate::common::connections::config::*;
-
-pub struct ClientInfo {
-    /// 传输方式
-    pub transport: Transport,
-    /// 地址
-    pub address: String,
-    /// 平台
-    pub platform: Platform,
-}
-
-impl Clone for ClientInfo {
-    fn clone(&self) -> Self {
-        Self {
-            transport: self.transport.clone(),
-            address: self.address.clone(),
-            platform: self.platform.clone(),
-        }
-    }
+#[derive(Debug, Default, Clone)]
+pub struct ConnectionStats {
+    pub messages_sent: u64,
+    pub messages_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub avg_rtt_ms: Option<u32>,
+    pub quality: Option<u8>,
+    // 新增：心跳与生命周期统计
+    pub heartbeat_pings: u64,
+    pub heartbeat_pongs: u64,
+    pub missed_heartbeats: u32,
+    pub established_epoch_ms: u64,
+    pub last_activity_epoch_ms: u64,
 }

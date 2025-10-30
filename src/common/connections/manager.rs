@@ -1,406 +1,260 @@
-//! 客户端连接管理器
-//! 
-//! 管理客户端连接的生命周期，包括重连、心跳等
+//! 通用连接管理器
+//!
+//! 该模块提供了一个通用连接管理器，用于管理通用连接的生命周期，
+//! 包括连接的状态监控等功能。
 
-use std::sync::Arc;
+use crate::common::connections::enhanced::EnhancedConnection;
+use crate::common::connections::config::ConnectionConfig;
+use crate::common::connections::enums::ConnectionState;
+use crate::common::error::FlareError;
+use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Mutex};
-use tracing::{info, debug, warn};
 
-use crate::common::{
-    error::Result,
-    protocol::Frame,
-    connections::{
-        traits::{ClientConnection, ConnectionEvent},
-        factory::ConnectionFactory,
-        types::{ConnectionConfig, ConnectionState},
-    },
-};
-
-/// 连接管理器配置
-#[derive(Debug, Clone)]
-pub struct ManagerConfig {
-    /// 最大连接数
-    pub max_connections: usize,
-    /// 连接超时
-    pub connection_timeout: Duration,
-    /// 重连间隔
-    pub reconnect_interval: Duration,
-    /// 最大重连次数
-    pub max_reconnect_attempts: u32,
-    /// 心跳检查间隔
-    pub heartbeat_check_interval: Duration,
-    /// 是否启用自动重连
-    pub auto_reconnect: bool,
-}
-
-impl Default for ManagerConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: 10,
-            connection_timeout: Duration::from_secs(30),
-            reconnect_interval: Duration::from_secs(5),
-            max_reconnect_attempts: 3,
-            heartbeat_check_interval: Duration::from_secs(10),
-            auto_reconnect: true,
-        }
-    }
-}
-
-/// 连接信息
-struct ConnectionInfo {
-    /// 连接实例
-    connection: Arc<Mutex<Box<dyn ClientConnection>>>,
-    /// 连接配置
-    _config: ConnectionConfig,
-    /// 创建时间
-    _created_at: Instant,
-    /// 最后活跃时间
-    last_activity: Instant,
-    /// 重连次数
-    reconnect_attempts: u32,
-    /// 是否正在重连
-    is_reconnecting: bool,
-    /// 连接状态
-    state: ConnectionState,
-}
-
-impl ConnectionInfo {
-    fn new(connection: Box<dyn ClientConnection>, config: ConnectionConfig) -> Self {
-        Self {
-            connection: Arc::new(Mutex::new(connection)),
-            _config: config,
-            _created_at: Instant::now(),
-            last_activity: Instant::now(),
-            reconnect_attempts: 0,
-            is_reconnecting: false,
-            state: ConnectionState::Initializing,
-        }
-    }
-    
-    fn update_activity(&mut self) {
-        self.last_activity = Instant::now();
-    }
-    
-    fn update_state(&mut self, state: ConnectionState) {
-        self.state = state;
-    }
-}
-
-/// 客户端连接管理器
+/// 通用连接管理器
+///
+/// 用于管理通用连接的状态监控等功能
 pub struct ConnectionManager {
-    /// 连接工厂
-    factory: ConnectionFactory,
-    /// 所有连接
-    connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
-    /// 管理器配置
-    config: ManagerConfig,
-    /// 事件处理器
-    event_handler: Arc<RwLock<Option<Arc<dyn ConnectionEvent>>>>,
-    /// 管理任务句柄
-    management_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// 连接映射表（连接ID -> 连接实例）
+    connections: Arc<Mutex<HashMap<String, Arc<EnhancedConnection>>>>,
 }
 
 impl ConnectionManager {
-    /// 创建新的连接管理器
-    pub fn new(config: ManagerConfig) -> Self {
+    /// 创建新的连接管理器实例
+    ///
+    /// # 返回值
+    /// 新创建的连接管理器实例
+    pub fn new() -> Self {
         Self {
-            factory: ConnectionFactory::new(),
-            connections: Arc::new(RwLock::new(HashMap::new())),
-            config,
-            event_handler: Arc::new(RwLock::new(None)),
-            management_task: Arc::new(RwLock::new(None)),
+            connections: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-    
-    /// 设置事件处理器
-    pub async fn set_event_handler(&mut self, handler: Arc<dyn ConnectionEvent>) {
-        *self.event_handler.write().await = Some(handler);
-    }
-    
-    /// 创建并添加新连接
-    pub async fn create_connection(&mut self, config: ConnectionConfig) -> Result<String> {
-        // 检查连接数量限制
-        let connections = self.connections.read().await;
-        if connections.len() >= self.config.max_connections {
-            return Err(crate::common::error::FlareError::connection_failed(
-                "已达到最大连接数量限制"
-            ));
-        }
-        drop(connections);
-        
-        // 创建连接
-        let connection = ConnectionFactory::create_client(config.clone()).await?;
-        let connection_id = config.id.clone();
-        
-        // 创建连接信息
-        let conn_info = ConnectionInfo::new(connection, config);
-        
-        // 添加到管理器
-        let mut connections = self.connections.write().await;
-        connections.insert(connection_id.clone(), conn_info);
-        
-        info!("连接已创建: {}", connection_id);
-        
-        Ok(connection_id)
-    }
-    
-    /// 建立连接
-    pub async fn connect(&mut self, connection_id: &str) -> Result<()> {
-        // 先建立连接和启动心跳
-        {
-            let connections = self.connections.read().await;
-            if let Some(conn_info) = connections.get(connection_id) {
-                let connection = conn_info.connection.lock().await;
-                
-                // 建立连接
-                connection.connect().await?;
-                
-                // 心跳功能已移除，由外部处理
-                info!("心跳功能已移除，请使用 send_heartbeat 方法手动发送心跳");
-            } else {
-                return Err(crate::common::error::FlareError::connection_failed(
-                    "连接不存在"
-                ));
-            }
-        }
-        
-        // 更新状态和活跃时间
-        let mut connections = self.connections.write().await;
-        if let Some(conn_info) = connections.get_mut(connection_id) {
-            conn_info.update_state(ConnectionState::Connected);
-            conn_info.update_activity();
-        }
-        
-        info!("连接已建立: {}", connection_id);
-        Ok(())
-    }
-    
-    /// 断开连接
-    pub async fn disconnect(&mut self, connection_id: &str, reason: Option<String>) -> Result<()> {
-        // 先停止心跳和断开连接
-        {
-            let connections = self.connections.read().await;
-            if let Some(conn_info) = connections.get(connection_id) {
-                let connection = conn_info.connection.lock().await;
-                
-                // 心跳功能已移除，由外部处理
-                info!("心跳功能已移除，无需停止");
-                
-                // 断开连接
-                connection.disconnect(reason).await?;
-            } else {
-                return Err(crate::common::error::FlareError::connection_failed(
-                    "连接不存在"
-                ));
-            }
-        }
-        
-        // 更新状态
-        let mut connections = self.connections.write().await;
-        if let Some(conn_info) = connections.get_mut(connection_id) {
-            conn_info.update_state(ConnectionState::Disconnected);
-        }
-        
-        info!("连接已断开: {}", connection_id);
-        Ok(())
-    }
-    
-    /// 发送消息
-    pub async fn send_message(&mut self, connection_id: &str, message: Frame) -> Result<()> {
-        // 先发送消息
-        {
-            let connections = self.connections.read().await;
-            if let Some(conn_info) = connections.get(connection_id) {
-                let connection = conn_info.connection.lock().await;
-                connection.send_message(message).await?;
-            } else {
-                return Err(crate::common::error::FlareError::connection_failed(
-                    "连接不存在"
-                ));
-            }
-        }
-        
-        // 更新活跃时间
-        let mut connections = self.connections.write().await;
-        if let Some(conn_info) = connections.get_mut(connection_id) {
-            conn_info.update_activity();
-        }
-        
-        debug!("消息已发送: {}", connection_id);
-        Ok(())
     }
 
-    /// 移除连接
-    pub async fn remove_connection(&mut self, connection_id: &str, reason: Option<String>) -> Result<()> {
-        let mut connections = self.connections.write().await;
-        
-        if let Some(conn_info) = connections.remove(connection_id) {
-            let connection = conn_info.connection.lock().await;
-            
-            // 心跳功能已移除，由外部处理
-            info!("心跳功能已移除，无需停止");
-            
-            // 断开连接
-            let _ = connection.disconnect(reason).await;
-            
-            info!("连接已移除: {}", connection_id);
+    /// 添加连接
+    ///
+    /// # 参数
+    /// * `connection` - 连接实例
+    ///
+    /// # 返回值
+    /// 操作结果，成功返回Ok(())，失败返回相应的错误
+    pub fn add_connection(&self, connection: Arc<EnhancedConnection>) -> Result<(), FlareError> {
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.insert(connection.id(), connection);
             Ok(())
         } else {
-            Err(crate::common::error::FlareError::connection_failed(
-                "连接不存在"
-            ))
+            Err(FlareError::general_error("无法获取连接映射表锁".to_string()))
         }
     }
-    
-    /// 获取连接状态
-    pub async fn get_connection_state(&self, connection_id: &str) -> Option<ConnectionState> {
-        let connections = self.connections.read().await;
-        
-        connections.get(connection_id).map(|conn_info| conn_info.state.clone())
-    }
-    
-    /// 获取所有连接状态
-    pub async fn get_all_connection_states(&self) -> HashMap<String, ConnectionState> {
-        let connections = self.connections.read().await;
-        
-        connections.iter()
-            .map(|(id, conn_info)| (id.clone(), conn_info.state.clone()))
-            .collect()
-    }
-    
-    /// 检查连接是否活跃
-    pub async fn is_connection_active(&self, connection_id: &str) -> bool {
-        let connections = self.connections.read().await;
-        if let Some(connection) = connections.get(connection_id) {
-            // 使用state字段检查连接状态
-            let state = connection.state;
-            matches!(state, ConnectionState::Connected | ConnectionState::Ready)
+
+    /// 根据ID获取连接
+    ///
+    /// # 参数
+    /// * `id` - 连接ID
+    ///
+    /// # 返回值
+    /// 连接实例的可选引用
+    pub fn get_connection(&self, id: &str) -> Option<Arc<EnhancedConnection>> {
+        if let Ok(connections) = self.connections.lock() {
+            connections.get(id).cloned()
         } else {
-            false
+            None
         }
     }
-    
+
+    /// 删除连接
+    ///
+    /// # 参数
+    /// * `id` - 连接ID
+    ///
+    /// # 返回值
+    /// 操作结果，成功返回Ok(())，失败返回相应的错误
+    pub fn remove_connection(&self, id: &str) -> Result<(), FlareError> {
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.remove(id);
+            Ok(())
+        } else {
+            Err(FlareError::general_error("无法获取连接映射表锁".to_string()))
+        }
+    }
+
+    /// 获取所有连接
+    ///
+    /// # 返回值
+    /// 所有连接实例的向量
+    pub fn get_all_connections(&self) -> Vec<Arc<EnhancedConnection>> {
+        if let Ok(connections) = self.connections.lock() {
+            connections.values().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 获取指定状态的连接
+    ///
+    /// # 参数
+    /// * `state` - 连接状态
+    ///
+    /// # 返回值
+    /// 指定状态的连接实例的向量
+    pub fn get_connections_by_state(&self, state: ConnectionState) -> Vec<Arc<EnhancedConnection>> {
+        if let Ok(connections) = self.connections.lock() {
+            connections
+                .values()
+                .filter(|conn| conn.state() == state)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// 获取连接数量
-    pub async fn get_connection_count(&self) -> usize {
-        self.connections.read().await.len()
+    ///
+    /// # 返回值
+    /// 当前管理的连接数量
+    pub fn get_connection_count(&self) -> usize {
+        if let Ok(connections) = self.connections.lock() {
+            connections.len()
+        } else {
+            0
+        }
     }
-    
-    /// 启动管理任务
-    pub async fn start_management(&mut self) -> Result<()> {
-        if self.management_task.read().await.is_some() {
-            return Ok(());
+
+    /// 清空所有连接
+    ///
+    /// # 返回值
+    /// 操作结果，成功返回Ok(())，失败返回相应的错误
+    pub fn clear_all_connections(&self) -> Result<(), FlareError> {
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.clear();
+            Ok(())
+        } else {
+            Err(FlareError::general_error("无法获取连接映射表锁".to_string()))
         }
-        
-        let connections = Arc::clone(&self.connections);
-        let config = self.config.clone();
-        let _event_handler = Arc::clone(&self.event_handler);
-        
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config.heartbeat_check_interval);
-            
-            loop {
-                interval.tick().await;
-                
-                // 检查所有连接
-                let mut connections = connections.write().await;
-                let mut to_reconnect = Vec::new();
-                
-                for (id, conn_info) in connections.iter_mut() {
-                    // 检查连接状态
-                    if matches!(conn_info.state, ConnectionState::Disconnected | ConnectionState::Failed) {
-                        if conn_info.reconnect_attempts < config.max_reconnect_attempts && !conn_info.is_reconnecting {
-                            to_reconnect.push(id.clone());
-                        }
-                    }
-                    
-                    // 检查连接超时
-                    if conn_info.last_activity.elapsed() > config.connection_timeout {
-                        warn!("连接超时: {}", id);
-                        conn_info.update_state(ConnectionState::Failed);
-                    }
-                }
-                
-                // 处理需要重连的连接
-                for id in to_reconnect {
-                    if let Some(conn_info) = connections.get_mut(&id) {
-                        conn_info.is_reconnecting = true;
-                        conn_info.reconnect_attempts += 1;
-                        
-                        info!("尝试重连: {} (第 {} 次)", id, conn_info.reconnect_attempts);
-                        
-                        // 这里应该实现真正的重连逻辑
-                        // 目前只是标记状态
-                        conn_info.update_state(ConnectionState::Reconnecting);
-                    }
-                }
-            }
-        });
-        
-        *self.management_task.write().await = Some(task);
-        info!("连接管理任务已启动");
-        Ok(())
-    }
-    
-    /// 停止管理任务
-    pub async fn stop_management(&mut self) -> Result<()> {
-        if let Some(task) = self.management_task.write().await.take() {
-            task.abort();
-            info!("连接管理任务已停止");
-        }
-        Ok(())
-    }
-    
-    /// 清理不活跃的连接
-    pub async fn cleanup_inactive_connections(&mut self, timeout: Duration, reason: Option<String>) -> usize {
-        let mut connections = self.connections.write().await;
-        let mut to_remove = Vec::new();
-        
-        for (id, conn_info) in connections.iter() {
-            if conn_info.last_activity.elapsed() > timeout {
-                to_remove.push(id.clone());
-            }
-        }
-        
-        let removed_count = to_remove.len();
-        
-        for id in to_remove {
-            if let Some(conn_info) = connections.remove(&id) {
-                let connection = conn_info.connection.lock().await;
-                // 心跳功能已移除，由外部处理
-                let _ = connection.disconnect(reason.clone()).await;
-                
-                info!("清理不活跃连接: {}", id);
-                
-                // 触发连接断开事件
-                if let Some(handler) = &*self.event_handler.read().await {
-                    let handler = Arc::clone(handler);
-                    let id_clone = id.clone();
-                    tokio::spawn(async move {
-                        handler.on_disconnected(&id_clone, "连接超时").await;
-                    });
-                }
-            }
-        }
-        
-        removed_count
     }
 }
 
 impl Default for ConnectionManager {
     fn default() -> Self {
-        Self::new(ManagerConfig::default())
+        Self::new()
     }
 }
 
-impl Drop for ConnectionManager {
-    fn drop(&mut self) {
-        // 确保在析构时停止管理任务
-        if let Ok(task_guard) = self.management_task.try_write() {
-            if let Some(task) = task_guard.as_ref() {
-                task.abort();
-            }
-        }
+/// 全局连接管理器实例
+///
+/// 提供全局访问的连接管理器实例
+static mut GLOBAL_CONNECTION_MANAGER: Option<Arc<ConnectionManager>> = None;
+static GLOBAL_CONNECTION_MANAGER_INIT: std::sync::Once = std::sync::Once::new();
+
+/// 获取全局连接管理器实例
+///
+/// # 返回值
+/// 全局连接管理器实例
+pub fn get_global_connection_manager() -> Arc<ConnectionManager> {
+    unsafe {
+        GLOBAL_CONNECTION_MANAGER_INIT.call_once(|| {
+            GLOBAL_CONNECTION_MANAGER = Some(Arc::new(ConnectionManager::new()));
+        });
+        GLOBAL_CONNECTION_MANAGER.as_ref().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::connections::enums::Transport;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_connection_manager_add_connection() {
+        let manager = ConnectionManager::new();
+        let config = ConnectionConfig::default();
+        
+        let connection = Arc::new(EnhancedConnection::new(config));
+        let result = manager.add_connection(connection);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_connection_manager_get_connection() {
+        let manager = ConnectionManager::new();
+        let config = ConnectionConfig::default();
+        
+        let connection = Arc::new(EnhancedConnection::new(config));
+        let id = connection.id();
+        
+        let result = manager.add_connection(connection);
+        assert!(result.is_ok());
+        
+        let retrieved = manager.get_connection(&id);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id(), id);
+    }
+
+    #[test]
+    fn test_connection_manager_remove_connection() {
+        let manager = ConnectionManager::new();
+        let config = ConnectionConfig::default();
+        
+        let connection = Arc::new(EnhancedConnection::new(config));
+        let id = connection.id();
+        
+        let result = manager.add_connection(connection);
+        assert!(result.is_ok());
+        
+        assert!(manager.get_connection(&id).is_some());
+        
+        let result = manager.remove_connection(&id);
+        assert!(result.is_ok());
+        
+        assert!(manager.get_connection(&id).is_none());
+    }
+
+    #[test]
+    fn test_connection_manager_get_all_connections() {
+        let manager = ConnectionManager::new();
+        
+        let config1 = ConnectionConfig::default();
+        let config2 = ConnectionConfig {
+            transport: Transport::WebSocket,
+            ..Default::default()
+        };
+        
+        let conn1 = Arc::new(EnhancedConnection::new(config1));
+        let conn2 = Arc::new(EnhancedConnection::new(config2));
+        
+        let _ = manager.add_connection(conn1);
+        let _ = manager.add_connection(conn2);
+        
+        let connections = manager.get_all_connections();
+        assert_eq!(connections.len(), 2);
+    }
+
+    #[test]
+    fn test_connection_manager_get_connection_count() {
+        let manager = ConnectionManager::new();
+        
+        assert_eq!(manager.get_connection_count(), 0);
+        
+        let config = ConnectionConfig::default();
+        let connection = Arc::new(EnhancedConnection::new(config));
+        let _ = manager.add_connection(connection);
+        
+        assert_eq!(manager.get_connection_count(), 1);
+    }
+
+    #[test]
+    fn test_connection_manager_clear_all_connections() {
+        let manager = ConnectionManager::new();
+        
+        let config = ConnectionConfig::default();
+        let connection = Arc::new(EnhancedConnection::new(config));
+        let _ = manager.add_connection(connection);
+        
+        assert_eq!(manager.get_connection_count(), 1);
+        
+        let result = manager.clear_all_connections();
+        assert!(result.is_ok());
+        
+        assert_eq!(manager.get_connection_count(), 0);
     }
 }

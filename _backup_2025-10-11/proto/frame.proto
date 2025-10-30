@@ -1,0 +1,57 @@
+// Frame Protocol Definition
+// Author: Flare Core Team
+// Description: Core message frame structure for reliable long-connection communication
+
+syntax = "proto3";
+
+// Package definition for the Flare core messaging system
+package flare.core;
+
+// Import commands
+import "commands.proto";
+
+// Frame represents a unified message structure for all communication
+// It contains all necessary metadata and the actual command
+message Frame {
+  // The actual command
+  flare.core.commands.Command command = 1;
+  
+  // Unique identifier for the message (used for acknowledgment and deduplication)
+  string message_id = 2;
+  
+  // Reliability level of the message (best effort, at least once, exactly once, ordered)
+  Reliability reliability = 3;
+  
+  // Timestamp when the message was created (milliseconds since Unix epoch)
+  uint64 timestamp = 4;
+  
+  // Optional session identifier for grouping related messages
+  optional string session_id = 5;
+  
+  // Message priority level (0-255, higher values indicate higher priority)
+  uint32 priority = 6;
+  
+  // Optional compression algorithm identifier (if payload is compressed)
+  optional uint32 compression = 7;
+  
+  // Flag indicating whether the payload is encrypted
+  bool encrypted = 8;
+  
+  // Metadata key-value pairs (for additional information like platform data)
+  map<string, bytes> metadata = 9;
+}
+
+// Reliability defines the delivery guarantees for messages
+enum Reliability {
+  // Best effort delivery (no guarantees)
+  BEST_EFFORT = 0;
+  
+  // At least once delivery (message may be duplicated but not lost)
+  AT_LEAST_ONCE = 1;
+  
+  // Exactly once delivery (message delivered exactly one time)
+  EXACTLY_ONCE = 2;
+  
+  // Ordered delivery (messages delivered in order)
+  ORDERED = 3;
+}

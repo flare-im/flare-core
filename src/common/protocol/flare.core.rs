@@ -7,9 +7,7 @@
 pub struct Frame {
     /// The actual command
     #[prost(message, optional, tag = "1")]
-    pub command: ::core::option::Option<
-        crate::common::protocol::flare_proto::commands::Command,
-    >,
+    pub command: ::core::option::Option<super::flare_core_commands::Command>,
     /// Unique identifier for the message (used for acknowledgment and deduplication)
     #[prost(string, tag = "2")]
     pub message_id: ::prost::alloc::string::String,

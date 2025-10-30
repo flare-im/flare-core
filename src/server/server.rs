@@ -1,177 +1,130 @@
+use crate::server::config::{ServerConfig, ServerType};
+use crate::server::servers::{websocket, quic};
+use crate::server::manager::traits::ConnectionManager;
+use crate::server::manager::connection_manager::ConnectionManagerImpl;
+use crate::server::traits::ProtocolService;
+use crate::server::events::handler::{EnhancedEventHandler, EventHandlerAdapter};
+use crate::common::error::FlareError;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
+use tokio::time::{interval, Duration};
 
-use crate::common::{
-    error::Result,
-};
-
-use crate::server::{manager::{
-    traits::ServerConnectionManager,
-    ConnectionManager,
-    connection_manager::HeartbeatConfig,
-}, event::ServerEvent, ServerEventAdapter, config::{ServerConfig, ServerType}, websocket, quic, DefServerEventHandler};
-
-/// 服务器trait
-#[async_trait::async_trait]
-pub trait Server: Send + Sync {
-    /// 启动服务器
-    async fn start(&self) -> Result<()>;
-    
-    /// 停止服务器
-    async fn stop(&self);
-}
-
-/// 服务trait
-#[async_trait::async_trait]
-pub trait ServerService: Server + Send + Sync {
-    /// 获取服务类型
-    fn get_type(&self) -> ServerType;
-    
-    /// 获取本地地址
-    fn get_local_addr(&self) -> Option<String>;
-}
-
-/// 服务器实现
+/// 聚合型服务端
 pub struct AggregationServer {
-    /// 配置
+    /// 服务器配置
     config: ServerConfig,
     /// 是否正在运行
     is_running: Arc<AtomicBool>,
-    /// 事件处理器
-    event_handler: Arc<ServerEventAdapter>,
+    /// 协议服务列表
+    protocol_services: Vec<Arc<dyn ProtocolService>>,
     /// 连接管理器
-    connection_manager: Arc<dyn ServerConnectionManager>,
-    /// WebSocket服务器实例
-    websocket_server: Arc<tokio::sync::RwLock<Option<websocket::WebSocketServer>>>,
-    /// QUIC服务器实例
-    quic_server: Arc<tokio::sync::RwLock<Option<quic::QuicServer>>>,
+    connection_manager: Arc<dyn ConnectionManager>,
+    /// 心跳任务句柄
+    heartbeat_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// 事件处理器
+    event_handler: Arc<tokio::sync::RwLock<Option<Arc<dyn EnhancedEventHandler>>>>,
 }
 
 impl AggregationServer {
-    /// 启动服务器
-    pub async fn start(&self) -> Result<()> {
+    /// 创建新的聚合型服务端
+    pub fn new(config: ServerConfig) -> Self {
+        Self::new_with_connection_manager(config, Arc::new(ConnectionManagerImpl::new()))
+    }
+    
+    /// 创建新的聚合型服务端，使用指定的连接管理器
+    pub fn new_with_connection_manager(config: ServerConfig, connection_manager: Arc<dyn ConnectionManager>) -> Self {
+        // 根据配置创建协议服务
+        let mut protocol_services: Vec<Arc<dyn ProtocolService>> = Vec::new();
+        
+        match config.server_type {
+            ServerType::WebSocket => {
+                if let Some(_ws_config) = &config.websocket_config {
+                    let websocket_server = Arc::new(websocket::WebSocketServer::new(
+                        config.clone(), 
+                        connection_manager.clone()
+                    ));
+                    protocol_services.push(websocket_server);
+                }
+            },
+            ServerType::Quic => {
+                if let Some(_quic_config) = &config.quic_config {
+                    let quic_server = Arc::new(quic::QuicServer::new(
+                        config.clone(), 
+                        connection_manager.clone()
+                    ));
+                    protocol_services.push(quic_server);
+                }
+            },
+            ServerType::Dual => {
+                // 添加WebSocket服务
+                if let Some(_ws_config) = &config.websocket_config {
+                    let websocket_server = Arc::new(websocket::WebSocketServer::new(
+                        config.clone(), 
+                        connection_manager.clone()
+                    ));
+                    protocol_services.push(websocket_server);
+                }
+                
+                // 添加QUIC服务
+                if let Some(_quic_config) = &config.quic_config {
+                    let quic_server = Arc::new(quic::QuicServer::new(
+                        config.clone(), 
+                        connection_manager.clone()
+                    ));
+                    protocol_services.push(quic_server);
+                }
+            },
+        }
+        
+        Self {
+            config,
+            is_running: Arc::new(AtomicBool::new(false)),
+            protocol_services,
+            connection_manager,
+            heartbeat_task: Arc::new(tokio::sync::Mutex::new(None)),
+            event_handler: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+    
+    /// 添加协议服务
+    pub fn add_protocol_service(&mut self, service: Arc<dyn ProtocolService>) {
+        self.protocol_services.push(service);
+    }
+
+    /// 启动服务端
+    pub async fn start(&self) -> Result<(), FlareError> {
         // 设置运行状态
         self.is_running.store(true, Ordering::Relaxed);
         
-        info!("开始启动服务器，类型: {:?}", self.config.server_type);
+        info!("开始启动聚合型服务器，包含 {} 个协议服务", self.protocol_services.len());
         
-        // 根据配置启动相应的服务
-        match self.config.server_type {
-            ServerType::WebSocket => {
-                info!("启动WebSocket服务模式");
-                // 仅启动WebSocket服务
-                self.start_websocket().await?;
-            },
-            ServerType::Quic => {
-                info!("启动QUIC服务模式");
-                // 仅启动QUIC服务
-                self.start_quic().await?;
-            },
-            ServerType::Dual => {
-                info!("启动双协议服务模式");
-                // 双协议模式：同时启动WebSocket和QUIC
-                self.start_dual_protocol().await?;
-            },
+        // 启动所有协议服务
+        for service in &self.protocol_services {
+            info!("启动 {} 服务", service.name());
+            service.start(self.connection_manager.clone()).await?;
         }
         
-        // 启动连接管理器的所有任务
-        self.connection_manager.start_tasks().await;
-        info!("连接管理器任务已启动");
+        // 启动心跳检测任务
+        self.start_heartbeat_task().await;
         
-        info!("服务器启动完成");
-        Ok(())
-    }
-    
-    /// 启动WebSocket服务
-    async fn start_websocket(&self) -> Result<()> {
-        info!("准备启动WebSocket服务");
-        if let Some(config) = &self.config.websocket_config {
-            info!("WebSocket配置存在，监听地址: {}", config.listen_addr);
-            info!("启动WebSocket服务: {}", config.listen_addr);
-            
-            // 使用已有的连接管理器而不是创建新的
-            let websocket_server = websocket::WebSocketServer::new(
-                self.config.clone(),
-                Arc::clone(&self.connection_manager),
-                Arc::clone(&self.event_handler),
-            );
-            
-            // 保存WebSocket服务器实例引用
-            {
-                let mut ws_server = self.websocket_server.write().await;
-                *ws_server = Some(websocket_server);
-            }
-            
-            // 启动WebSocket服务
-            if let Some(ws_server) = &*self.websocket_server.read().await {
-                info!("调用WebSocket服务的start方法");
-                ws_server.start().await?;
-                info!("WebSocket服务start方法调用完成");
-            }
-        } else {
-            panic!("WebSocket配置不存在")
-        }
-        Ok(())
-    }
-    
-    /// 启动QUIC服务
-    async fn start_quic(&self) -> Result<()> {
-        if let Some(config) = &self.config.quic_config {
-            info!("启动QUIC服务: {}", config.listen_addr);
-            
-            let quic_server = quic::QuicServer::new(
-                self.config.clone(),
-                Arc::clone(&self.connection_manager),
-                Arc::clone(&self.event_handler),
-            );
-            
-            // 保存QUIC服务器实例引用
-            {
-                let mut q_server = self.quic_server.write().await;
-                *q_server = Some(quic_server);
-            }
-            
-            // 启动QUIC服务
-            if let Some(q_server) = &*self.quic_server.read().await {
-                q_server.start().await?;
-            }
-        }else { panic!("QUIC配置不存在") }
-        Ok(())
-    }
-    
-    /// 启动双协议服务
-    async fn start_dual_protocol(&self) -> Result<()> {
-        info!("启动双协议模式");
-        
-        // 启动WebSocket服务
-        self.start_websocket().await?;
-        
-        // 启动QUIC服务
-        self.start_quic().await?;
-        
+        info!("聚合型服务器启动完成");
         Ok(())
     }
 
-    /// 停止服务器
-    pub async fn stop(&self) -> Result<()> {
+    /// 停止服务端
+    pub async fn stop(&self) -> Result<(), FlareError> {
         self.is_running.store(false, Ordering::Relaxed);
         
-        // 停止连接管理器的所有任务
-        self.connection_manager.stop_tasks().await;
-        info!("连接管理器任务已停止");
+        // 停止心跳任务
+        self.stop_heartbeat_task().await;
         
-        // 停止WebSocket服务
-        if let Some(ws_server) = &*self.websocket_server.read().await {
-            ws_server.stop().await;
+        // 停止所有协议服务
+        for service in &self.protocol_services {
+            info!("停止 {} 服务", service.name());
+            service.stop().await?;
         }
         
-        // 停止QUIC服务
-        if let Some(q_server) = &*self.quic_server.read().await {
-            q_server.stop().await;
-        }
-        
-        info!("服务器已停止");
+        info!("聚合型服务器已停止");
         Ok(())
     }
 
@@ -184,103 +137,128 @@ impl AggregationServer {
     pub fn is_running(&self) -> bool {
         self.is_running.load(Ordering::Relaxed)
     }
-
+    
     /// 获取连接管理器
-    pub fn get_connection_manager(&self) -> &Arc<dyn ServerConnectionManager> {
+    pub fn connection_manager(&self) -> &Arc<dyn ConnectionManager> {
         &self.connection_manager
     }
-}
-
-impl Drop for AggregationServer {
-    fn drop(&mut self) {
-        // 确保在析构时停止服务
-        if self.is_running.load(Ordering::Relaxed) {
-            // 注意：在Drop中不能使用async，这里只是记录日志
-            info!("服务端正在被销毁");
+    
+    /// 获取协议服务列表
+    pub fn protocol_services(&self) -> &[Arc<dyn ProtocolService>] {
+        &self.protocol_services
+    }
+    
+    /// 设置事件处理器
+    pub async fn set_event_handler(&self, handler: Arc<dyn EnhancedEventHandler>) {
+        let mut event_handler = self.event_handler.write().await;
+        *event_handler = Some(handler.clone());
+        
+        // 同时设置连接管理器的事件处理器
+        self.connection_manager.set_event_handler(handler).await;
+    }
+    
+    /// 移除事件处理器
+    pub async fn remove_event_handler(&self) {
+        let mut event_handler = self.event_handler.write().await;
+        *event_handler = None;
+    }
+    
+    /// 获取事件处理器适配器
+    pub async fn get_event_handler_adapter(&self) -> EventHandlerAdapter {
+        let event_handler = self.event_handler.read().await;
+        if let Some(handler) = &*event_handler {
+            EventHandlerAdapter::with_handler(handler.clone())
+        } else {
+            EventHandlerAdapter::new()
+        }
+    }
+    
+    /// 启动心跳检测任务
+    async fn start_heartbeat_task(&self) {
+        let is_running = self.is_running.clone();
+        let connection_manager = self.connection_manager.clone();
+        let cleanup_interval_ms = self.config.cleanup_interval_ms;
+        let heartbeat_monitor_timeout_ms = self.config.heartbeat_monitor_timeout_ms;
+        
+        let task = tokio::spawn(async move {
+            let mut interval = interval(Duration::from_millis(cleanup_interval_ms));
+            
+            while is_running.load(Ordering::Relaxed) {
+                interval.tick().await;
+                
+                // 执行连接清理
+                if let Err(e) = connection_manager.cleanup(heartbeat_monitor_timeout_ms) {
+                    warn!("连接清理任务出错: {:?}", e);
+                }
+                
+                // 输出统计信息
+                let stats = connection_manager.stats_snapshot();
+                info!("连接统计: 总数={}, 活跃={}, 平均质量={:?}", 
+                      stats.total, stats.active, stats.avg_quality);
+            }
+            
+            info!("心跳检测任务已停止");
+        });
+        
+        let mut heartbeat_task = self.heartbeat_task.lock().await;
+        *heartbeat_task = Some(task);
+        
+        info!("心跳检测任务已启动，清理间隔: {}ms", cleanup_interval_ms);
+    }
+    
+    /// 停止心跳检测任务
+    async fn stop_heartbeat_task(&self) {
+        let mut heartbeat_task = self.heartbeat_task.lock().await;
+        if let Some(task) = heartbeat_task.take() {
+            task.abort();
+            info!("心跳检测任务已终止");
         }
     }
 }
 
-/// 服务器统计信息
-#[derive(Debug, Clone)]
-pub struct ServerStats {
-    /// 总连接数
-    pub total_connections: usize,
-    /// 活跃连接数
-    pub active_connections: usize,
-    /// 总消息数
-    pub total_messages: u64,
-    /// 平均连接质量
-    pub average_quality: u8,
-    /// 服务器运行时间
-    pub uptime: Duration,
-}
-
-
-/// 服务器构建器
+/// 服务端构建器
 pub struct ServerBuilder {
-    /// 配置
     config: ServerConfig,
-    /// 事件处理器
-    event_handler: Option<Arc<dyn ServerEvent>>,
-    /// 连接管理器
-    connection_manager: Option<Arc<dyn ServerConnectionManager>>,
+    connection_manager: Option<Arc<dyn ConnectionManager>>,
+    event_handler: Option<Arc<dyn EnhancedEventHandler>>,
 }
 
 impl ServerBuilder {
-    /// 创建新的服务器构建器
+    /// 创建新的服务端构建器
     pub fn new(config: ServerConfig) -> Self {
-        Self {
-            config,
-            event_handler: None,
+        Self { 
+            config, 
             connection_manager: None,
+            event_handler: None,
         }
     }
-
+    
+    /// 设置连接管理器
+    pub fn with_connection_manager(mut self, connection_manager: Arc<dyn ConnectionManager>) -> Self {
+        self.connection_manager = Some(connection_manager);
+        self
+    }
+    
     /// 设置事件处理器
-    pub fn with_event_handler(mut self, event_handler: Arc<dyn ServerEvent>) -> Self {
+    pub fn with_event_handler(mut self, event_handler: Arc<dyn EnhancedEventHandler>) -> Self {
         self.event_handler = Some(event_handler);
         self
     }
 
-    /// 设置连接管理器
-    pub fn with_connection_manager(mut self, connection_manager: Arc<dyn ServerConnectionManager>) -> Self {
-        self.connection_manager = Some(connection_manager);
-        self
-    }
-
-    /// 构建服务器实例
-    pub fn build(self) -> Result<AggregationServer> {
-        // 检查必要配置
-        let event_handler = if let Some(handler) = self.event_handler {
-            Arc::new(ServerEventAdapter::new(handler))
+    /// 构建服务端实例
+    pub fn build(self) -> AggregationServer {
+        let server = if let Some(connection_manager) = self.connection_manager {
+            AggregationServer::new_with_connection_manager(self.config, connection_manager)
         } else {
-            // 使用默认的事件处理器
-            let default_handler = Arc::new(DefServerEventHandler::default());
-            Arc::new(ServerEventAdapter::new(default_handler))
+            AggregationServer::new(self.config)
         };
-
-        let connection_manager = if let Some(manager) = self.connection_manager {
-            manager
-        } else {
-            // 根据ServerConfig创建心跳配置
-            let heartbeat_config = HeartbeatConfig {
-                check_interval: std::time::Duration::from_millis(self.config.heartbeat_interval_ms),
-                connection_timeout: std::time::Duration::from_millis(self.config.heartbeat_timeout_ms),
-                enable_auto_cleanup: true,
-            };
-            
-            // 创建带配置的连接管理器
-            Arc::new(ConnectionManager::with_heartbeat_config(heartbeat_config))
-        };
-
-        Ok(AggregationServer {
-            config: self.config,
-            is_running: Arc::new(AtomicBool::new(false)),
-            event_handler,
-            connection_manager,
-            websocket_server: Arc::new(tokio::sync::RwLock::new(None)),
-            quic_server: Arc::new(tokio::sync::RwLock::new(None)),
-        })
+        
+        // 如果提供了事件处理器，则设置它
+        if let Some(_event_handler) = self.event_handler {
+            // 注意：这里我们需要在异步上下文中设置事件处理器
+            // 在实际使用中，用户需要在启动服务后手动设置事件处理器
+        }
+        
+        server
     }
 }
