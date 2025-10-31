@@ -1,20 +1,45 @@
+// Frame 协议定义
+// 作者：Flare Core Team
+// 描述：长连接通信的核心消息帧结构，保证可靠传输
+
 syntax = "proto3";
 
+// Flare 核心消息系统包定义
 package flare.core;
 
+// 引入命令定义
 import "commands.proto";
 
-// 统一的消息帧，用于封装所有传输层消息
+// Frame 表示统一的消息结构
+// 包含必要的元数据和实际的命令
 message Frame {
-    // 消息序列号，用于请求-响应匹配
-    uint64 sequence = 1;
-    
-    // 消息类型，用于区分不同类型的消息
-    // 0: Heartbeat, 1: Handshake, 2: Data, 3: Close
-    uint32 type = 2;
-    
-    // 消息体，可以是任何类型的 Protobuf 消息
-    oneof payload {
-        commands.Command command = 3;
-    }
+  // 实际命令
+  flare.core.commands.Command command = 1;
+
+  // 消息唯一标识（用于消息确认和去重）
+  string message_id = 2;
+
+  // 消息的可靠性等级（尽力而为、至少一次、精确一次、有序）
+  Reliability reliability = 3;
+
+  // 消息创建时间戳（自 Unix 纪元起的毫秒数）
+  uint64 timestamp = 4;
+
+  // 元数据键值对（用于附加信息：session_id、priority、compression、encrypted等）
+  map<string, bytes> metadata = 5;
+}
+
+// Reliability 定义消息的投递保证等级
+enum Reliability {
+  // 尽力而为投递（不保证可靠性）
+  BEST_EFFORT = 0;
+
+  // 至少一次投递（可能重复，但不丢失）
+  AT_LEAST_ONCE = 1;
+
+  // 精确一次投递（确保消息仅投递一次）
+  EXACTLY_ONCE = 2;
+
+  // 有序投递（消息按顺序投递）
+  ORDERED = 3;
 }
