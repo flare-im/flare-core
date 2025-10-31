@@ -17,7 +17,7 @@ fn main() -> Result<()> {
     // 移除 extern_path 配置，让 Protobuf 生成的代码自包含
     
     // 编译proto文件
-    config.compile_protos(&["proto/frame.proto", "proto/commands.proto"], &["proto/"])?;
+    config.compile_protos(&["frame.proto", "commands.proto"], &["proto/"])?;
     
     // 修复生成的 flare.core.rs 文件中的引用
     let flare_core_path = "src/common/protocol/flare.core.rs";

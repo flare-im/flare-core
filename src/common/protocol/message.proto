@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package protocol;
+
+message Header {
+    string message_id = 1;
+    uint64 timestamp = 2;
+    enum ContentType {
+        JSON = 0;
+        PROTOBUF = 1;
+    }
+    ContentType content_type = 3;
+}
+
+message Envelope {
+    Header header = 1;
+    bytes payload = 2;
+}

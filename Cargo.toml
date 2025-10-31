@@ -3,7 +3,7 @@ name = "flare-core"
 version = "0.1.0"
 edition = "2021"
 description = "Flare Core - 高性能、可靠的即时通讯长连接工具包"
-keywords = [ "websocket", "quic"]
+keywords = ["websocket", "quic"]
 authors = ["Flare Team"]
 license = "MIT"
 repository = "https://github.com/flare-team/flare-core"
@@ -11,184 +11,19 @@ homepage = "https://flare-core.dev"
 documentation = "https://docs.rs/flare-core"
 readme = "README.md"
 
-[[example]]
-name = "chat_room_server"
-path = "examples/chat_room/server.rs"
-
-[[example]]
-name = "chat_room_client"
-path = "examples/chat_room/client.rs"
-
-[[example]]
-name = "architecture_demo"
-path = "examples/architecture_demo.rs"
-
-# === 示例配置说明 ===
-#
-# 以下是如何为不同类型的示例配置 Cargo.toml 的示例
-# 注意：这些配置仅用于说明目的，实际使用时应根据需要启用相应的功能
-
-# === QUIC 示例配置 ===
-#
-# QUIC 客户端和服务端示例需要以下依赖：
-# - quinn (QUIC 协议实现)
-# - rustls (TLS 支持)
-# - rustls-pemfile (PEM 文件解析)
-# - rcgen (证书生成，用于测试)
-# - tokio (异步运行时)
-#
-# 示例文件：
-# - examples/common/quic_client_example.rs
-# - examples/common/quic_server_example.rs
-
-# === WebSocket 示例配置 ===
-#
-# WebSocket 客户端和服务端示例需要以下依赖：
-# - tokio-tungstenite (WebSocket 实现)
-# - tokio-native-tls (TLS 支持，可选)
-# - url (URL 解析)
-# - futures-util (异步流处理)
-#
-# 示例文件：
-# - examples/common/websocket_client_example.rs
-# - examples/common/websocket_server_example.rs
-
-# === 通用依赖项 ===
-#
-# 所有示例都需要以下依赖：
-# - tokio (异步运行时)
-# - serde/serde_json (JSON 序列化)
-# - prost (Protobuf 序列化)
-# - tracing/tracing-subscriber (日志)
-# - async-trait (异步 trait)
-# - chrono (时间处理)
-
 [dependencies]
-# 异步运行时（核心功能）
-tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal", "io-std"] }
-
-# 序列化（协议需要）
-serde = { version = "1.0.210", features = ["derive"] }
-serde_json = "1.0.128"
-bincode = "1.3.3"
-# Protobuf支持
-prost = "0.14.1"
-prost-types = "0.14.1"
-
-# 网络相关（默认可用）
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.23.0", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+prost = "0.14"
+bytes = "1"
+async-trait = "0.1"
 quinn = "0.11"
-tokio-tungstenite = "0.28.0"
-
-# TLS（与网络功能配合）
-rustls = { version = "0.23.31", features = ["ring"] }
-rustls-pemfile = "2.2.0"
-rustls-native-certs = "0.8.1"
-# tokio-native-tls = "0.3.1"
-
-# 时间处理（连接管理需要）
-chrono = { version = "0.4.38", features = ["serde"] }
-
-# 日志（调试和监控）
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"], optional = true }
-
-# 错误处理（核心功能）
-thiserror = "2.0.15"
-
-# 终端检测（客户端示例需要）
-atty = "0.2.14"
-
-# 异步trait（连接接口需要）
-async-trait = "0.1.83"
-
-# 全局静态变量（工厂模式需要）
-lazy_static = "1.5.0"
-
-# 压缩算法库
-lz4_flex = "0.11.3"
-snap = "1.1.1"
-flate2 = "1.0.28"
-
-# 随机数生成（测试用）
-fastrand = "2.0"
-rand = "0.9"
-
-# UUID生成
-uuid = { version = "1.0", features = ["v4"] }
-
-# 流处理（WebSocket 需要）
-futures-util = "0.3.30"
-
-# 网络地址（配置需要）
-url = "2.5.0"
-
-# MessagePack支持
-rmp-serde = "1.3.0"
-# CBOR支持
-serde_cbor = "0.11.2"
-
-# 证书生成（QUIC服务端需要）
-rcgen = "0.13.1"
-hex = "0.4.3"
-
-# 并发哈希映射（服务器连接管理需要）
-dashmap = "6.0.1"
-
-# 字节缓冲区（零拷贝优化需要）
-bytes = "1.7.0"
-futures = "0.3"
 
 [build-dependencies]
-prost-build = "0.13.0"
+prost-build = "0.14"
 
 [features]
-# 默认功能
-default = ["logging"]
-# 日志功能
-logging = ["tracing-subscriber"]
-# 完整功能（现在默认包含所有网络功能）
-full = ["logging"]
-
-[dev-dependencies]
-tokio-test = "0.4"
-tempfile = "3.0"
-
-# === 示例配置说明 ===
-#
-# 以下是如何为不同类型的示例配置 Cargo.toml 的示例
-# 注意：这些配置仅用于说明目的，实际使用时应根据需要启用相应的功能
-
-# === QUIC 示例配置 ===
-#
-# QUIC 客户端和服务端示例需要以下依赖：
-# - quinn (QUIC 协议实现)
-# - rustls (TLS 支持)
-# - rustls-pemfile (PEM 文件解析)
-# - rcgen (证书生成，用于测试)
-# - tokio (异步运行时)
-#
-# 示例文件：
-# - examples/common/quic_client_example.rs
-# - examples/common/quic_server_example.rs
-
-# === WebSocket 示例配置 ===
-#
-# WebSocket 客户端和服务端示例需要以下依赖：
-# - tokio-tungstenite (WebSocket 实现)
-# - tokio-native-tls (TLS 支持，可选)
-# - url (URL 解析)
-# - futures-util (异步流处理)
-#
-# 示例文件：
-# - examples/common/websocket_client_example.rs
-# - examples/common/websocket_server_example.rs
-
-# === 通用依赖项 ===
-#
-# 所有示例都需要以下依赖：
-# - tokio (异步运行时)
-# - serde/serde_json (JSON 序列化)
-# - prost (Protobuf 序列化)
-# - tracing/tracing-subscriber (日志)
-# - async-trait (异步 trait)
-# - chrono (时间处理)
+default = []
