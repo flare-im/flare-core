@@ -21,6 +21,13 @@ prost = "0.14"
 bytes = "1"
 async-trait = "0.1"
 quinn = "0.11"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1.0"
+lazy_static = "1.4"
+url = "2.5"
+rcgen = "0.12"
+rustls-pemfile = "2.0"
 
 [build-dependencies]
 prost-build = "0.14"

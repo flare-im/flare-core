@@ -1,6 +1,7 @@
 //! 序列化示例模块
 //! 展示如何使用 JSON 和 Protobuf 序列化 Frame 消息
 
+use crate::common::error::Result;
 use super::{Frame, FrameBuilder, ping, pong, connect, SerializationFormat};
 use super::flare::core::{Reliability, Command};
 use super::flare::core::commands::command::Type as CommandType;
@@ -43,13 +44,15 @@ pub fn example_json_serialization() -> String {
 }
 
 /// 示例：从 Protobuf 反序列化
-pub fn example_protobuf_deserialization(data: &[u8]) -> Result<Frame, prost::DecodeError> {
+pub fn example_protobuf_deserialization(data: &[u8]) -> Result<Frame> {
     Frame::decode(data)
+        .map_err(|e| crate::common::error::FlareError::deserialization_error(e.to_string()))
 }
 
 /// 示例：从 JSON 反序列化
-pub fn example_json_deserialization(data: &str) -> Result<Frame, serde_json::Error> {
+pub fn example_json_deserialization(data: &str) -> Result<Frame> {
     serde_json::from_str(data)
+        .map_err(|e| crate::common::error::FlareError::deserialization_error(e.to_string()))
 }
 
 #[cfg(test)]

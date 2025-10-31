@@ -1,8 +1,8 @@
+use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
 use crate::transport::quic::QUICTransport;
 use crate::transport::tcp::TCPTransport;
 use crate::transport::websocket::WebSocketTransport;
-use std::error::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -15,7 +15,10 @@ pub enum TransportType {
 
 pub enum StreamWrapper {
     WebSocket(WebSocketStream<MaybeTlsStream<TcpStream>>),
-    QUIC(quinn::Connection),
+    QUIC {
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+    },
     TCP(TcpStream),
 }
 
@@ -40,18 +43,18 @@ impl TransportFactory {
     pub fn create_connection(
         transport_type: TransportType,
         stream: StreamWrapper,
-    ) -> Result<Box<dyn Connection>, Box<dyn Error>> {
+    ) -> Result<Box<dyn Connection>> {
         match (transport_type, stream) {
             (TransportType::WebSocket, StreamWrapper::WebSocket(ws_stream)) => {
                 Ok(Box::new(WebSocketTransport::new(ws_stream)))
             }
-            (TransportType::QUIC, StreamWrapper::QUIC(quic_conn)) => {
-                Ok(Box::new(QUICTransport::new(quic_conn)))
+            (TransportType::QUIC, StreamWrapper::QUIC { send, recv }) => {
+                Ok(Box::new(QUICTransport::new(send, recv)))
             }
             (TransportType::TCP, StreamWrapper::TCP(tcp_stream)) => {
                 Ok(Box::new(TCPTransport::new(tcp_stream)))
             }
-            _ => Err("Mismatched transport type and stream".into()),
+            _ => Err(FlareError::protocol_error("Mismatched transport type and stream")),
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::common::error::FlareError;
 use std::sync::Arc;
 
 /// Represents events that occur on a connection.
@@ -15,7 +16,7 @@ pub enum ConnectionEvent {
     /// The payload is a byte vector.
     Message(Vec<u8>),
     /// Emitted when a non-fatal error occurs on the connection.
-    Error(String),
+    Error(FlareError),
 }
 
 /// An observer for connection events.
