@@ -8,7 +8,7 @@
 //! - 连接管理：连接存储和查询
 //! - 工具函数：常用工具和常量
 
-pub mod cert_utils;
+pub mod cert;
 pub mod client_trait;
 pub mod compression;
 pub mod config;

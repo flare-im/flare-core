@@ -46,10 +46,13 @@ impl QUICClient {
         // 注意：在 rustls 0.23 中使用新 API
         // 使用标准的证书验证，将服务器证书添加到根证书存储
         
-        use crate::common::cert_utils::create_client_config;
+        use crate::common::cert::create_client_config;
         
         // 创建使用标准证书验证的客户端配置
-        let rustls_config = create_client_config();
+        let rustls_config = create_client_config()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to create client TLS config: {}", e)
+            ))?;
         
         // 创建 quinn ClientConfig
         // quinn 0.11 需要使用 QuicClientConfig 包装 rustls::ClientConfig

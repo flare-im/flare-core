@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tracing::debug;
 
 /// QUIC 服务端
 pub struct QUICServer {
@@ -33,16 +34,29 @@ pub struct QUICServer {
 impl QUICServer {
     /// 创建新的 QUIC 服务端
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
+        // 确保 rustls CryptoProvider 已初始化（在服务器端也需要）
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+        
         let parser = MessageParser::new(config.default_serialization_format, config.default_compression);
         
         // 创建 QUIC server config（使用共享证书）
         // 使用共享证书工具，确保客户端和服务端使用相同的证书
-        use crate::common::cert_utils::{get_server_cert_der, get_server_key_der};
+        use crate::common::cert::{get_server_cert_der, get_server_key_der};
         
-        let cert_der = get_server_cert_der();
-        let key_der = get_server_key_der();
+        let cert_der = get_server_cert_der()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to load server certificate: {}", e)
+            ))?;
+        let key_der = get_server_key_der()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to load server private key: {}", e)
+            ))?;
         
-        eprintln!("[QUIC Server] Using shared certificate for localhost, 127.0.0.1, ::1");
+        debug!("[QUIC Server] Using certificate from certs/server.crt for localhost, 127.0.0.1, ::1");
         
         // quinn 0.11 使用 rustls，需要转换类型
         // cert.serialize_der() 返回的是 DER 格式的 Vec<u8>

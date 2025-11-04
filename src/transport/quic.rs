@@ -56,10 +56,13 @@ impl QUICTransport {
         last_active: Arc<Mutex<std::time::Instant>>,
         is_closed: Arc<Mutex<bool>>,
     ) {
+        use tracing::debug;
+        
         loop {
             // 检查是否已关闭
             if let Ok(closed) = is_closed.lock() {
                 if *closed {
+                    debug!("[QUIC Transport] Receiver task: connection closed");
                     break;
                 }
             }
@@ -71,13 +74,15 @@ impl QUICTransport {
                 *active = std::time::Instant::now();
             }
 
-            // 读取完整消息
+            // 读取完整消息（带长度前缀）
             match Self::read_stream(&mut *recv).await {
                 Ok(data) => {
                     if !data.is_empty() {
+                        debug!("[QUIC Transport] Received message: {} bytes", data.len());
                         Self::_notify_observers(&observers_arc, &ConnectionEvent::Message(data));
                     } else {
                         // EOF，流结束
+                        debug!("[QUIC Transport] Stream EOF, closing");
                         Self::_notify_observers(
                             &observers_arc,
                             &ConnectionEvent::Disconnected("Stream closed by peer".to_string()),
@@ -87,6 +92,7 @@ impl QUICTransport {
                 }
                 Err(e) => {
                     // 读取失败，发送错误事件
+                    debug!("[QUIC Transport] Read error: {}", e);
                     Self::_notify_observers(
                         &observers_arc,
                         &ConnectionEvent::Error(FlareError::io(e.to_string())),
@@ -94,22 +100,68 @@ impl QUICTransport {
                     break;
                 }
             }
+            
+            // 释放锁，允许其他任务使用流
+            drop(recv);
         }
+        
+        debug!("[QUIC Transport] Receiver task ended");
     }
 
-    /// 从流中读取完整消息
+    /// 从流中读取完整消息（使用长度前缀）
+    /// 
+    /// 消息格式：4字节长度前缀（u32，网络字节序）+ 消息数据
     async fn read_stream(recv: &mut quinn::RecvStream) -> Result<Vec<u8>> {
-        let mut buf = Vec::<u8>::new();
-        let mut temp_buf = vec![0u8; 4096];
+        // 首先读取长度前缀（4字节）
+        let mut length_buf = [0u8; 4];
+        let mut length_bytes_read = 0;
         
-        loop {
-            match recv.read(&mut temp_buf).await {
+        // 读取长度前缀的4个字节
+        while length_bytes_read < 4 {
+            match recv.read(&mut length_buf[length_bytes_read..]).await {
                 Ok(Some(0)) | Ok(None) => {
-                    // EOF，读取完成
-                    break;
+                    // EOF，流结束
+                    if length_bytes_read == 0 {
+                        // 没有读取到任何数据，表示流正常结束
+                        return Ok(Vec::new());
+                    } else {
+                        // 部分读取了长度前缀，这是错误
+                        return Err(FlareError::io("Stream closed while reading length prefix".to_string()));
+                    }
                 }
                 Ok(Some(n)) => {
-                    buf.extend_from_slice(&temp_buf[..n]);
+                    length_bytes_read += n;
+                }
+                Err(e) => {
+                    return Err(FlareError::io(e.to_string()));
+                }
+            }
+        }
+        
+        // 解析长度（u32，网络字节序/大端序）
+        let length = u32::from_be_bytes(length_buf) as usize;
+        
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        
+        if length > 10 * 1024 * 1024 {
+            // 限制最大消息大小为 10MB
+            return Err(FlareError::io(format!("Message too large: {} bytes", length)));
+        }
+        
+        // 读取完整的消息数据
+        let mut buf = vec![0u8; length];
+        let mut bytes_read = 0;
+        
+        while bytes_read < length {
+            match recv.read(&mut buf[bytes_read..]).await {
+                Ok(Some(0)) | Ok(None) => {
+                    // EOF，但还没读完所有数据
+                    return Err(FlareError::io(format!("Stream closed while reading message: expected {} bytes, got {}", length, bytes_read)));
+                }
+                Ok(Some(n)) => {
+                    bytes_read += n;
                 }
                 Err(e) => {
                     return Err(FlareError::io(e.to_string()));
@@ -159,7 +211,17 @@ impl Connection for QUICTransport {
         }
 
         // 使用已有的 SendStream 发送数据
+        // 先发送长度前缀（4字节，u32，网络字节序）
         let mut send = self.send_stream.lock().await;
+        let length = data.len() as u32;
+        let length_bytes = length.to_be_bytes();
+        
+        // 先发送长度前缀
+        send.write_all(&length_bytes)
+            .await
+            .map_err(|e| FlareError::io(e.to_string()))?;
+        
+        // 再发送消息数据
         send.write_all(data)
             .await
             .map_err(|e| FlareError::io(e.to_string()))?;
