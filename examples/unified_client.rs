@@ -2,11 +2,10 @@
 //! 
 //! 演示如何使用 UnifiedClient 连接 QUIC 服务器
 
-use flare_core::common::client_trait::Client;
-use flare_core::common::config::ClientConfig;
-use flare_core::common::protocol::{ping, frame_with_system_command, Reliability};
-use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};
-use flare_core::UnifiedClient;
+use flare_core::client::{Client, ClientConfig};
+use flare_core::common::protocol::{ping, frame_with_system_command, Reliability};                                                                             
+use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};                                                          
+use flare_core::client::UnifiedClient;
 use std::sync::Arc;
 use tokio::time::Duration;
 

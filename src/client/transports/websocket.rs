@@ -1,11 +1,11 @@
 //! WebSocket 客户端实现
 
-use crate::common::client_trait::Client;
-use crate::common::config::ClientConfig;
-use crate::common::connection_state::ConnectionStateManager;
+use crate::client::transports::Client;
+use crate::client::config::ClientConfig;
+use crate::client::connection::ConnectionStateManager;
 use crate::common::error::Result;
-use crate::common::heartbeat::HeartbeatManager;
-use crate::common::message_parser::MessageParser;
+use crate::client::heartbeat::HeartbeatManager;
+use crate::common::MessageParser;
 use crate::common::protocol::Frame;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
@@ -115,8 +115,8 @@ impl WebSocketClient {
 
         // 启动心跳
         let mut heartbeat = HeartbeatManager::new(
-            self.config.heartbeat_interval,
-            self.config.heartbeat_interval * 3, // 3倍间隔作为超时
+            self.config.heartbeat.interval,
+            self.config.heartbeat.timeout,
         );
         
         if let Some(ref conn) = self.connection {
@@ -150,10 +150,12 @@ impl WebSocketClient {
     }
 
     async fn try_reconnect(&mut self) -> Result<()> {
-        if self.reconnect_attempts >= self.config.max_reconnect_attempts {
-            return Err(crate::common::error::FlareError::connection_failed(
-                format!("Max reconnect attempts ({}) exceeded", self.config.max_reconnect_attempts)
-            ));
+        if let Some(max_attempts) = self.config.max_reconnect_attempts {
+            if self.reconnect_attempts >= max_attempts {
+                return Err(crate::common::error::FlareError::connection_failed(
+                    format!("Max reconnect attempts ({}) exceeded", max_attempts)
+                ));
+            }
         }
 
         self.state_manager.set_reconnecting();
@@ -266,7 +268,7 @@ impl Client for WebSocketClient {
             Err(e) => {
                 self.state_manager.set_failed();
                 // 如果允许重连，尝试重连
-                if self.config.max_reconnect_attempts > 0 {
+                if self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
                     self.try_reconnect().await
                 } else {
                     Err(e)
@@ -276,7 +278,7 @@ impl Client for WebSocketClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.state_manager.set_state(crate::common::connection_state::ConnectionState::Disconnecting);
+        self.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
 
         // 停止心跳
         if let Some(ref mut hb) = self.heartbeat_manager.take() {
@@ -301,7 +303,7 @@ impl Client for WebSocketClient {
 
     async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // 如果未连接，尝试重连
-        if !self.is_connected() && self.config.max_reconnect_attempts > 0 {
+        if !self.is_connected() && self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
             if let Err(e) = self.try_reconnect().await {
                 return Err(e);
             }
@@ -311,7 +313,7 @@ impl Client for WebSocketClient {
     }
 
     fn is_connected(&self) -> bool {
-        let state_ok = matches!(self.state_manager.get_state(), crate::common::connection_state::ConnectionState::Connected);
+        let state_ok = matches!(self.state_manager.get_state(), crate::client::connection::ConnectionState::Connected);
         
         state_ok && self.connection.is_some()
             && {

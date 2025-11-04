@@ -4,12 +4,12 @@
 //! 
 //! 注意：此示例使用纯 WebSocket 连接（ws://），不使用 TLS/SSL
 
-use flare_core::common::config::{ServerConfig, TransportProtocol};
+use flare_core::server::{ServerConfig, Server, ConnectionHandler};
+use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};
 use flare_core::common::protocol::flare::core::commands::command::Type;
-use flare_core::common::server_trait::{Server, ConnectionHandler};
 use flare_core::common::error::Result;
-use flare_core::UnifiedServer;
+use flare_core::server::UnifiedServer;
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;

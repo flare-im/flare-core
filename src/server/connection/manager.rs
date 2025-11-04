@@ -4,7 +4,9 @@
 //! 支持按连接 ID、用户 ID 等方式管理连接
 
 use crate::common::error::{FlareError, Result};
+use crate::server::connection::r#trait::{ConnectionManagerTrait, ConnectionStats as TraitConnectionStats};
 use crate::transport::connection::Connection;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -271,14 +273,14 @@ impl ConnectionManager {
     }
 
     /// 获取连接统计信息
-    pub fn stats(&self) -> ConnectionStats {
+    pub fn stats(&self) -> TraitConnectionStats {
         let connections = self.connections.read().ok();
         let user_connections = self.user_connections.read().ok();
 
         let total_connections = connections.as_ref().map(|c| c.len()).unwrap_or(0);
         let total_users = user_connections.as_ref().map(|u| u.len()).unwrap_or(0);
 
-        ConnectionStats {
+        TraitConnectionStats {
             total_connections,
             total_users,
         }
@@ -291,13 +293,142 @@ impl Default for ConnectionManager {
     }
 }
 
-/// 连接统计信息
-#[derive(Debug, Clone)]
-pub struct ConnectionStats {
-    /// 总连接数
-    pub total_connections: usize,
-    /// 总用户数
-    pub total_users: usize,
+#[async_trait]
+impl ConnectionManagerTrait for ConnectionManager {
+    async fn add_connection(
+        &self,
+        connection_id: String,
+        connection: Arc<Mutex<Box<dyn Connection>>>,
+        user_id: Option<String>,
+    ) -> Result<()> {
+        // 将 Arc<Mutex<Box<dyn Connection>>> 转换为 Box<dyn Connection>
+        // 注意：这需要从 Arc 中取出，但 Arc 可能被多个地方引用
+        // 对于默认实现，我们需要一个不同的方式
+        // 由于 ConnectionManager 内部使用 Arc<Mutex<Box<dyn Connection>>>，
+        // 我们需要保持一致性
+        let mut connections = self.connections.write()
+            .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
+        
+        if connections.contains_key(&connection_id) {
+            return Err(FlareError::protocol_error(format!(
+                "Connection {} already exists",
+                connection_id
+            )));
+        }
+
+        let mut info = ConnectionInfo::new(connection_id.clone());
+        info.user_id = user_id.clone();
+        
+        connections.insert(connection_id.clone(), (Arc::clone(&connection), info));
+
+        // 如果提供了用户 ID，添加到用户连接映射
+        if let Some(user_id) = user_id {
+            let mut user_connections = self.user_connections.write()
+                .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
+            user_connections
+                .entry(user_id)
+                .or_insert_with(Vec::new)
+                .push(connection_id);
+        }
+
+        Ok(())
+    }
+
+    async fn remove_connection(&self, connection_id: &str) -> Result<()> {
+        ConnectionManager::remove_connection(self, connection_id)
+    }
+
+    async fn get_connection(
+        &self,
+        connection_id: &str,
+    ) -> Option<(Arc<Mutex<Box<dyn Connection>>>, crate::server::connection::r#trait::ConnectionInfo)> {
+        ConnectionManager::get_connection(self, connection_id).map(|(conn, info)| {
+            // 转换 ConnectionInfo 格式（从 Instant 转换为 Unix 时间戳）
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let created_at_secs = now.saturating_sub(info.created_at.elapsed().as_secs());
+            let last_active_secs = now.saturating_sub(info.last_active.elapsed().as_secs());
+            
+            let trait_info = crate::server::connection::r#trait::ConnectionInfo {
+                connection_id: info.connection_id,
+                user_id: info.user_id,
+                created_at: created_at_secs,
+                last_active: last_active_secs,
+                metadata: info.metadata,
+            };
+            (conn, trait_info)
+        })
+    }
+
+    async fn get_user_connections(&self, user_id: &str) -> Vec<String> {
+        ConnectionManager::get_user_connections(self, user_id)
+    }
+
+    async fn bind_user(&self, connection_id: &str, user_id: String) -> Result<()> {
+        ConnectionManager::bind_user(self, connection_id, user_id)
+    }
+
+    async fn update_connection_active(&self, connection_id: &str) -> Result<()> {
+        ConnectionManager::update_connection_active(self, connection_id)
+    }
+
+    async fn list_connections(&self) -> Vec<String> {
+        ConnectionManager::list_connections(self)
+    }
+
+    async fn connection_count(&self) -> usize {
+        ConnectionManager::connection_count(self)
+    }
+
+    async fn cleanup_timeout_connections(&self, timeout: Duration) -> Vec<String> {
+        ConnectionManager::cleanup_timeout_connections(self, timeout)
+    }
+
+    async fn send_to_connection(&self, connection_id: &str, data: &[u8]) -> Result<()> {
+        let (connection, _) = ConnectionManager::get_connection(self, connection_id)
+            .ok_or_else(|| FlareError::protocol_error(format!("Connection {} not found", connection_id)))?;
+        
+        let mut conn = connection.lock().await;
+        conn.send(data).await
+    }
+
+    async fn send_to_user(&self, user_id: &str, data: &[u8]) -> Result<()> {
+        let connection_ids = ConnectionManager::get_user_connections(self, user_id);
+        
+        for connection_id in connection_ids {
+            if let Err(e) = self.send_to_connection(&connection_id, data).await {
+                tracing::warn!("Failed to send to connection {}: {:?}", connection_id, e);
+            }
+        }
+        
+        Ok(())
+    }
+
+    async fn broadcast(&self, data: &[u8]) -> Result<()> {
+        let connection_ids = ConnectionManager::list_connections(self);
+        
+        for connection_id in connection_ids {
+            if let Err(e) = self.send_to_connection(&connection_id, data).await {
+                tracing::warn!("Failed to broadcast to connection {}: {:?}", connection_id, e);
+            }
+        }
+        
+        Ok(())
+    }
+
+    async fn broadcast_except(&self, data: &[u8], exclude_connection_id: &str) -> Result<()> {
+        let connection_ids: Vec<String> = ConnectionManager::list_connections(self)
+            .into_iter()
+            .filter(|id| id != exclude_connection_id)
+            .collect();
+        
+        for connection_id in connection_ids {
+            if let Err(e) = self.send_to_connection(&connection_id, data).await {
+                tracing::warn!("Failed to broadcast to connection {}: {:?}", connection_id, e);
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]

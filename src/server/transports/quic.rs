@@ -1,12 +1,12 @@
 //! QUIC 服务端实现
 
-use crate::common::config::ServerConfig;
-use crate::common::connection_manager::ConnectionManager;
+use crate::server::config::ServerConfig;
+use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use crate::common::error::Result;
-use crate::common::heartbeat::HeartbeatManager;
-use crate::common::message_parser::MessageParser;
+// 服务端不再使用 HeartbeatManager，改用 HeartbeatDetector 和 ConnectionManager 的更新机制
+use crate::common::MessageParser;
 use crate::common::protocol::{Frame, pong};
-use crate::common::server_trait::{Server, ConnectionHandler};
+use crate::server::transports::{Server, ConnectionHandler};
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
 use crate::transport::events::ConnectionEvent;
@@ -28,7 +28,7 @@ pub struct QUICServer {
     parser: MessageParser,
     endpoint: Option<Endpoint>,
     is_running: Arc<Mutex<bool>>,
-    heartbeat_managers: Arc<Mutex<HashMap<String, HeartbeatManager>>>,
+    heartbeat_detector: Option<crate::server::heartbeat::HeartbeatDetector>,
 }
 
 impl QUICServer {
@@ -106,7 +106,7 @@ impl QUICServer {
             parser,
             endpoint: Some(endpoint),
             is_running: Arc::new(Mutex::new(false)),
-            heartbeat_managers: Arc::new(Mutex::new(HashMap::new())),
+            heartbeat_detector: None,
         })
     }
 }
@@ -125,7 +125,6 @@ impl Server for QUICServer {
         let parser = self.parser.clone();
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
-        let heartbeat_managers = Arc::clone(&self.heartbeat_managers);
 
         tokio::spawn(async move {
             eprintln!("[QUIC Server] Started listening for connections...");
@@ -136,20 +135,18 @@ impl Server for QUICServer {
                     let manager_clone = Arc::clone(&manager);
                     let parser_clone = parser.clone();
                     let config_clone = config.clone();
-                    let hb_mgrs_clone = Arc::clone(&heartbeat_managers);
                     
                     tokio::spawn(async move {
                         // conn 是 Incoming (Future)，await 后得到 Connecting
                         match conn.await {
                             Ok(connecting) => {
-                                eprintln!("[QUIC Server] Handshake completed, handling connection...");
+                                                                eprintln!("[QUIC Server] Handshake completed, handling connection...");                                                        
                                 handle_quic_connection(
                                     connecting,
                                     handler_clone,
                                     manager_clone,
                                     parser_clone,
                                     config_clone,
-                                    hb_mgrs_clone,
                                 ).await;
                             }
                             Err(e) => {
@@ -231,12 +228,7 @@ impl Server for QUICServer {
     }
 
     async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        {
-            let mut hb_managers = self.heartbeat_managers.lock().await;
-            if let Some(mut hb) = hb_managers.remove(connection_id) {
-                hb.stop();
-            }
-        }
+        // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
 
         if let Some((conn, _)) = self.connection_manager.get_connection(connection_id) {
             let mut c = conn.lock().await;
@@ -253,7 +245,6 @@ async fn handle_quic_connection(
     manager: Arc<ConnectionManager>,
     parser: MessageParser,
     config: ServerConfig,
-    heartbeat_managers: Arc<Mutex<HashMap<String, HeartbeatManager>>>,
 ) {
     // connection 已经是 quinn::Connection，可以直接使用
     let quinn_connection = connection;
@@ -295,7 +286,6 @@ async fn handle_quic_connection(
     let manager_clone = Arc::clone(&manager);
     let parser_clone = parser.clone();
     let conn_id_clone = connection_id.clone();
-    let hb_managers_clone = Arc::clone(&heartbeat_managers);
     let config_clone = config.clone();
 
     let observer = Arc::new(QUICServerMessageObserver {
@@ -303,7 +293,6 @@ async fn handle_quic_connection(
         manager: manager_clone,
         parser: parser_clone,
         connection_id: conn_id_clone.clone(),
-        heartbeat_managers: hb_managers_clone,
         config: config_clone,
     });
 
@@ -326,16 +315,8 @@ async fn handle_quic_connection(
             }
         }
 
-        // 启动心跳
-        let mut heartbeat = HeartbeatManager::new(
-            config.heartbeat_interval,
-            config.heartbeat_interval * 3,
-        );
-        heartbeat.start(Arc::clone(&conn), parser.clone());
-        {
-            let mut hb_managers = heartbeat_managers.lock().await;
-            hb_managers.insert(connection_id.clone(), heartbeat);
-        }
+        // 服务端不需要主动发送心跳，只需要检测超时
+        // 心跳检测由 HeartbeatDetector 统一处理
     }
 
     // 定期清理超时连接
@@ -358,7 +339,6 @@ struct QUICServerMessageObserver {
     manager: Arc<ConnectionManager>,
     parser: MessageParser,
     connection_id: String,
-    heartbeat_managers: Arc<Mutex<HashMap<String, HeartbeatManager>>>,
     config: ServerConfig,
 }
 
@@ -371,70 +351,84 @@ impl crate::transport::events::ConnectionObserver for QUICServerMessageObserver 
                     if let Some(cmd) = &frame.command {
                         if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
                             if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Ping as i32 {
+                                // 收到 PING，回复 PONG 并更新连接活跃时间
+                                let manager = Arc::clone(&self.manager);
+                                let conn_id = self.connection_id.clone();
+                                
+                                // 更新连接活跃时间（通过 trait 的异步方法）
+                                let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                                let conn_id_update = conn_id.clone();
+                                tokio::spawn(async move {
+                                    let _ = manager_update.update_connection_active(&conn_id_update).await;
+                                });
+                                
+                                // 回复 PONG
                                 let pong_cmd = pong();
                                 let pong_frame = crate::common::protocol::frame_with_system_command(
                                     pong_cmd,
                                     crate::common::protocol::Reliability::AtLeastOnce,
                                 );
                                 if let Ok(pong_data) = self.parser.serialize(&pong_frame) {
-                                    if let Some((conn, _)) = self.manager.get_connection(&self.connection_id) {
-                                        let conn_clone = Arc::clone(&conn);
-                                        tokio::spawn(async move {
+                                    let manager_get = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                                    tokio::spawn(async move {
+                                        if let Some((conn, _)) = manager_get.get_connection(&conn_id).await {
+                                            let conn_clone = Arc::clone(&conn);
                                             let mut c = conn_clone.lock().await;
                                             let _ = c.send(&pong_data).await;
-                                        });
-                                    }
+                                        }
+                                    });
                                 }
                                 return;
                             }
                             if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
-                                // 记录 PONG，更新心跳（在同步上下文中，但需要异步访问）
-                                let hb_managers = Arc::clone(&self.heartbeat_managers);
+                                // 收到 PONG，更新连接活跃时间
+                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
                                 let conn_id = self.connection_id.clone();
                                 tokio::spawn(async move {
-                                    let mut hb_managers = hb_managers.lock().await;
-                                    if let Some(hb) = hb_managers.get_mut(&conn_id) {
-                                        hb.record_pong();
-                                    }
+                                    let _ = manager.update_connection_active(&conn_id).await;
                                 });
                                 return;
                             }
                         }
                     }
 
+                    // 处理消息 - 更新连接活跃时间
                     let handler = Arc::clone(&self.handler);
                     let manager = Arc::clone(&self.manager);
                     let parser = self.parser.clone();
                     let conn_id = self.connection_id.clone();
                     
+                    // 更新连接活跃时间（收到任何消息都算活跃）
+                    let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                    let conn_id_update = conn_id.clone();
                     tokio::spawn(async move {
-                        if let Ok(Some(response)) = handler.handle_frame(&frame, &conn_id).await {
-                            if let Some((conn, _)) = manager.get_connection(&conn_id) {
+                        let _ = manager_update.update_connection_active(&conn_id_update).await;
+                    });
+                    
+                    tokio::spawn(async move {
+                                                if let Ok(Some(response)) = handler.handle_frame(&frame, &conn_id).await {                                                              
+                            let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                            if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
                                 if let Ok(data) = parser.serialize(&response) {
-                                    let mut c = conn.lock().await;
+                                    let conn_clone = Arc::clone(&conn);
+                                    let mut c = conn_clone.lock().await;
                                     let _ = c.send(&data).await;
                                 }
                             }
                         }
-                        let _ = manager.update_connection_active(&conn_id);
+                        // 连接活跃时间已在收到消息时更新
                     });
                 }
             }
             ConnectionEvent::Disconnected(_) => {
                 let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager);
+                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
                 let conn_id = self.connection_id.clone();
-                let hb_managers = Arc::clone(&self.heartbeat_managers);
                 
                 tokio::spawn(async move {
-                    {
-                        let mut hb_mgrs = hb_managers.lock().await;
-                        if let Some(mut hb) = hb_mgrs.remove(&conn_id) {
-                            hb.stop();
-                        }
-                    }
+                    // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
                     let _ = handler.on_disconnect(&conn_id).await;
-                    let _ = manager.remove_connection(&conn_id);
+                    let _ = manager.remove_connection(&conn_id).await;
                 });
             }
             ConnectionEvent::Connected => {}

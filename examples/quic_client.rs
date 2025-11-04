@@ -5,12 +5,11 @@
 //! 注意：此示例使用 QUIC 协议，需要 TLS 证书
 //! 客户端会自动信任服务器证书（自签名证书）
 
-use flare_core::common::client_trait::Client;
-use flare_core::common::config::ClientConfig;
-use flare_core::common::protocol::{frame_with_message_command, send_message, generate_message_id, Reliability};
-use flare_core::common::protocol::flare::core::commands::command::Type;
-use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};
-use flare_core::UnifiedClient;
+use flare_core::client::{Client, ClientConfig};
+use flare_core::common::protocol::{frame_with_message_command, send_message, generate_message_id, Reliability};                      
+use flare_core::common::protocol::flare::core::commands::command::Type;                                                              
+use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};                                                            
+use flare_core::client::UnifiedClient;
 use std::sync::Arc;
 use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -25,7 +24,7 @@ impl ConnectionObserver for ChatObserver {
         match event {
             ConnectionEvent::Message(data) => {
                 // 解析接收到的消息
-                if let Ok(frame) = flare_core::common::message_parser::MessageParser::new(
+                if let Ok(frame) = flare_core::common::MessageParser::new(
                     flare_core::common::protocol::SerializationFormat::Protobuf,
                     flare_core::common::compression::CompressionAlgorithm::None,
                 ).parse(data) {

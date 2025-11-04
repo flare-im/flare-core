@@ -1,6 +1,11 @@
-//! 服务端标准接口
+//! 服务端传输协议模块
 //! 
-//! 定义服务端的标准 trait，支持用户自定义实现
+//! 提供多种传输协议的服务端实现：
+//! - QUIC：基于 QUIC 协议的服务端
+//! - WebSocket：基于 WebSocket 协议的服务端
+//! - Unified：统一服务端，支持多种协议
+//! 
+//! 同时定义服务端的标准 trait 接口
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
@@ -47,7 +52,7 @@ pub trait ConnectionHandler: Send + Sync {
 /// # 示例
 /// 
 /// ```rust
-/// use flare_core::common::server_trait::{Server, ConnectionHandler};
+/// use flare_core::server::{Server, ConnectionHandler};
 /// use flare_core::common::error::Result;
 /// use flare_core::common::protocol::Frame;
 /// 
@@ -158,3 +163,11 @@ pub trait Server: Send + Sync {
     async fn disconnect(&self, connection_id: &str) -> Result<()>;
 }
 
+pub mod quic;
+pub mod unified;
+pub mod websocket;
+
+// 重新导出常用类型
+pub use quic::QUICServer;
+pub use unified::UnifiedServer;
+pub use websocket::WebSocketServer;

@@ -2,11 +2,11 @@
 //! 
 //! 演示如何使用 UnifiedServer 监听 QUIC 协议
 
-use flare_core::common::config::{ServerConfig, TransportProtocol};
+use flare_core::server::{ServerConfig, Server, ConnectionHandler};
+use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::Frame;
-use flare_core::common::server_trait::{Server, ConnectionHandler};
 use flare_core::common::error::Result;
-use flare_core::UnifiedServer;
+use flare_core::server::UnifiedServer;
 use std::sync::Arc;
 use async_trait::async_trait;
 

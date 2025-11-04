@@ -9,33 +9,22 @@
 //! - 工具函数：常用工具和常量
 
 pub mod cert;
-pub mod client_trait;
 pub mod compression;
-pub mod config;
+pub mod config_types;
 pub mod constants;
-pub mod connection_manager;
-pub mod connection_state;
 pub mod error;
-pub mod heartbeat;
-pub mod message_handler;
-pub mod message_parser;
+pub mod message;
 pub mod protocol;
-pub mod server_trait;
 pub mod serializer;
 pub mod utils;
 
 // 重新导出常用类型和函数，方便使用
-pub use client_trait::Client;
+
 pub use compression::{Compressor, CompressionAlgorithm, CompressionUtil};
-pub use config::{ClientConfig, ServerConfig, TransportProtocol};
-pub use connection_manager::{ConnectionManager, ConnectionInfo, ConnectionStats};
-pub use connection_state::{ConnectionState, ConnectionStateManager};
+pub use config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
 pub use constants::*;
 pub use error::{FlareError, Result, ClientError, ServerError, ErrorCode, ErrorBuilder};
-pub use heartbeat::HeartbeatManager;
-pub use message_handler::{MessageHandler, MessageObserver, MessageEvent, ArcMessageObserver};
-pub use message_parser::MessageParser;
+pub use message::{MessageParser, MessageHandler, MessageObserver, MessageEvent, ArcMessageObserver};
 pub use protocol::{Frame, Command, SystemCommand, MessageCommand, NotificationCommand, CustomCommand, Reliability, SerializationFormat};
-pub use server_trait::{Server, ConnectionHandler};
 pub use serializer::{Serializer, SerializationUtil};
 pub use utils::*;

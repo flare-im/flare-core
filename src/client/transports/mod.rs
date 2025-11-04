@@ -1,6 +1,11 @@
-//! 客户端标准接口
+//! 客户端传输协议模块
 //! 
-//! 定义客户端的标准 trait，支持用户自定义实现
+//! 提供多种传输协议的客户端实现：
+//! - QUIC：基于 QUIC 协议的客户端
+//! - WebSocket：基于 WebSocket 协议的客户端
+//! - Unified：统一客户端，支持多种协议
+//! 
+//! 同时定义客户端的标准 trait 接口
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
@@ -14,7 +19,7 @@ use async_trait::async_trait;
 /// # 示例
 /// 
 /// ```rust
-/// use flare_core::common::client_trait::Client;
+/// use flare_core::client::Client;
 /// use flare_core::common::error::Result;
 /// use flare_core::common::protocol::Frame;
 /// 
@@ -99,9 +104,11 @@ pub trait Client: Send + Sync {
     }
 }
 
+pub mod quic;
+pub mod unified;
+pub mod websocket;
 
-
-
-
-
-
+// 重新导出常用类型
+pub use quic::QUICClient;
+pub use unified::UnifiedClient;
+pub use websocket::WebSocketClient;

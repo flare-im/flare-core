@@ -2,7 +2,7 @@
 //! 
 //! 提供心跳机制的实现，保持连接活跃
 
-use crate::common::message_parser::MessageParser;
+use crate::common::MessageParser;
 use crate::transport::connection::Connection;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};

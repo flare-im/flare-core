@@ -2,8 +2,9 @@
 //! 
 //! 支持单个协议或多协议竞速
 
-use crate::common::client_trait::Client;
-use crate::common::config::{ClientConfig, TransportProtocol};
+use crate::client::transports::Client;
+use crate::client::config::ClientConfig;
+use crate::common::config_types::TransportProtocol;
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::transport::events::ArcObserver;
@@ -12,8 +13,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
 
-use super::websocket::WebSocketClient;
-use super::quic::QUICClient;
+use crate::client::transports::websocket::WebSocketClient;
+use crate::client::transports::quic::QUICClient;
 
 /// 统一客户端
 /// 

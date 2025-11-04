@@ -5,12 +5,12 @@
 //! 注意：此示例使用 QUIC 协议，需要 TLS 证书
 //! 证书会通过 rcgen 自动生成并保存到 certs/ 目录下
 
-use flare_core::common::config::{ServerConfig, TransportProtocol};
-use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};
+use flare_core::server::{ServerConfig, Server, ConnectionHandler};
+use flare_core::common::config_types::TransportProtocol;
+use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};                                          
 use flare_core::common::protocol::flare::core::commands::command::Type;
-use flare_core::common::server_trait::{Server, ConnectionHandler};
 use flare_core::common::error::Result;
-use flare_core::UnifiedServer;
+use flare_core::server::UnifiedServer;
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;

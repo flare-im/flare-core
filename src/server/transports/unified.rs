@@ -2,10 +2,11 @@
 //! 
 //! 支持单个协议或多协议同时监听
 
-use crate::common::config::{ServerConfig, TransportProtocol};
+use crate::server::config::ServerConfig;
+use crate::common::config_types::TransportProtocol;
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::common::server_trait::{Server, ConnectionHandler};
+use super::{Server, ConnectionHandler};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
