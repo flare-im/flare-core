@@ -5,6 +5,7 @@
 //! 注意：QUIC 协议需要 TLS 证书，WebSocket 使用纯 ws:// 协议
 
 use flare_core::server::{ServerConfig, Server, ConnectionHandler};
+use flare_core::server::connection::ConnectionManagerTrait;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};
 use flare_core::common::protocol::flare::core::commands::command::Type;
@@ -19,45 +20,36 @@ use tracing::{debug, info, error, warn};
 struct ChatRoomHandler {
     // 存储连接ID到用户名的映射
     usernames: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
-    // 服务器引用，用于广播消息（延迟设置）
-    // 使用 Weak 引用避免循环引用
-    server: Arc<tokio::sync::Mutex<Option<std::sync::Weak<ServerWrapper>>>>,
+    // 连接管理器引用，用于发送消息（更灵活，可以直接注入使用）
+    connection_manager: Arc<dyn ConnectionManagerTrait>,
+    // 消息解析器，用于序列化 Frame
+    parser: flare_core::common::MessageParser,
 }
 
 impl ChatRoomHandler {
-    fn new() -> Self {
+    fn new(
+        connection_manager: Arc<dyn ConnectionManagerTrait>,
+        parser: flare_core::common::MessageParser,
+    ) -> Self {
         Self {
             usernames: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            server: Arc::new(tokio::sync::Mutex::new(None)),
+            connection_manager,
+            parser,
         }
     }
     
-    async fn set_server(&self, server: std::sync::Weak<ServerWrapper>) {
-        *self.server.lock().await = Some(server);
-    }
-    
     // 广播消息给所有连接的客户端（排除发送者）
+    // 现在直接使用 ConnectionManager，不需要依赖 Server
     async fn broadcast_message_except(&self, frame: &Frame, exclude_connection_id: &str) {
         debug!("broadcast_message_except 开始: exclude={}", exclude_connection_id);
-        // 使用 Weak 引用，避免循环引用
-        let server_weak = {
-            let server_guard = self.server.lock().await;
-            server_guard.clone()
-        };
-        
-        if let Some(server_weak) = server_weak {
-            if let Some(server) = server_weak.upgrade() {
-                debug!("broadcast_message_except: 使用 broadcast_except 排除发送者");
-                if let Err(e) = server.broadcast_except(frame, exclude_connection_id).await {
-                    error!("[聊天室] 广播消息失败: {}", e);
-                } else {
-                    debug!("broadcast_message_except: 广播成功（已排除发送者）");
-                }
-            } else {
-                debug!("broadcast_message_except: Weak 引用升级失败，服务器可能已关闭");
-            }
+        if let Err(e) = self.connection_manager.broadcast_frame_except(
+            frame,
+            exclude_connection_id,
+            &self.parser,
+        ).await {
+            error!("[聊天室] 广播消息失败: {}", e);
         } else {
-            warn!("[聊天室] 警告：服务器引用未设置，无法广播消息");
+            debug!("broadcast_message_except: 广播成功（已排除发送者）");
         }
         debug!("broadcast_message_except 完成");
     }
@@ -65,20 +57,8 @@ impl ChatRoomHandler {
     // 广播消息给所有连接的客户端
     async fn broadcast_message(&self, frame: &Frame) {
         debug!("broadcast_message 开始");
-        // 使用 Weak 引用，避免循环引用
-        let server_weak = {
-            let server_guard = self.server.lock().await;
-            server_guard.clone()
-        };
-        
-        if let Some(server_weak) = server_weak {
-            if let Some(server) = server_weak.upgrade() {
-                if let Err(e) = server.broadcast(frame).await {
-                    error!("[聊天室] 广播消息失败: {}", e);
-                }
-            }
-        } else {
-            warn!("[聊天室] 警告：服务器引用未设置，无法广播消息");
+        if let Err(e) = self.connection_manager.broadcast_frame(frame, &self.parser).await {
+            error!("[聊天室] 广播消息失败: {}", e);
         }
     }
     
@@ -275,16 +255,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     
-    info!("=== 统一服务端聊天室（WebSocket + QUIC）===");
-    
-    // 创建 handler
-    let handler = Arc::new(ChatRoomHandler::new());
-    let handler_for_setup = Arc::clone(&handler);
-    
-    // 创建包装器
-    let wrapper = Arc::new(ChatRoomHandlerWrapper {
-        inner: Arc::clone(&handler),
-    });
+        info!("=== 统一服务端聊天室（WebSocket + QUIC）===");
     
     // 同时监听 WebSocket 和 QUIC 协议
     // WebSocket 监听 8080，QUIC 监听 8081
@@ -292,15 +263,41 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
         .with_max_connections(2000);
     
-    let unified_server = UnifiedServer::new(unified_config, wrapper as Arc<dyn ConnectionHandler>)?;
+        // 创建一个共享的 ConnectionManager 和 MessageParser
+    // 注意：在实际使用中，如果你的业务逻辑需要发送消息，可以直接注入 ConnectionManager                                                                         
+    // 这样可以避免依赖整个 Server，使用更灵活
+    let connection_manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
+    let connection_manager_trait: Arc<dyn ConnectionManagerTrait> = Arc::clone(&connection_manager) as Arc<dyn ConnectionManagerTrait>;
+    
+    let parser = flare_core::common::MessageParser::new(
+        unified_config.default_serialization_format,
+        unified_config.default_compression,
+    );
+    
+    // 创建 handler，直接注入 ConnectionManager 和 MessageParser
+    // 这样可以在任何地方使用 ConnectionManager 发送消息，不需要依赖 Server
+    let handler = Arc::new(ChatRoomHandler::new(
+        Arc::clone(&connection_manager_trait),
+        parser.clone(),
+    ));
+    
+    // 创建包装器
+    let wrapper = Arc::new(ChatRoomHandlerWrapper {
+        inner: Arc::clone(&handler),
+    });
+    
+    // 创建服务器，使用共享的 ConnectionManager
+    // 这样 Server 和 Handler 使用同一个 ConnectionManager 实例，可以正确共享连接信息
+    let unified_server = UnifiedServer::with_connection_manager(
+        unified_config,
+        wrapper as Arc<dyn ConnectionHandler>,
+        Some(connection_manager),
+    )?;
     
     // 创建包装器（在启动前创建，确保 handler 可以立即使用）
     let server_wrapper = Arc::new(ServerWrapper {
         server: Arc::new(tokio::sync::Mutex::new(unified_server)),
     });
-    
-    // 先设置服务器引用到 handler，使用 Weak 引用避免循环引用
-    handler_for_setup.set_server(Arc::downgrade(&server_wrapper)).await;
     
     // 现在启动服务器
     {

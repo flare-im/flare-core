@@ -4,6 +4,8 @@
 //! 默认实现使用 ConnectionManager
 
 use crate::common::error::Result;
+use crate::common::protocol::Frame;
+use crate::common::MessageParser;
 use crate::transport::connection::Connection;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -66,17 +68,108 @@ pub trait ConnectionManagerTrait: Send + Sync {
     /// 清理超时连接
     async fn cleanup_timeout_connections(&self, timeout: Duration) -> Vec<String>;
 
-    /// 向指定连接发送数据
+    // ========== 底层发送方法（字节数组）==========
+    
+    /// 向指定连接发送数据（字节数组）
     async fn send_to_connection(&self, connection_id: &str, data: &[u8]) -> Result<()>;
 
-    /// 向指定用户的所有连接发送数据
+    /// 向指定用户的所有连接发送数据（字节数组）
     async fn send_to_user(&self, user_id: &str, data: &[u8]) -> Result<()>;
 
-    /// 广播消息到所有连接
+    /// 广播消息到所有连接（字节数组）
     async fn broadcast(&self, data: &[u8]) -> Result<()>;
 
-    /// 广播消息到所有连接，排除指定连接
+    /// 广播消息到所有连接，排除指定连接（字节数组）
     async fn broadcast_except(&self, data: &[u8], exclude_connection_id: &str) -> Result<()>;
+
+    // ========== Frame 级别发送方法（需要 MessageParser）==========
+    
+    /// 向指定连接发送 Frame（自动序列化）
+    /// 
+    /// # 参数
+    /// - `connection_id`: 连接 ID
+    /// - `frame`: 要发送的 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// 
+    /// # 返回
+    /// 发送成功返回 `Ok(())`，失败返回错误
+    async fn send_frame_to(
+        &self,
+        connection_id: &str,
+        frame: &Frame,
+        parser: &MessageParser,
+    ) -> Result<()> {
+        let data = parser.serialize(frame)?;
+        self.send_to_connection(connection_id, &data).await?;
+        self.update_connection_active(connection_id).await?;
+        Ok(())
+    }
+
+    /// 向指定用户的所有连接发送 Frame（自动序列化）
+    /// 
+    /// # 参数
+    /// - `user_id`: 用户 ID
+    /// - `frame`: 要发送的 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// 
+    /// # 返回
+    /// 发送成功返回 `Ok(())`，失败返回错误
+    async fn send_frame_to_user(
+        &self,
+        user_id: &str,
+        frame: &Frame,
+        parser: &MessageParser,
+    ) -> Result<()> {
+        let connection_ids = self.get_user_connections(user_id).await;
+        for conn_id in connection_ids {
+            let _ = self.send_frame_to(&conn_id, frame, parser).await;
+        }
+        Ok(())
+    }
+
+    /// 广播 Frame 到所有连接（自动序列化）
+    /// 
+    /// # 参数
+    /// - `frame`: 要广播的 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// 
+    /// # 返回
+    /// 广播成功返回 `Ok(())`，失败返回错误
+    async fn broadcast_frame(
+        &self,
+        frame: &Frame,
+        parser: &MessageParser,
+    ) -> Result<()> {
+        let connection_ids = self.list_connections().await;
+        for conn_id in connection_ids {
+            let _ = self.send_frame_to(&conn_id, frame, parser).await;
+        }
+        Ok(())
+    }
+
+    /// 广播 Frame 到所有连接，排除指定连接（自动序列化）
+    /// 
+    /// # 参数
+    /// - `frame`: 要广播的 Frame
+    /// - `exclude_connection_id`: 要排除的连接 ID
+    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// 
+    /// # 返回
+    /// 广播成功返回 `Ok(())`，失败返回错误
+    async fn broadcast_frame_except(
+        &self,
+        frame: &Frame,
+        exclude_connection_id: &str,
+        parser: &MessageParser,
+    ) -> Result<()> {
+        let connection_ids = self.list_connections().await;
+        for conn_id in connection_ids {
+            if conn_id != exclude_connection_id {
+                let _ = self.send_frame_to(&conn_id, frame, parser).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 连接统计信息

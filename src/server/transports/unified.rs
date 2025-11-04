@@ -14,6 +14,7 @@ use tracing::{debug, error};
 
 use super::websocket::WebSocketServer;
 use super::quic::QUICServer;
+use crate::server::connection::ConnectionManager;
 
 /// 统一服务端
 /// 
@@ -37,6 +38,23 @@ impl UnifiedServer {
     /// # 返回
     /// 统一服务端实例
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
+        Self::with_connection_manager(config, handler, None)
+    }
+    
+    /// 使用指定的连接管理器创建统一服务端
+    /// 
+    /// # 参数
+    /// - `config`: 服务端配置
+    /// - `handler`: 连接处理器
+    /// - `connection_manager`: 可选的连接管理器，如果为 None，则每个协议创建独立的
+    /// 
+    /// # 返回
+    /// 统一服务端实例
+    pub fn with_connection_manager(
+        config: ServerConfig,
+        handler: Arc<dyn ConnectionHandler>,
+        connection_manager: Option<Arc<crate::server::connection::ConnectionManager>>,
+    ) -> Result<Self> {
         let protocols = config.get_protocols();
         let mut servers = Vec::new();
         
@@ -66,12 +84,20 @@ impl UnifiedServer {
             };
             server_config.bind_address = bind_address;
             
-            let server: Box<dyn Server> = match protocol {
+                        let server: Box<dyn Server> = match protocol {
                 TransportProtocol::WebSocket => {
-                    Box::new(WebSocketServer::new(server_config, Arc::clone(&handler)))
+                    Box::new(WebSocketServer::with_connection_manager(
+                        server_config,
+                        Arc::clone(&handler),
+                        connection_manager.clone(),
+                    ))                                                                         
                 }
                 TransportProtocol::QUIC => {
-                    Box::new(QUICServer::new(server_config, Arc::clone(&handler))?)
+                    Box::new(QUICServer::with_connection_manager(
+                        server_config,
+                        Arc::clone(&handler),
+                        connection_manager.clone(),
+                    )?)                                                                             
                 }
                 TransportProtocol::TCP => {
                     return Err(crate::common::error::FlareError::protocol_error(

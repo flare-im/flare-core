@@ -34,6 +34,20 @@ pub struct QUICServer {
 impl QUICServer {
     /// 创建新的 QUIC 服务端
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
+        Self::with_connection_manager(config, handler, None)
+    }
+    
+    /// 使用指定的连接管理器创建 QUIC 服务端
+    /// 
+    /// # 参数
+    /// - `config`: 服务端配置
+    /// - `handler`: 连接处理器
+    /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的
+    pub fn with_connection_manager(
+        config: ServerConfig,
+        handler: Arc<dyn ConnectionHandler>,
+        connection_manager: Option<Arc<ConnectionManager>>,
+    ) -> Result<Self> {
         // 确保 rustls CryptoProvider 已初始化（在服务器端也需要）
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -101,7 +115,7 @@ impl QUICServer {
 
         Ok(Self {
             config,
-            connection_manager: Arc::new(ConnectionManager::new()),
+            connection_manager: connection_manager.unwrap_or_else(|| Arc::new(ConnectionManager::new())),
             handler,
             parser,
             endpoint: Some(endpoint),
@@ -176,43 +190,23 @@ impl Server for QUICServer {
     }
 
     async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        let (conn, _) = self.connection_manager.get_connection(connection_id)
-            .ok_or_else(|| crate::common::error::FlareError::protocol_error(format!("Connection {} not found", connection_id)))?;
-        
-        let data = self.parser.serialize(frame)?;
-        
-        // 使用 tokio::sync::Mutex，支持跨 await
-        let mut c = conn.lock().await;
-        c.send(&data).await?;
-        
-        self.connection_manager.update_connection_active(connection_id)?;
-        Ok(())
+        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
+        manager_trait.send_frame_to(connection_id, frame, &self.parser).await
     }
 
     async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        let connection_ids = self.connection_manager.get_user_connections(user_id);
-        for conn_id in connection_ids {
-            let _ = self.send_to(&conn_id, frame).await;
-        }
-        Ok(())
+        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
+        manager_trait.send_frame_to_user(user_id, frame, &self.parser).await
     }
 
     async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        let connection_ids = self.connection_manager.list_connections();
-        for conn_id in connection_ids {
-            let _ = self.send_to(&conn_id, frame).await;
-        }
-        Ok(())
+        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
+        manager_trait.broadcast_frame(frame, &self.parser).await
     }
     
     async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        let connection_ids = self.connection_manager.list_connections();
-        for conn_id in connection_ids {
-            if conn_id != exclude_connection_id {
-                let _ = self.send_to(&conn_id, frame).await;
-            }
-        }
-        Ok(())
+        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
+        manager_trait.broadcast_frame_except(frame, exclude_connection_id, &self.parser).await
     }
 
     fn is_running(&self) -> bool {
