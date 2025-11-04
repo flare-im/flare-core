@@ -3,6 +3,7 @@ use crate::common::protocol::{frame_with_system_command, pong, Reliability};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
 use prost::Message as ProstMessage;
@@ -11,9 +12,16 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tracing::debug;
+
+// 使用枚举来支持两种类型的 WebSocketStream
+enum WebSocketSink {
+    Tls(Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>),
+    Plain(Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>),
+}
 
 pub struct WebSocketTransport {
-    sink: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+    sink: WebSocketSink,
     observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
     last_active: Arc<std::sync::Mutex<std::time::Instant>>,
 }
@@ -24,16 +32,36 @@ impl WebSocketTransport {
     }
     
     /// 从 WebSocketStream<TcpStream> 创建（在没有 TLS 时使用）
+    /// 
+    /// 使用单独的 Plain 类型，避免 unsafe transmute
     pub fn from_tcp_stream(stream: WebSocketStream<TcpStream>) -> Self {
-        // WebSocketStream 不支持直接提取内部流
-        // 我们需要使用 unsafe 转换或者重构代码结构
-        // 暂时使用 unsafe 方法（需要确保内存布局兼容）
-        unsafe {
-            // 假设 WebSocketStream<TcpStream> 和 WebSocketStream<MaybeTlsStream<TcpStream>> 
-            // 的内存布局相同（因为它们只是泛型参数不同）
-            let wrapped: WebSocketStream<MaybeTlsStream<TcpStream>> = std::mem::transmute(stream);
-            Self::from_stream(wrapped)
-        }
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream 开始");
+        let (sink_plain, receiver_plain) = stream.split();
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream: stream 已 split");
+        
+        let observers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_arc = Arc::new(Mutex::new(sink_plain));
+        let last_active = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream: Arc 已创建");
+
+        let task_observers = Arc::clone(&observers);
+        let task_sink = Arc::clone(&sink_arc);
+        let task_last_active = Arc::clone(&last_active);
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream: 准备 spawn receiver_task");
+        tokio::spawn(async move {
+            debug!("[DEBUG WebSocketTransport] receiver_task 开始 (Plain)");
+            Self::receiver_task_plain(receiver_plain, task_observers, task_sink, task_last_active).await;
+            debug!("[DEBUG WebSocketTransport] receiver_task 结束 (Plain)");
+        });
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream: receiver_task 已 spawn");
+
+        let result = Self {
+            sink: WebSocketSink::Plain(sink_arc),
+            observers,
+            last_active,
+        };
+        debug!("[DEBUG WebSocketTransport] from_tcp_stream 完成");
+        result
     }
     
     fn from_stream(stream: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
@@ -48,7 +76,7 @@ impl WebSocketTransport {
         tokio::spawn(Self::receiver_task(receiver, task_observers, task_sink, task_last_active));
 
         Self {
-            sink: sink_arc,
+            sink: WebSocketSink::Tls(sink_arc),
             observers,
             last_active,
         }
@@ -60,7 +88,9 @@ impl WebSocketTransport {
         sink_arc: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
         last_active: Arc<std::sync::Mutex<std::time::Instant>>,
     ) {
+        debug!("[DEBUG WebSocketTransport] receiver_task: 进入循环 (TLS)");
         while let Some(message) = receiver.next().await {
+            debug!("[DEBUG WebSocketTransport] receiver_task: 收到消息 (TLS)");
             // 收到消息时更新活跃时间
             if let Ok(mut active) = last_active.lock() {
                 *active = std::time::Instant::now();
@@ -68,8 +98,8 @@ impl WebSocketTransport {
 
             let event = match message {
                 Ok(msg) => match msg {
-                    Message::Text(text) => Some(ConnectionEvent::Message(text.into_bytes())),
-                    Message::Binary(data) => Some(ConnectionEvent::Message(data)),
+                    Message::Text(text) => Some(ConnectionEvent::Message(text.as_bytes().to_vec())),
+                    Message::Binary(data) => Some(ConnectionEvent::Message(data.to_vec())),
                     Message::Close(frame) => {
                         let reason = frame
                             .map(|f| f.reason.to_string())
@@ -80,9 +110,73 @@ impl WebSocketTransport {
                         // 收到 WebSocket 协议层的 PING
                         // 1. 先回复 WebSocket 协议层的 PONG（保持连接）
                         // 2. 然后使用 builder 构建应用层的 PONG Frame 并发送
-                        if let Err(e) = Self::send_pong_response(&sink_arc, &data).await {
+                        if let Err(e) = Self::send_pong_response_tls(&sink_arc, &data).await {
                             Some(ConnectionEvent::Error(e))
-                        } else if let Err(e) = Self::send_pong_frame(&sink_arc).await {
+                        } else if let Err(e) = Self::send_pong_frame_tls(&sink_arc).await {
+                            Some(ConnectionEvent::Error(e))
+                        } else {
+                            None // PING/PONG 已处理，不需要触发事件
+                        }
+                    }
+                    Message::Pong(_) => {
+                        // 收到 WebSocket 协议层的 PONG，这是对我们之前发送的 PING 的响应
+                        // 使用 builder 构建应用层的 PONG Frame，通过事件通知上层处理
+                        match Self::build_pong_frame() {
+                            Ok(pong_data) => Some(ConnectionEvent::Message(pong_data)),
+                            Err(e) => Some(ConnectionEvent::Error(e)),
+                        }
+                    }
+                    _ => None,
+                },
+                Err(e) => Some(ConnectionEvent::Error(
+                    FlareError::connection_failed(e.to_string())
+                )),
+            };
+
+            if let Some(event) = event {
+                let is_terminal =
+                    matches!(event, ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_));
+
+                Self::_notify_observers(&observers_arc, &event);
+
+                if is_terminal {
+                    break;
+                }
+            }
+        }
+    }
+    
+    async fn receiver_task_plain(
+        mut receiver: SplitStream<WebSocketStream<TcpStream>>,
+        observers_arc: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
+        sink_arc: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+        last_active: Arc<std::sync::Mutex<std::time::Instant>>,
+    ) {
+        debug!("[DEBUG WebSocketTransport] receiver_task: 进入循环 (Plain)");
+        while let Some(message) = receiver.next().await {
+            debug!("[DEBUG WebSocketTransport] receiver_task: 收到消息 (Plain)");
+            // 收到消息时更新活跃时间
+            if let Ok(mut active) = last_active.lock() {
+                *active = std::time::Instant::now();
+            }
+
+            let event = match message {
+                Ok(msg) => match msg {
+                    Message::Text(text) => Some(ConnectionEvent::Message(text.as_bytes().to_vec())),
+                    Message::Binary(data) => Some(ConnectionEvent::Message(data.to_vec())),
+                    Message::Close(frame) => {
+                        let reason = frame
+                            .map(|f| f.reason.to_string())
+                            .unwrap_or_else(|| "Connection closed by peer".to_string());
+                        Some(ConnectionEvent::Disconnected(reason))
+                    }
+                    Message::Ping(data) => {
+                        // 收到 WebSocket 协议层的 PING
+                        // 1. 先回复 WebSocket 协议层的 PONG（保持连接）
+                        // 2. 然后使用 builder 构建应用层的 PONG Frame 并发送
+                        if let Err(e) = Self::send_pong_response_plain(&sink_arc, &data).await {
+                            Some(ConnectionEvent::Error(e))
+                        } else if let Err(e) = Self::send_pong_frame_plain(&sink_arc).await {
                             Some(ConnectionEvent::Error(e))
                         } else {
                             None // PING/PONG 已处理，不需要触发事件
@@ -128,13 +222,25 @@ impl WebSocketTransport {
         Self::_notify_observers(&self.observers, event);
     }
 
-    /// 发送 WebSocket 协议层的 PONG 响应
-    async fn send_pong_response(
+    /// 发送 WebSocket 协议层的 PONG 响应 (TLS)
+    async fn send_pong_response_tls(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
         data: &[u8],
     ) -> Result<()> {
         let mut sink = sink.lock().await;
-        sink.send(Message::Pong(data.to_vec()))
+        sink.send(Message::Pong(Bytes::from(data.to_vec())))
+            .await
+            .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+        Ok(())
+    }
+    
+    /// 发送 WebSocket 协议层的 PONG 响应 (Plain)
+    async fn send_pong_response_plain(
+        sink: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+        data: &[u8],
+    ) -> Result<()> {
+        let mut sink = sink.lock().await;
+        sink.send(Message::Pong(Bytes::from(data.to_vec())))
             .await
             .map_err(|e| FlareError::connection_failed(e.to_string()))?;
         Ok(())
@@ -154,8 +260,8 @@ impl WebSocketTransport {
         Ok(buf)
     }
 
-    /// 发送应用层的 PONG Frame 消息
-    async fn send_pong_frame(
+    /// 发送应用层的 PONG Frame 消息 (TLS)
+    async fn send_pong_frame_tls(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
     ) -> Result<()> {
         // 构建 PONG Frame
@@ -163,7 +269,23 @@ impl WebSocketTransport {
         
         // 通过 WebSocket 发送
         let mut sink = sink.lock().await;
-        sink.send(Message::Binary(pong_data))
+        sink.send(Message::Binary(Bytes::from(pong_data)))
+            .await
+            .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// 发送应用层的 PONG Frame 消息 (Plain)
+    async fn send_pong_frame_plain(
+        sink: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+    ) -> Result<()> {
+        // 构建 PONG Frame
+        let pong_data = Self::build_pong_frame()?;
+        
+        // 通过 WebSocket 发送
+        let mut sink = sink.lock().await;
+        sink.send(Message::Binary(Bytes::from(pong_data)))
             .await
             .map_err(|e| FlareError::connection_failed(e.to_string()))?;
         
@@ -186,28 +308,54 @@ impl Connection for WebSocketTransport {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        debug!("[DEBUG WebSocketTransport] send: 开始发送数据");
         // 发送消息时更新活跃时间
         if let Ok(mut active) = self.last_active.lock() {
             *active = std::time::Instant::now();
         }
 
-        let message = Message::Binary(data.to_vec());
-        self.sink
-            .lock()
-            .await
-            .send(message)
-            .await
-            .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+        let message = Message::Binary(Bytes::from(data.to_vec()));
+        debug!("[DEBUG WebSocketTransport] send: 消息已创建，准备发送");
+        
+        match &mut self.sink {
+            WebSocketSink::Tls(sink) => {
+                debug!("[DEBUG WebSocketTransport] send: 使用 TLS sink");
+                let mut s = sink.lock().await;
+                debug!("[DEBUG WebSocketTransport] send: TLS sink 锁已获取");
+                s.send(message)
+                    .await
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+                debug!("[DEBUG WebSocketTransport] send: TLS 发送成功");
+            }
+            WebSocketSink::Plain(sink) => {
+                debug!("[DEBUG WebSocketTransport] send: 使用 Plain sink");
+                let mut s = sink.lock().await;
+                debug!("[DEBUG WebSocketTransport] send: Plain sink 锁已获取");
+                s.send(message)
+                    .await
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+                debug!("[DEBUG WebSocketTransport] send: Plain 发送成功");
+            }
+        }
+        debug!("[DEBUG WebSocketTransport] send: 完成");
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.sink
-            .lock()
-            .await
-            .close()
-            .await
-            .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+        match &mut self.sink {
+            WebSocketSink::Tls(sink) => {
+                let mut s = sink.lock().await;
+                s.close()
+                    .await
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+            }
+            WebSocketSink::Plain(sink) => {
+                let mut s = sink.lock().await;
+                s.close()
+                    .await
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+            }
+        }
         self.notify_observers(&ConnectionEvent::Disconnected("Closed by client".to_string()));
         Ok(())
     }

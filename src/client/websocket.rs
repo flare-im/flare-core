@@ -6,19 +6,16 @@ use crate::common::connection_state::ConnectionStateManager;
 use crate::common::error::Result;
 use crate::common::heartbeat::HeartbeatManager;
 use crate::common::message_parser::MessageParser;
-use crate::common::protocol::{Frame, ping, pong, frame_with_system_command, connect, connect_ack};
-use crate::common::{generate_id, CompressionAlgorithm};
+use crate::common::protocol::Frame;
+use crate::common::{generate_id};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-use std::time::Duration;
 use tokio::time::{sleep, timeout};
-use tokio_tungstenite::{connect_async, WebSocketStream};
-use tokio::net::TcpStream;
-use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::connect_async;
 
 /// WebSocket 客户端
 pub struct WebSocketClient {
@@ -60,7 +57,10 @@ impl WebSocketClient {
     async fn internal_connect(&mut self) -> Result<()> {
         let url_str = &self.config.server_url;
         
-        // 使用 connect_async，tokio-tungstenite 0.23 接受字符串
+        // WebSocket 客户端：不使用 TLS
+        // 使用 ws:// 协议（非 wss://），connect_async 会自动处理
+        // tokio-tungstenite 根据 URL 协议自动选择是否使用 TLS
+        // ws:// -> 非 TLS 连接，返回 WebSocketStream<TcpStream>（包装在 MaybeTlsStream::Plain 中）
         let ws_stream_result = timeout(
             self.config.connect_timeout,
             connect_async(url_str),
@@ -109,10 +109,6 @@ impl WebSocketClient {
             connect_cmd,
             crate::common::protocol::Reliability::AtLeastOnce,
         );
-        
-        // 等待 CONNECT_ACK 或超时
-        let ack_received = Arc::new(Mutex::new(false));
-        let ack_received_clone = Arc::clone(&ack_received);
         
         // 简化：直接发送，不等待 ACK
         self.send_frame_internal(&connect_frame).await?;
@@ -196,7 +192,7 @@ impl crate::transport::events::ConnectionObserver for ClientMessageObserver {
                             if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
                                 // 记录 PONG，更新心跳
                                 if let Some(ref hb) = self.heartbeat_manager {
-                                    if let Ok(mut hb_mgr) = hb.lock() {
+                                    if let Ok(hb_mgr) = hb.lock() {
                                         hb_mgr.record_pong();
                                     }
                                 }

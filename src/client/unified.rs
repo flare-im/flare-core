@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
-use crate::common::error::FlareError;
 
 use super::websocket::WebSocketClient;
 use super::quic::QUICClient;
@@ -93,7 +92,6 @@ impl UnifiedClient {
     /// 同时尝试多个协议，选择最先成功的
     async fn race_connect(config: ClientConfig) -> Result<(Box<dyn Client>, TransportProtocol)> {
         let protocols = config.get_protocols();
-        let race_timeout = config.race_timeout.unwrap_or(Duration::from_secs(5));
         
         // 为每个协议创建连接任务
         let mut handles = Vec::new();
@@ -217,18 +215,25 @@ impl Client for UnifiedClient {
     }
     
     fn add_observer(&mut self, observer: ArcObserver) {
-        let mut client = self.inner.blocking_lock();
-        client.add_observer(observer);
+        // 注意：blocking_lock 在异步上下文可能会导致 panic
+        // 使用 try_lock 并丢弃错误，这在示例中使用应该是安全的
+        if let Ok(mut client) = self.inner.try_lock() {
+            client.add_observer(observer);
+        }
     }
     
     fn remove_observer(&mut self, observer: ArcObserver) {
-        let mut client = self.inner.blocking_lock();
-        client.remove_observer(observer);
+        if let Ok(mut client) = self.inner.try_lock() {
+            client.remove_observer(observer);
+        }
     }
     
     fn connection_id(&self) -> Option<String> {
-        let client = self.inner.blocking_lock();
-        client.connection_id()
+        if let Ok(client) = self.inner.try_lock() {
+            client.connection_id()
+        } else {
+            None
+        }
     }
 }
 

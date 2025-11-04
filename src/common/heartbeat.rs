@@ -2,7 +2,6 @@
 //! 
 //! 提供心跳机制的实现，保持连接活跃
 
-use crate::common::error::Result;
 use crate::common::message_parser::MessageParser;
 use crate::transport::connection::Connection;
 use std::sync::Arc;

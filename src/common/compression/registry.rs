@@ -2,7 +2,7 @@
 //! 
 //! 管理压缩器的注册和查找，支持用户注册自定义压缩器
 
-use crate::common::error::{FlareError, Result};
+use crate::common::error::Result;
 use super::traits::Compressor;
 use super::algorithms::{CompressionAlgorithm, NoCompressor, GzipCompressor};
 use std::sync::Arc;

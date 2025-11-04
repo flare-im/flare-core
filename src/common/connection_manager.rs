@@ -304,7 +304,7 @@ pub struct ConnectionStats {
 mod tests {
     use super::*;
     use crate::transport::connection::Connection;
-    use crate::transport::events::{ArcObserver, ConnectionEvent};
+    use crate::transport::events::ArcObserver;
     use async_trait::async_trait;
     use std::sync::Mutex;
 

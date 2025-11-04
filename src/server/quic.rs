@@ -5,11 +5,11 @@ use crate::common::connection_manager::ConnectionManager;
 use crate::common::error::Result;
 use crate::common::heartbeat::HeartbeatManager;
 use crate::common::message_parser::MessageParser;
-use crate::common::protocol::{Frame, connect_ack, ping, pong, frame_with_system_command};
+use crate::common::protocol::{Frame, pong};
 use crate::common::server_trait::{Server, ConnectionHandler};
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::ConnectionEvent;
 use crate::transport::quic::QUICTransport;
 use async_trait::async_trait;
 use quinn::{Endpoint, ServerConfig as QuinnServerConfig};
@@ -35,16 +35,14 @@ impl QUICServer {
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
         let parser = MessageParser::new(config.default_serialization_format, config.default_compression);
         
-        // 创建 QUIC server config（简化：使用自签名证书）
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-            .map_err(|e| crate::common::error::FlareError::protocol_error(format!("Failed to generate cert: {}", e)))?;
+        // 创建 QUIC server config（使用共享证书）
+        // 使用共享证书工具，确保客户端和服务端使用相同的证书
+        use crate::common::cert_utils::{get_server_cert_der, get_server_key_der};
         
-        // quinn 0.11 的证书类型处理
-        // rcgen 返回 Vec<u8>，quinn 需要特定的证书类型
-        // 简化处理：直接使用字节数组（需要根据实际 quinn 版本调整）
-        let cert_der = cert.serialize_der()
-            .map_err(|e| crate::common::error::FlareError::protocol_error(format!("Failed to serialize cert: {}", e)))?;
-        let key_der = cert.serialize_private_key_der();
+        let cert_der = get_server_cert_der();
+        let key_der = get_server_key_der();
+        
+        eprintln!("[QUIC Server] Using shared certificate for localhost, 127.0.0.1, ::1");
         
         // quinn 0.11 使用 rustls，需要转换类型
         // cert.serialize_der() 返回的是 DER 格式的 Vec<u8>
@@ -116,8 +114,10 @@ impl Server for QUICServer {
         let heartbeat_managers = Arc::clone(&self.heartbeat_managers);
 
         tokio::spawn(async move {
+            eprintln!("[QUIC Server] Started listening for connections...");
             while *is_running.lock().await {
                 if let Some(conn) = endpoint.accept().await {
+                    eprintln!("[QUIC Server] Incoming connection received, waiting for handshake...");
                     let handler_clone = Arc::clone(&handler);
                     let manager_clone = Arc::clone(&manager);
                     let parser_clone = parser.clone();
@@ -128,6 +128,7 @@ impl Server for QUICServer {
                         // conn 是 Incoming (Future)，await 后得到 Connecting
                         match conn.await {
                             Ok(connecting) => {
+                                eprintln!("[QUIC Server] Handshake completed, handling connection...");
                                 handle_quic_connection(
                                     connecting,
                                     handler_clone,
@@ -138,11 +139,12 @@ impl Server for QUICServer {
                                 ).await;
                             }
                             Err(e) => {
-                                eprintln!("Failed to accept QUIC connection: {}", e);
+                                eprintln!("[QUIC Server] Failed to accept QUIC connection: {}", e);
                             }
                         }
                     });
                 } else {
+                    eprintln!("[QUIC Server] No more connections, stopping...");
                     break;
                 }
             }
@@ -188,6 +190,16 @@ impl Server for QUICServer {
         let connection_ids = self.connection_manager.list_connections();
         for conn_id in connection_ids {
             let _ = self.send_to(&conn_id, frame).await;
+        }
+        Ok(())
+    }
+    
+    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
+        let connection_ids = self.connection_manager.list_connections();
+        for conn_id in connection_ids {
+            if conn_id != exclude_connection_id {
+                let _ = self.send_to(&conn_id, frame).await;
+            }
         }
         Ok(())
     }
@@ -240,10 +252,14 @@ async fn handle_quic_connection(
     }
 
     // 接受双向流
+    eprintln!("[QUIC Server] Waiting for client to open bidirectional stream...");
     let (send, recv) = match quinn_connection.accept_bi().await {
-        Ok(streams) => streams,
+        Ok(streams) => {
+            eprintln!("[QUIC Server] Bidirectional stream accepted");
+            streams
+        },
         Err(e) => {
-            eprintln!("Failed to accept bi stream: {}", e);
+            eprintln!("[QUIC Server] Failed to accept bi stream: {}", e);
             return;
         }
     };

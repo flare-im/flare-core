@@ -6,7 +6,7 @@ use crate::common::connection_state::ConnectionStateManager;
 use crate::common::error::Result;
 use crate::common::heartbeat::HeartbeatManager;
 use crate::common::message_parser::MessageParser;
-use crate::common::protocol::{Frame, connect, frame_with_system_command};
+use crate::common::protocol::Frame;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
@@ -16,8 +16,11 @@ use quinn::Endpoint;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-use std::time::Duration;
 use tokio::time::{sleep, timeout};
+use tokio::net::lookup_host;
+
+// 使用标准的 rustls 0.23 API 进行证书验证
+// 服务器证书已添加到客户端根证书存储中
 
 /// QUIC 客户端
 pub struct QUICClient {
@@ -30,6 +33,7 @@ pub struct QUICClient {
     heartbeat_manager: Option<HeartbeatManager>,
     reconnect_attempts: u32,
     endpoint: Option<Endpoint>,
+    _client_config: Option<quinn::ClientConfig>, // 保留用于将来的 TLS 配置
 }
 
 impl QUICClient {
@@ -38,14 +42,35 @@ impl QUICClient {
         let parser = MessageParser::new(config.serialization_format, config.compression);
         let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
         
-        // 创建 QUIC endpoint
-        // quinn 0.11: Endpoint::client 已经内置了默认的客户端配置（包括系统根证书）
-        // 如果需要自定义配置，可以参考示例代码：
-        //   let client_cfg = ClientConfig::with_native_roots();
-        //   endpoint.set_default_client_config(client_cfg);
-        // 但当前使用默认配置即可，因为 Endpoint::client 已经包含了合适的默认配置
-        let endpoint = Endpoint::client("[::]:0".parse().unwrap())
+        // 配置 rustls ClientConfig
+        // 注意：在 rustls 0.23 中使用新 API
+        // 使用标准的证书验证，将服务器证书添加到根证书存储
+        
+        use crate::common::cert_utils::create_client_config;
+        
+        // 创建使用标准证书验证的客户端配置
+        let rustls_config = create_client_config();
+        
+        // 创建 quinn ClientConfig
+        // quinn 0.11 需要使用 QuicClientConfig 包装 rustls::ClientConfig
+        use quinn::crypto::rustls::QuicClientConfig;
+        let rustls_config_arc = Arc::new(rustls_config);
+        
+        // QuicClientConfig 实现了 From<Arc<rustls::ClientConfig>>
+        let quic_crypto_config = QuicClientConfig::try_from(rustls_config_arc)
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to create QUIC client config: {}", e)
+            ))?;
+        
+        // quinn::ClientConfig::new 接受实现了 crypto::ClientConfig 的类型
+        let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto_config));
+        
+        // 创建 QUIC endpoint 并设置默认客户端配置
+        let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
             .map_err(|e| crate::common::error::FlareError::connection_failed(format!("Failed to create endpoint: {}", e)))?;
+        
+        // 设置默认客户端配置（quinn 0.11 API）
+        endpoint.set_default_client_config(client_config.clone());
 
         Ok(Self {
             config,
@@ -57,6 +82,7 @@ impl QUICClient {
             heartbeat_manager: None,
             reconnect_attempts: 0,
             endpoint: Some(endpoint),
+            _client_config: Some(client_config),
         })
     }
 
@@ -68,31 +94,76 @@ impl QUICClient {
     }
 
     async fn internal_connect(&mut self) -> Result<()> {
-        let server_addr = self.config.server_url
-            .replace("quic://", "")
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::common::error::FlareError::protocol_error(format!("Invalid address: {}", e)))?;
+        // 解析 URL，支持 hostname:port 格式
+        let address_str = self.config.server_url
+            .replace("quic://", "");
+        
+        // 尝试直接解析为 SocketAddr，如果失败则进行 DNS 解析
+        let server_addr = match address_str.parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                // 解析 hostname:port 格式
+                lookup_host(&address_str)
+                    .await
+                    .map_err(|e| crate::common::error::FlareError::protocol_error(format!("DNS lookup failed: {}", e)))?
+                    .next()
+                    .ok_or_else(|| crate::common::error::FlareError::protocol_error(format!("No address found for {}", address_str)))?
+            }
+        };
+        
+        // 提取 hostname 用于 SNI
+        // 注意：服务器证书是 "localhost"，所以这里使用 "localhost" 以确保证书验证通过
+        let hostname = if address_str.starts_with("localhost") || address_str.starts_with("127.0.0.1") {
+            "localhost"
+        } else {
+            address_str
+                .split(':')
+                .next()
+                .unwrap_or("localhost")
+        };
+        
+        eprintln!("[QUIC Client] Connecting to {} with hostname {}", server_addr, hostname);
 
         let endpoint = self.endpoint.as_ref().ok_or_else(|| {
             crate::common::error::FlareError::connection_failed("Endpoint not initialized".to_string())
         })?;
 
         // 连接服务器
-        let connecting = endpoint.connect(server_addr, "localhost")
-            .map_err(|e| crate::common::error::FlareError::connection_failed(e.to_string()))?;
+        eprintln!("[QUIC Client] Starting connection...");
+        let connecting = endpoint.connect(server_addr, hostname)
+            .map_err(|e| {
+                eprintln!("[QUIC Client] Failed to create connecting: {}", e);
+                crate::common::error::FlareError::connection_failed(e.to_string())
+            })?;
+        
+        eprintln!("[QUIC Client] Waiting for connection handshake...");
 
         let quinn_connection = timeout(
             self.config.connect_timeout,
             connecting,
         )
         .await
-        .map_err(|_| crate::common::error::FlareError::connection_timeout("Connection timeout".to_string()))?
-        .map_err(|e| crate::common::error::FlareError::connection_failed(e.to_string()))?;
+        .map_err(|_| {
+            eprintln!("[QUIC Client] Connection handshake timeout after {:?}", self.config.connect_timeout);
+            crate::common::error::FlareError::connection_timeout("Connection timeout".to_string())
+        })?
+        .map_err(|e| {
+            eprintln!("[QUIC Client] Connection handshake failed: {}", e);
+            crate::common::error::FlareError::connection_failed(e.to_string())
+        })?;
+        
+        eprintln!("[QUIC Client] Connection established, opening stream...");
 
         // 打开双向流
+        eprintln!("[QUIC Client] Opening bidirectional stream...");
         let (send, recv) = quinn_connection.open_bi()
             .await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(e.to_string()))?;
+            .map_err(|e| {
+                eprintln!("[QUIC Client] Failed to open bidirectional stream: {}", e);
+                crate::common::error::FlareError::connection_failed(e.to_string())
+            })?;
+        
+        eprintln!("[QUIC Client] Bidirectional stream opened successfully");
 
         let transport = QUICTransport::new(send, recv);
         let connection: Box<dyn Connection> = Box::new(transport);
@@ -202,7 +273,8 @@ impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                if let Ok(frame) = self.parser.parse(data) {
+                // 解析消息以验证格式，然后通知所有观察者
+                if self.parser.parse(data).is_ok() {
                     // 通知所有观察者
                     if let Ok(observers) = self.observers.lock() {
                         for observer in observers.iter() {

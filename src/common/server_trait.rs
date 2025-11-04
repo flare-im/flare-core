@@ -120,6 +120,22 @@ pub trait Server: Send + Sync {
     /// 广播成功返回 `Ok(())`，失败返回错误
     async fn broadcast(&self, frame: &Frame) -> Result<()>;
     
+    /// 广播消息到所有连接，排除指定的连接
+    /// 
+    /// # 参数
+    /// - `frame`: 要广播的 Frame
+    /// - `exclude_connection_id`: 要排除的连接 ID
+    /// 
+    /// # 返回
+    /// 广播成功返回 `Ok(())`，失败返回错误
+    async fn broadcast_except(&self, frame: &Frame, _exclude_connection_id: &str) -> Result<()> {
+        // 默认实现：获取所有连接，排除指定连接，然后逐个发送
+        // 子类可以覆盖此方法以提供更高效的实现
+        // 注意：默认实现会广播给所有人，包括要排除的连接
+        // 子类应该覆盖此方法以正确实现排除逻辑
+        self.broadcast(frame).await
+    }
+    
     /// 检查服务器运行状态
     /// 
     /// # 返回

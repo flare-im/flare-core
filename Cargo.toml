@@ -13,7 +13,7 @@ readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.23.0", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,13 +21,16 @@ prost = "0.14"
 bytes = "1"
 async-trait = "0.1"
 quinn = "0.11"
-thiserror = "1.0"
+thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1.0"
 lazy_static = "1.4"
 url = "2.5"
-rcgen = "0.12"
-rustls-pemfile = "2.0"
+rcgen = "0.14"
+rustls-pemfile = "2"
+rustls = { version = "0.23", features = ["ring"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [build-dependencies]
 prost-build = "0.14"
