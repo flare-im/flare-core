@@ -88,17 +88,40 @@ impl UnifiedClient {
         })
     }
     
-    /// 协议竞速连接
+        /// 协议竞速连接
     /// 
     /// 同时尝试多个协议，选择最先成功的
-    async fn race_connect(config: ClientConfig) -> Result<(Box<dyn Client>, TransportProtocol)> {
+    async fn race_connect(config: ClientConfig) -> Result<(Box<dyn Client>, TransportProtocol)> {                                                               
         let protocols = config.get_protocols();
+        
+        // 解析基础 URL，为不同协议生成正确的 URL
+        // 格式：host:port 或 protocol://host:port
+        let base_url = config.server_url.clone();
+        let (host, base_port) = Self::parse_base_url(&base_url);
         
         // 为每个协议创建连接任务
         let mut handles = Vec::new();
         for protocol in protocols.clone() {
+            // 根据协议生成正确的 URL
+            let protocol_url = match protocol {
+                TransportProtocol::WebSocket => {
+                    // WebSocket 默认端口 8080
+                    format!("ws://{}:{}", host, base_port)
+                }
+                TransportProtocol::QUIC => {
+                    // QUIC 默认端口 8081（如果基础端口是 8080，则使用 8081）
+                    let quic_port = if base_port == 8080 { 8081 } else { base_port };
+                    format!("quic://{}:{}", host, quic_port)
+                }
+                TransportProtocol::TCP => {
+                    return Err(crate::common::error::FlareError::protocol_error(
+                        "TCP transport not yet implemented".to_string()
+                    ));
+                }
+            };
+            
             let protocol_config = ClientConfig {
-                server_url: config.server_url.clone(),
+                server_url: protocol_url,
                 transport: protocol,
                 transports: None,
                 ..config.clone()
@@ -184,6 +207,33 @@ impl UnifiedClient {
     /// 获取当前使用的协议
     pub fn active_protocol(&self) -> TransportProtocol {
         self.active_protocol
+    }
+    
+    /// 解析基础 URL，提取主机和端口
+    /// 
+    /// 支持的格式：
+    /// - `host:port` -> (host, port)
+    /// - `protocol://host:port` -> (host, port)
+    /// - `host` -> (host, 8080)  // 默认端口
+    fn parse_base_url(url: &str) -> (String, u16) {
+        // 移除协议前缀（如果有）
+        let url = url
+            .trim_start_matches("ws://")
+            .trim_start_matches("wss://")
+            .trim_start_matches("quic://")
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        
+        // 解析 host:port
+        if let Some(colon_pos) = url.rfind(':') {
+            let host = url[..colon_pos].to_string();
+            if let Ok(port) = url[colon_pos + 1..].parse::<u16>() {
+                return (host, port);
+            }
+        }
+        
+        // 如果没有端口，使用默认端口
+        (url.to_string(), 8080)
     }
 }
 
