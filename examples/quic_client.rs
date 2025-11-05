@@ -1,15 +1,21 @@
 //! QUIC 聊天室客户端
 //! 
+//! 使用基础结构（HybridClient）直接构建客户端
 //! 实现一个简单的聊天室客户端，支持发送和接收消息
 //! 
 //! 注意：此示例使用 QUIC 协议，需要 TLS 证书
 //! 客户端会自动信任服务器证书（自签名证书）
+//! 
+//! 此示例展示了如何：
+//! 1. 实现 ConnectionObserver trait 来接收消息
+//! 2. 使用 HybridClient::connect_with_config() 直接连接服务器
+//! 3. 手动添加观察者和处理连接状态
 
 use flare_core::client::{Client, ClientConfig};
 use flare_core::common::protocol::{frame_with_message_command, send_message, generate_message_id, Reliability};                      
 use flare_core::common::protocol::flare::core::commands::command::Type;                                                              
 use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};                                                            
-use flare_core::client::UnifiedClient;
+use flare_core::client::HybridClient;
 use std::sync::Arc;
 use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -68,6 +74,15 @@ impl ConnectionObserver for ChatObserver {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 初始化 tracing（默认使用 debug 级别，方便调试）
+    // 可以通过环境变量 RUST_LOG 覆盖：RUST_LOG=info cargo run --example quic_client
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"))
+        )
+        .init();
+    
     println!("=== QUIC 聊天室客户端 ===");
     
     // 获取用户名
@@ -89,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .quic()
         .with_format(flare_core::common::protocol::SerializationFormat::Protobuf);
     
-    match UnifiedClient::connect_with_config(quic_config).await {
+    match HybridClient::connect_with_config(quic_config).await {
         Ok(mut quic_client) => {
             println!("连接成功！");
             println!("使用的协议: {:?}", quic_client.active_protocol());

@@ -8,13 +8,15 @@ pub mod heartbeat;
 pub mod manager;
 pub mod router;
 pub mod transports;
+pub mod builder;
 
 pub use config::ClientConfig;
 pub use connection::{ConnectionState, ConnectionStateManager};
 pub use heartbeat::HeartbeatManager;
 pub use manager::ClientConnectionManager;
 pub use router::{MessageRouter, MessageHandler, SimpleHandler, AsyncHandler};
-pub use transports::{Client, QUICClient, UnifiedClient, WebSocketClient};
+pub use transports::{Client, QUICClient, HybridClient, WebSocketClient};
+pub use builder::{ClientBuilder, SimpleClient, ObserverClientBuilder, ObserverClient};
 
 // 重新导出错误类型，客户端使用 ClientError
 pub use crate::common::error::ClientError;

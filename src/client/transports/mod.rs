@@ -3,7 +3,7 @@
 //! 提供多种传输协议的客户端实现：
 //! - QUIC：基于 QUIC 协议的客户端
 //! - WebSocket：基于 WebSocket 协议的客户端
-//! - Unified：统一客户端，支持多种协议
+//! - Hybrid：混合客户端，支持多种协议
 //! 
 //! 同时定义客户端的标准 trait 接口
 
@@ -105,10 +105,10 @@ pub trait Client: Send + Sync {
 }
 
 pub mod quic;
-pub mod unified;
+pub mod hybrid;
 pub mod websocket;
 
 // 重新导出常用类型
 pub use quic::QUICClient;
-pub use unified::UnifiedClient;
+pub use hybrid::HybridClient;
 pub use websocket::WebSocketClient;

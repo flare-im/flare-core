@@ -1,4 +1,4 @@
-//! 统一客户端接口
+//! 混合客户端接口
 //! 
 //! 支持单个协议或多协议竞速
 
@@ -16,24 +16,24 @@ use std::time::Duration;
 use crate::client::transports::websocket::WebSocketClient;
 use crate::client::transports::quic::QUICClient;
 
-/// 统一客户端
+/// 混合客户端
 /// 
 /// 支持单个协议连接或多协议竞速
-pub struct UnifiedClient {
+pub struct HybridClient {
     /// 内部客户端（根据配置动态选择）
     inner: Arc<Mutex<Box<dyn Client>>>,
     /// 使用的协议
     active_protocol: TransportProtocol,
 }
 
-impl UnifiedClient {
-    /// 创建新的统一客户端
+impl HybridClient {
+    /// 创建新的混合客户端
     /// 
     /// # 参数
     /// - `config`: 客户端配置
     /// 
     /// # 返回
-    /// 统一客户端实例
+    /// 混合客户端实例
     pub fn new(config: ClientConfig) -> Result<Self> {
         let protocols = config.get_protocols();
         
@@ -238,7 +238,7 @@ impl UnifiedClient {
 }
 
 #[async_trait]
-impl Client for UnifiedClient {
+impl Client for HybridClient {
     async fn connect(&mut self) -> Result<()> {
         // 如果客户端还未连接，则尝试连接
         // 对于单协议模式，直接连接
@@ -288,8 +288,8 @@ impl Client for UnifiedClient {
     }
 }
 
-/// 创建统一客户端的便捷函数
-impl UnifiedClient {
+/// 创建混合客户端的便捷函数
+impl HybridClient {
     /// 使用配置创建并连接（单协议）
     pub async fn connect_with_config(config: ClientConfig) -> Result<Self> {
         let mut client = Self::new(config)?;

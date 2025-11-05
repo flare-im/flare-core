@@ -3,7 +3,7 @@
 //! 提供多种传输协议的服务端实现：
 //! - QUIC：基于 QUIC 协议的服务端
 //! - WebSocket：基于 WebSocket 协议的服务端
-//! - Unified：统一服务端，支持多种协议
+//! - Hybrid：混合服务端，支持多种协议
 //! 
 //! 同时定义服务端的标准 trait 接口
 
@@ -164,10 +164,10 @@ pub trait Server: Send + Sync {
 }
 
 pub mod quic;
-pub mod unified;
+pub mod hybrid;
 pub mod websocket;
 
 // 重新导出常用类型
 pub use quic::QUICServer;
-pub use unified::UnifiedServer;
+pub use hybrid::HybridServer;
 pub use websocket::WebSocketServer;

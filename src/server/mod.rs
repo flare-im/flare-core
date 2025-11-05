@@ -6,11 +6,13 @@ pub mod config;
 pub mod connection;
 pub mod heartbeat;
 pub mod transports;
+pub mod builder;
 
 pub use config::ServerConfig;
 pub use connection::{ConnectionManager, ConnectionManagerTrait, ConnectionInfo, ConnectionStats};
 pub use heartbeat::HeartbeatDetector;
-pub use transports::{Server, ConnectionHandler, QUICServer, UnifiedServer, WebSocketServer};
+pub use transports::{Server, ConnectionHandler, QUICServer, HybridServer, WebSocketServer};
+pub use builder::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer};
 
 // 重新导出错误类型，服务端使用 ServerError
 pub use crate::common::error::ServerError;

@@ -1,4 +1,4 @@
-//! 统一服务端接口
+//! 混合服务端接口
 //! 
 //! 支持单个协议或多协议同时监听
 
@@ -14,12 +14,11 @@ use tracing::{debug, error};
 
 use super::websocket::WebSocketServer;
 use super::quic::QUICServer;
-use crate::server::connection::ConnectionManager;
 
-/// 统一服务端
+/// 混合服务端
 /// 
 /// 支持单个协议或多协议同时监听
-pub struct UnifiedServer {
+pub struct HybridServer {
     /// 内部服务器列表
     servers: Vec<Arc<Mutex<Box<dyn Server>>>>,
     /// 使用的协议列表
@@ -28,20 +27,20 @@ pub struct UnifiedServer {
     is_running: Arc<AtomicBool>,
 }
 
-impl UnifiedServer {
-    /// 创建新的统一服务端
+impl HybridServer {
+    /// 创建新的混合服务端
     /// 
     /// # 参数
     /// - `config`: 服务端配置
     /// - `handler`: 连接处理器
     /// 
     /// # 返回
-    /// 统一服务端实例
+    /// 混合服务端实例
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
         Self::with_connection_manager(config, handler, None)
     }
     
-    /// 使用指定的连接管理器创建统一服务端
+    /// 使用指定的连接管理器创建混合服务端
     /// 
     /// # 参数
     /// - `config`: 服务端配置
@@ -123,7 +122,7 @@ impl UnifiedServer {
 }
 
 #[async_trait::async_trait]
-impl Server for UnifiedServer {
+impl Server for HybridServer {
     async fn start(&mut self) -> Result<()> {
         let mut started_count = 0;
         let mut errors = Vec::new();
@@ -231,57 +230,57 @@ impl Server for UnifiedServer {
     }
     
     async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        debug!("[DEBUG UnifiedServer] broadcast 开始");
+        debug!("[DEBUG HybridServer] broadcast 开始");
         // 在所有服务器上广播
         // 注意：不要在持有异步锁的情况下调用 is_running()，因为它可能使用 block_in_place
         // 解决方案：先获取所有需要广播的服务器列表，然后释放锁，再广播
-        debug!("[DEBUG UnifiedServer] broadcast: 检查服务器状态");
+        debug!("[DEBUG HybridServer] broadcast: 检查服务器状态");
         let server_refs: Vec<Arc<tokio::sync::Mutex<Box<dyn Server>>>> = {
-            debug!("[DEBUG UnifiedServer] broadcast: 开始迭代服务器");
+            debug!("[DEBUG HybridServer] broadcast: 开始迭代服务器");
             let refs: Vec<_> = self.servers.iter()
                 .enumerate()
                 .filter_map(|(idx, server)| {
-                    debug!("[DEBUG UnifiedServer] broadcast: 检查服务器 {} (索引 {})", idx, idx);
+                    debug!("[DEBUG HybridServer] broadcast: 检查服务器 {} (索引 {})", idx, idx);
                     // 使用 block_in_place 来安全地检查 is_running
-                    debug!("[DEBUG UnifiedServer] broadcast: 调用 block_in_place 检查 is_running");
+                    debug!("[DEBUG HybridServer] broadcast: 调用 block_in_place 检查 is_running");
                     let is_running = tokio::task::block_in_place(|| {
-                        debug!("[DEBUG UnifiedServer] broadcast: block_in_place 内部，获取 blocking_lock");
+                        debug!("[DEBUG HybridServer] broadcast: block_in_place 内部，获取 blocking_lock");
                         let s = server.blocking_lock();
-                        debug!("[DEBUG UnifiedServer] broadcast: blocking_lock 已获取，调用 is_running");
+                        debug!("[DEBUG HybridServer] broadcast: blocking_lock 已获取，调用 is_running");
                         let result = s.is_running();
-                        debug!("[DEBUG UnifiedServer] broadcast: is_running 返回: {}", result);
+                        debug!("[DEBUG HybridServer] broadcast: is_running 返回: {}", result);
                         result
                     });
-                    debug!("[DEBUG UnifiedServer] broadcast: block_in_place 完成，is_running={}", is_running);
+                    debug!("[DEBUG HybridServer] broadcast: block_in_place 完成，is_running={}", is_running);
                     if is_running {
-                        debug!("[DEBUG UnifiedServer] broadcast: 服务器 {} 正在运行，添加到列表", idx);
+                        debug!("[DEBUG HybridServer] broadcast: 服务器 {} 正在运行，添加到列表", idx);
                         Some(Arc::clone(server))
                     } else {
-                        debug!("[DEBUG UnifiedServer] broadcast: 服务器 {} 未运行，跳过", idx);
+                        debug!("[DEBUG HybridServer] broadcast: 服务器 {} 未运行，跳过", idx);
                         None
                     }
                 })
                 .collect();
-            debug!("[DEBUG UnifiedServer] broadcast: 找到 {} 个运行的服务器", refs.len());
+            debug!("[DEBUG HybridServer] broadcast: 找到 {} 个运行的服务器", refs.len());
             refs
         };
         
         // 现在释放锁，对所有服务器进行广播
-        debug!("[DEBUG UnifiedServer] broadcast: 开始对 {} 个服务器进行广播", server_refs.len());
+        debug!("[DEBUG HybridServer] broadcast: 开始对 {} 个服务器进行广播", server_refs.len());
         let mut last_error = None;
         for (idx, server) in server_refs.iter().enumerate() {
-            debug!("[DEBUG UnifiedServer] broadcast: 广播到服务器 {} (索引 {})", idx, idx);
+            debug!("[DEBUG HybridServer] broadcast: 广播到服务器 {} (索引 {})", idx, idx);
             let s = server.lock().await;
-            debug!("[DEBUG UnifiedServer] broadcast: 服务器 {} 锁已获取", idx);
+            debug!("[DEBUG HybridServer] broadcast: 服务器 {} 锁已获取", idx);
             if let Err(e) = s.broadcast(frame).await {
-                error!("[DEBUG UnifiedServer] broadcast: 服务器 {} 广播失败: {:?}", idx, e);
+                error!("[DEBUG HybridServer] broadcast: 服务器 {} 广播失败: {:?}", idx, e);
                 last_error = Some(e);
             } else {
-                debug!("[DEBUG UnifiedServer] broadcast: 服务器 {} 广播成功", idx);
+                debug!("[DEBUG HybridServer] broadcast: 服务器 {} 广播成功", idx);
             }
         }
         
-        debug!("[DEBUG UnifiedServer] broadcast 完成");
+        debug!("[DEBUG HybridServer] broadcast 完成");
         if last_error.is_none() {
             Ok(())
         } else {
@@ -292,7 +291,7 @@ impl Server for UnifiedServer {
     }
     
     async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        debug!("[DEBUG UnifiedServer] broadcast_except 开始: exclude={}", exclude_connection_id);
+        debug!("[DEBUG HybridServer] broadcast_except 开始: exclude={}", exclude_connection_id);
         // 在所有服务器上广播，排除指定连接
         let server_refs: Vec<Arc<tokio::sync::Mutex<Box<dyn Server>>>> = {
             self.servers.iter()
@@ -310,20 +309,20 @@ impl Server for UnifiedServer {
                 .collect()
         };
         
-        debug!("[DEBUG UnifiedServer] broadcast_except: 找到 {} 个运行的服务器", server_refs.len());
+        debug!("[DEBUG HybridServer] broadcast_except: 找到 {} 个运行的服务器", server_refs.len());
         let mut last_error = None;
         for (idx, server) in server_refs.iter().enumerate() {
-            debug!("[DEBUG UnifiedServer] broadcast_except: 广播到服务器 {} (排除 {})", idx, exclude_connection_id);
+            debug!("[DEBUG HybridServer] broadcast_except: 广播到服务器 {} (排除 {})", idx, exclude_connection_id);
             let s = server.lock().await;
             if let Err(e) = s.broadcast_except(frame, exclude_connection_id).await {
-                error!("[DEBUG UnifiedServer] broadcast_except: 服务器 {} 广播失败: {:?}", idx, e);
+                error!("[DEBUG HybridServer] broadcast_except: 服务器 {} 广播失败: {:?}", idx, e);
                 last_error = Some(e);
             } else {
-                debug!("[DEBUG UnifiedServer] broadcast_except: 服务器 {} 广播成功", idx);
+                debug!("[DEBUG HybridServer] broadcast_except: 服务器 {} 广播成功", idx);
             }
         }
         
-        debug!("[DEBUG UnifiedServer] broadcast_except 完成");
+        debug!("[DEBUG HybridServer] broadcast_except 完成");
         if last_error.is_none() {
             Ok(())
         } else {

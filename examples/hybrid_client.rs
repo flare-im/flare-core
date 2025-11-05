@@ -1,14 +1,19 @@
-//! 统一客户端聊天室示例
+//! 混合客户端聊天室示例
 //! 
+//! 使用观察者模式的 Builder（ObserverClientBuilder）构建客户端
 //! 使用协议竞速连接服务器，自动选择最快的协议（WebSocket 或 QUIC）
 //! 实现多用户聊天室客户端
+//! 
+//! 此示例展示了如何：
+//! 1. 实现 ConnectionObserver trait 来接收消息
+//! 2. 使用 ObserverClientBuilder 创建客户端（支持协议竞速）
+//! 3. 自动选择最快的可用协议
 
-use flare_core::client::{Client, ClientConfig};
+use flare_core::client::ObserverClientBuilder;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::{frame_with_message_command, send_message, generate_message_id, Reliability};
 use flare_core::common::protocol::flare::core::commands::command::Type;
 use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};
-use flare_core::client::UnifiedClient;
 use std::sync::Arc;
 use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -67,11 +72,20 @@ impl ConnectionObserver for ChatObserver {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 初始化 tracing（默认使用 debug 级别，方便调试）
+    // 可以通过环境变量 RUST_LOG 覆盖：RUST_LOG=info cargo run --example hybrid_client
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"))
+        )
+        .init();
+    
     // 设置 rustls CryptoProvider（QUIC 需要）
     use rustls::crypto::CryptoProvider;
     let _ = CryptoProvider::install_default(rustls::crypto::ring::default_provider());
     
-    println!("=== 统一客户端聊天室（协议竞速）===");
+    println!("=== 混合客户端聊天室（协议竞速）===");
     
     // 获取用户名
     print!("请输入您的用户名: ");
@@ -87,23 +101,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("正在连接到聊天室服务器（协议竞速：WebSocket 和 QUIC）...");
     
-    // 配置协议竞速：同时尝试 WebSocket 和 QUIC，选择最快的连接
-    // 服务器地址：WebSocket 使用 ws://127.0.0.1:8080，QUIC 使用 quic://127.0.0.1:8081
-    // 注意：使用基础 URL，race_connect 会根据协议自动调整端口
-    let unified_config = ClientConfig::new("127.0.0.1:8080".to_string())
-        .with_protocol_race(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
-        .with_format(flare_core::common::protocol::SerializationFormat::Protobuf);
+    // 创建观察者
+    let observer = Arc::new(ChatObserver {
+        username: username.clone(),
+    });
     
-    match UnifiedClient::connect_with_race(unified_config).await {
-        Ok(mut unified_client) => {
+    // 使用 ObserverClientBuilder 创建客户端（协议竞速）
+    match ObserverClientBuilder::new("127.0.0.1:8080")
+        .with_observer(observer as Arc<dyn ConnectionObserver>)
+        .with_protocol_race(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
+        .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
+        .build_with_race()
+        .await
+    {
+        Ok(mut client) => {
             println!("连接成功！");
-            println!("使用的协议: {:?}", unified_client.active_protocol());
-            
-            // 创建并添加消息观察者
-            let observer = Arc::new(ChatObserver {
-                username: username.clone(),
-            });
-            unified_client.add_observer(Arc::clone(&observer) as Arc<dyn ConnectionObserver>);
+            println!("使用的协议: {:?}", client.active_protocol());
             
             // 发送用户名信息（首次连接时）
             let mut metadata = std::collections::HashMap::new();
@@ -122,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Reliability::BestEffort,
             );
             
-            let _ = unified_client.send_frame(&init_frame).await;
+            let _ = client.send_frame(&init_frame).await;
             
             println!("\n欢迎来到聊天室！输入消息后按回车发送，输入 '/quit' 退出");
             print!("{}> ", username);
@@ -175,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Reliability::BestEffort,
                                 );
                                 
-                                if let Err(e) = unified_client.send_frame(&chat_frame).await {
+                                if let Err(e) = client.send_frame(&chat_frame).await {
                                     eprintln!("\n[错误] 发送消息失败: {}", e);
                                     break;
                                 }
@@ -193,12 +206,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             
             // 断开连接
-            let _ = unified_client.disconnect().await;
+            let _ = client.disconnect().await;
             println!("已断开连接");
         }
         Err(e) => {
             eprintln!("连接失败: {:?}", e);
-            eprintln!("提示: 请确保服务器已启动（运行 unified_server 示例）");
+            eprintln!("提示: 请确保服务器已启动（运行 hybrid_server 示例）");
         }
     }
     

@@ -1,15 +1,21 @@
 //! WebSocket 聊天室服务端
 //! 
+//! 使用基础结构（HybridServer）直接构建服务端
 //! 实现一个简单的聊天室，所有连接的用户都可以发送和接收消息
 //! 
 //! 注意：此示例使用纯 WebSocket 连接（ws://），不使用 TLS/SSL
+//! 
+//! 此示例展示了如何：
+//! 1. 实现 ConnectionHandler trait 来处理消息
+//! 2. 使用 HybridServer::new() 直接创建服务器
+//! 3. 手动管理服务器引用和连接状态
 
 use flare_core::server::{ServerConfig, Server, ConnectionHandler};
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};
 use flare_core::common::protocol::flare::core::commands::command::Type;
 use flare_core::common::error::Result;
-use flare_core::server::UnifiedServer;
+use flare_core::server::HybridServer;
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;
@@ -207,10 +213,10 @@ impl ConnectionHandler for ChatRoomHandlerWrapper {
     }
 }
 
-// 包装 UnifiedServer 使其可以作为 Arc<dyn Server> 使用
-// 关键：不要嵌套 block_in_place，因为 UnifiedServer 的方法已经处理了异步上下文
+// 包装 HybridServer 使其可以作为 Arc<dyn Server> 使用
+// 关键：不要嵌套 block_in_place，因为 HybridServer 的方法已经处理了异步上下文
 struct ServerWrapper {
-    server: Arc<tokio::sync::Mutex<UnifiedServer>>,
+    server: Arc<tokio::sync::Mutex<HybridServer>>,
 }
 
 #[async_trait]
@@ -255,13 +261,13 @@ impl Server for ServerWrapper {
     }
     
     fn connection_count(&self) -> usize {
-        // 关键：UnifiedServer::connection_count() 内部已经使用了 block_in_place
+        // 关键：HybridServer::connection_count() 内部已经使用了 block_in_place
         // 如果我们在这里再次使用 block_in_place，会导致嵌套，可能有问题
         // 解决方案：直接使用 blocking_lock，但只在非异步上下文中调用此方法
         // 或者，我们可以使用 spawn_blocking 来避免嵌套
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
-            // UnifiedServer::connection_count() 内部会再次使用 block_in_place
+            // HybridServer::connection_count() 内部会再次使用 block_in_place
             // 这可能导致嵌套问题，但应该可以工作，因为 block_in_place 可以嵌套
             s.connection_count()
         })
@@ -282,14 +288,12 @@ impl Server for ServerWrapper {
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // 初始化 tracing
-    // 默认日志级别可以通过环境变量 RUST_LOG 设置
-    // 例如：RUST_LOG=debug cargo run --example websocket_server
-    // 或者：RUST_LOG=flare_core=debug,websocket_server=debug
+    // 初始化 tracing（默认使用 debug 级别，方便调试）
+    // 可以通过环境变量 RUST_LOG 覆盖：RUST_LOG=info cargo run --example websocket_server
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"))
         )
         .init();
     
@@ -309,7 +313,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_protocols(vec![TransportProtocol::WebSocket])
         .with_max_connections(2000);
     
-    let ws_server = UnifiedServer::new(ws_config, wrapper as Arc<dyn ConnectionHandler>)?;
+    let ws_server = HybridServer::new(ws_config, wrapper as Arc<dyn ConnectionHandler>)?;
     
     // 创建包装器（在启动前创建，确保 handler 可以立即使用）
     let server_wrapper = Arc::new(ServerWrapper {
