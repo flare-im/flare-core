@@ -16,9 +16,6 @@ pub mod flare_error;
 pub mod builder;
 mod conversions;
 
-// 导入转换实现（确保 From trait 实现可用）
-use conversions::*;
-
 // 重新导出公共类型和函数
 pub use code::{ErrorCode, ErrorCategory};
 pub use localized::LocalizedError;

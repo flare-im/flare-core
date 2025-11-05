@@ -539,7 +539,6 @@ impl ClientCore {
                 
                 if cmd_type == crate::common::protocol::flare::core::commands::system_command::Type::ConnectAck {
                     // 解析协商结果
-                    use prost::Enumeration;
                     let format = crate::common::protocol::SerializationFormat::from_i32(sys_cmd.format)
                         .unwrap_or(crate::common::protocol::SerializationFormat::Json);
                     
