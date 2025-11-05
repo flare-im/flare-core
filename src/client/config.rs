@@ -50,6 +50,8 @@ pub struct ClientConfig {
     pub enable_router: bool,
     /// 设备信息（用于协商和设备管理）
     pub device_info: Option<DeviceInfo>,
+    /// Token（用于认证，如果服务端启用认证，必须提供）
+    pub token: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -75,6 +77,7 @@ impl Default for ClientConfig {
             metadata: std::collections::HashMap::new(),
             enable_router: false,
             device_info: None,
+            token: None,
         }
     }
 }
@@ -115,6 +118,12 @@ impl ClientConfig {
     /// 设置用户 ID
     pub fn with_user_id(mut self, user_id: String) -> Self {
         self.user_id = Some(user_id);
+        self
+    }
+    
+    /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
+    pub fn with_token(mut self, token: String) -> Self {
+        self.token = Some(token);
         self
     }
     

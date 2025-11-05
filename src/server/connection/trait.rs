@@ -31,6 +31,10 @@ pub struct ConnectionInfo {
     pub serialization_format: crate::common::protocol::SerializationFormat,
     /// 压缩算法（由客户端协商决定）
     pub compression: crate::common::compression::CompressionAlgorithm,
+    /// 是否已验证（如果启用认证，只有已验证的连接才能收发消息）
+    pub authenticated: bool,
+    /// 认证时间戳（Unix 时间戳，秒，如果已验证）
+    pub authenticated_at: Option<u64>,
 }
 
 /// 连接管理器抽象 trait
@@ -66,6 +70,9 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
 
     /// 更新连接的最后活跃时间
     async fn update_connection_active(&self, connection_id: &str) -> Result<()>;
+    
+    /// 设置连接为已验证状态（认证通过后调用）
+    async fn set_connection_authenticated(&self, connection_id: &str, user_id: Option<String>) -> Result<()>;
 
     /// 获取所有连接 ID
     async fn list_connections(&self) -> Vec<String>;
@@ -110,6 +117,37 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         frame: &Frame,
         parser: Option<&MessageParser>,
     ) -> Result<()> {
+        // 检查连接是否存在且已验证（如果启用认证）
+        if let Some((_, info)) = self.get_connection(connection_id).await {
+            // 如果启用认证但连接未验证，拒绝发送消息
+            // 注意：系统命令（如 CONNECT_ACK, PING, PONG）可能在验证前发送，这里不检查
+            // 业务消息应该在验证后发送
+            if !info.authenticated {
+                // 检查是否是系统命令（允许系统命令在验证前发送）
+                let is_system_command = frame.command.as_ref().and_then(|cmd| {
+                    if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                        Some(sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::ConnectAck as i32
+                            || sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Ping as i32
+                            || sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32
+                            || sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Error as i32
+                            || sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Close as i32)
+                    } else {
+                        None
+                    }
+                }).unwrap_or(false);
+                
+                if !is_system_command {
+                    return Err(crate::common::error::FlareError::authentication_failed(
+                        format!("连接 {} 未验证，无法发送消息", connection_id)
+                    ));
+                }
+            }
+        } else {
+            return Err(crate::common::error::FlareError::connection_failed(
+                format!("连接 {} 不存在", connection_id)
+            ));
+        }
+        
         // 如果提供了 parser，使用它；否则从连接的协商信息创建 parser
         let data = if let Some(p) = parser {
             p.serialize(frame)?

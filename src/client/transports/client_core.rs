@@ -489,6 +489,12 @@ impl ClientCore {
             metadata.insert("user_id".to_string(), user_id.as_bytes().to_vec());
         }
         
+        // 添加 token（如果提供，用于认证）
+        if let Some(ref token) = self.config.token {
+            metadata.insert("token".to_string(), token.as_bytes().to_vec());
+            tracing::debug!("[ClientCore] 已添加 token 到 CONNECT 消息元数据");
+        }
+        
         // 添加其他元数据
         for (key, value) in &self.config.metadata {
             metadata.insert(key.clone(), value.as_bytes().to_vec());

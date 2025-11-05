@@ -186,6 +186,12 @@ impl ClientBuilder {
         self.config = self.config.with_user_id(user_id);
         self
     }
+    
+    /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
+    pub fn with_token(mut self, token: String) -> Self {
+        self.config = self.config.with_token(token);
+        self
+    }
 
     /// 设置序列化格式
     pub fn with_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {

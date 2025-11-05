@@ -18,6 +18,7 @@ pub struct ObserverServerBuilder {
     connection_manager: Option<Arc<ConnectionManager>>,
     device_manager: Option<Arc<crate::server::device::DeviceManager>>,
     event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
+    authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
 }
 
 impl ObserverServerBuilder {
@@ -29,7 +30,32 @@ impl ObserverServerBuilder {
             connection_manager: None,
             device_manager: None,
             event_handler: None,
+            authenticator: None,
         }
+    }
+    
+    /// 设置认证器（如果启用认证，必须提供）
+    /// 
+    /// 如果设置了认证器，还需要在配置中启用认证：
+    /// ```rust
+    /// .enable_auth()
+    /// .with_authenticator(authenticator)
+    /// ```
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn crate::server::auth::Authenticator>) -> Self {
+        self.authenticator = Some(authenticator);
+        self
+    }
+    
+    /// 启用认证
+    pub fn enable_auth(mut self) -> Self {
+        self.config = self.config.enable_auth();
+        self
+    }
+    
+    /// 设置认证超时时间
+    pub fn with_auth_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config = self.config.with_auth_timeout(timeout);
+        self
     }
     
     /// 设置设备管理器（用于设备冲突管理）
@@ -119,6 +145,7 @@ impl ObserverServerBuilder {
                 Some(manager),
                 self.device_manager,
                 self.event_handler,
+                self.authenticator,
             )?
         } else {
             HybridServer::with_connection_manager(
@@ -127,6 +154,7 @@ impl ObserverServerBuilder {
                 None,
                 self.device_manager,
                 self.event_handler,
+                self.authenticator,
             )?
         };
 

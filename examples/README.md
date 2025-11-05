@@ -324,10 +324,75 @@ netstat -an | grep 8080
 
 ---
 
+## 认证示例
+
+### `auth_server.rs` - 认证聊天室服务器
+
+演示如何使用 token 认证功能。
+
+**功能特性：**
+- 启用 token 认证
+- 自定义认证器（只接受 token='12345'）
+- 认证超时检测
+- 只有已验证的连接才能收发业务消息
+
+**启动命令：**
+```bash
+RUST_LOG=debug cargo run --example auth_server
+```
+
+**配置说明：**
+- `enable_auth()`: 启用认证功能
+- `with_authenticator()`: 设置认证器（自定义验证逻辑）
+- `with_auth_timeout()`: 设置认证超时时间（默认 30 秒）
+
+**认证机制：**
+- 客户端连接后，发送 CONNECT 消息（包含 token）
+- 服务端验证 token，只有 token='12345' 才能通过
+- 验证通过后，连接被标记为已验证
+- 只有已验证的连接才能收发业务消息
+
+### `auth_client.rs` - 认证聊天室客户端
+
+演示客户端如何使用 token 进行认证。
+
+**功能特性：**
+- 通过 `with_token()` 设置 token
+- Token 自动在 CONNECT 消息中发送
+- 支持交互式输入 token
+- 支持命令行参数和环境变量指定 token
+
+**启动命令：**
+```bash
+# 使用正确 token（12345，默认值）
+RUST_LOG=debug cargo run --example auth_client
+
+# 使用错误 token（通过命令行参数）
+RUST_LOG=debug cargo run --example auth_client -- wrong_token
+
+# 通过环境变量指定 token
+TOKEN=12345 RUST_LOG=debug cargo run --example auth_client
+```
+
+**测试场景：**
+1. **正确 token**：使用 `12345` 应该成功连接并收发消息
+2. **错误 token**：使用其他值会被服务端拒绝，连接失败
+3. **未提供 token**：连接会被服务端拒绝
+
+**认证日志：**
+- `[ClientCore] 已添加 token 到 CONNECT 消息元数据`：显示 token 已发送
+- `[ServerCore] 🔐 开始验证 token`：显示服务端开始验证
+- `[ServerCore] ✅ Token 验证成功`：显示验证通过
+- `[ServerCore] ❌ Token 验证失败`：显示验证失败
+- `[ServerCore] ✅ 连接已标记为已验证`：显示连接已验证
+
+---
+
 ## 更多信息
 
 查看各个示例的源代码注释了解更多实现细节：
 - 基础结构示例：`websocket_server.rs`, `websocket_client.rs`, `quic_server.rs`, `quic_client.rs`
 - 观察者模式 Builder：`hybrid_server.rs`, `hybrid_client.rs`
 - 简单模式 Builder：`simple_server.rs`, `simple_client.rs`
+- 认证示例：`auth_server.rs`, `auth_client.rs`
 

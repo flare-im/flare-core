@@ -34,6 +34,10 @@ pub struct ServerConfig {
     pub max_message_size: usize,
     /// 设备冲突策略（用于多端设备管理）
     pub device_conflict_strategy: DeviceConflictStrategy,
+    /// 是否启用认证（如果启用，连接必须通过 token 验证才能收发消息）
+    pub auth_enabled: bool,
+    /// 认证超时时间（连接建立后，如果在此时间内未完成认证，连接将被关闭）
+    pub auth_timeout: Duration,
 }
 
 impl Default for ServerConfig {
@@ -51,6 +55,8 @@ impl Default for ServerConfig {
             tls: TlsConfig::none(),
             max_message_size: 10 * 1024 * 1024, // 10MB
             device_conflict_strategy: DeviceConflictStrategy::default(),
+            auth_enabled: false, // 默认不启用认证
+            auth_timeout: Duration::from_secs(30), // 默认认证超时 30 秒
         }
     }
 }
@@ -158,6 +164,29 @@ impl ServerConfig {
     /// 设置设备冲突策略
     pub fn with_device_conflict_strategy(mut self, strategy: DeviceConflictStrategy) -> Self {
         self.device_conflict_strategy = strategy;
+        self
+    }
+    
+    /// 启用认证
+    /// 
+    /// 启用后，所有连接必须通过 token 验证才能收发消息
+    pub fn enable_auth(mut self) -> Self {
+        self.auth_enabled = true;
+        self
+    }
+    
+    /// 禁用认证（默认）
+    pub fn disable_auth(mut self) -> Self {
+        self.auth_enabled = false;
+        self
+    }
+    
+    /// 设置认证超时时间
+    /// 
+    /// 连接建立后，如果在此时间内未完成认证，连接将被关闭
+    /// 默认值为 30 秒
+    pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
+        self.auth_timeout = timeout;
         self
     }
 }

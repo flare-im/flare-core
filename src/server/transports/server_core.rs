@@ -7,6 +7,7 @@ use crate::server::heartbeat::HeartbeatDetector;
 use crate::server::handle::ServerHandle;
 use crate::server::device::DeviceManager;
 use crate::server::events::handler::ServerEventHandler;
+use crate::server::auth::Authenticator;
 use crate::common::MessageParser;
 use crate::server::config::ServerConfig;
 use crate::common::protocol::{Frame, frame_with_system_command, Reliability, SerializationFormat};
@@ -31,6 +32,12 @@ pub struct ServerCore {
     device_manager: Option<Arc<DeviceManager>>,
     /// 事件处理器（可选，用于细化的命令处理）
     event_handler: Option<Arc<dyn ServerEventHandler>>,
+    /// 认证器（可选，如果提供则启用认证）
+    authenticator: Option<Arc<dyn Authenticator>>,
+    /// 是否启用认证（从配置读取）
+    auth_enabled: bool,
+    /// 认证超时时间（从配置读取）
+    auth_timeout: Duration,
     /// 默认序列化格式（用于协商）
     default_serialization_format: SerializationFormat,
     /// 默认压缩算法（用于协商）
@@ -80,6 +87,9 @@ impl ServerCore {
             heartbeat_detector: Arc::new(tokio::sync::Mutex::new(None)),
             device_manager: None,
             event_handler: None,
+            authenticator: None,
+            auth_enabled: config.auth_enabled,
+            auth_timeout: config.auth_timeout,
             default_serialization_format: config.default_serialization_format,
             default_compression: config.default_compression,
         }
@@ -115,6 +125,32 @@ impl ServerCore {
     /// 设置设备管理器（可变引用版本，用于已经创建的实例）
     pub fn set_device_manager(&mut self, device_manager: Option<Arc<DeviceManager>>) {
         self.device_manager = device_manager;
+    }
+    
+    /// 设置认证器
+    pub fn with_authenticator(mut self, authenticator: Option<Arc<dyn Authenticator>>) -> Self {
+        self.authenticator = authenticator;
+        self
+    }
+    
+    /// 获取认证器
+    pub fn authenticator(&self) -> Option<Arc<dyn Authenticator>> {
+        self.authenticator.clone()
+    }
+    
+    /// 设置认证器（可变引用版本，用于已经创建的实例）
+    pub fn set_authenticator(&mut self, authenticator: Option<Arc<dyn Authenticator>>) {
+        self.authenticator = authenticator;
+    }
+    
+    /// 检查是否启用认证
+    pub fn auth_enabled(&self) -> bool {
+        self.auth_enabled && self.authenticator.is_some()
+    }
+    
+    /// 获取认证超时时间
+    pub fn auth_timeout(&self) -> Duration {
+        self.auth_timeout
     }
     
     /// 启动心跳检测
@@ -336,7 +372,87 @@ impl ServerCore {
             );
         }
         
-        // 4. 更新 ConnectionInfo 的协商信息（使用最终确定的格式）
+        // 4. Token 验证（如果启用认证）
+        let mut auth_user_id = negotiation.user_id.clone();
+        let auth_enabled = self.auth_enabled();
+        
+        if auth_enabled {
+            if let Some(authenticator) = &self.authenticator {
+                // 从 CONNECT 消息的 metadata 中提取 token
+                let token = if let Some(cmd) = &frame.command {
+                    if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                        sys_cmd.metadata.get("token")
+                            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                
+                if let Some(token) = token {
+                    info!(
+                        "[ServerCore] 🔐 开始验证 token: connection_id={}",
+                        connection_id
+                    );
+                    
+                    match authenticator.authenticate(
+                        &token,
+                        connection_id,
+                        negotiation.device_info.as_ref(),
+                        frame.command.as_ref().and_then(|cmd| {
+                            if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                                Some(&sys_cmd.metadata)
+                            } else {
+                                None
+                            }
+                        }),
+                    ).await {
+                        Ok(auth_result) => {
+                            if auth_result.authenticated {
+                                info!(
+                                    "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}",
+                                    connection_id,
+                                    auth_result.user_id
+                                );
+                                auth_user_id = auth_result.user_id;
+                            } else {
+                                let error_msg = auth_result.error_message
+                                    .unwrap_or_else(|| "Token 验证失败".to_string());
+                                error!(
+                                    "[ServerCore] ❌ Token 验证失败: connection_id={}, error={}",
+                                    connection_id,
+                                    error_msg
+                                );
+                                return Err(crate::common::error::FlareError::authentication_failed(error_msg));
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "[ServerCore] ❌ Token 验证过程出错: connection_id={}, error={}",
+                                connection_id,
+                                e
+                            );
+                            return Err(crate::common::error::FlareError::authentication_failed(
+                                format!("验证过程出错: {}", e)
+                            ));
+                        }
+                    }
+                } else {
+                    error!(
+                        "[ServerCore] ❌ 未提供 token: connection_id={}",
+                        connection_id
+                    );
+                    return Err(crate::common::error::FlareError::authentication_failed(
+                        "未提供 token".to_string()
+                    ));
+                }
+            }
+        } else {
+            debug!("[ServerCore] 跳过 token 验证: 认证未启用");
+        }
+        
+        // 5. 更新 ConnectionInfo 的协商信息（使用最终确定的格式和验证后的 user_id）
         // 注意：必须在调用 on_connect 之前更新，以便 on_connect 可以获取到用户ID
         let manager = Arc::clone(&self.connection_manager);
         if let Err(e) = manager.update_connection_negotiation(
@@ -344,12 +460,12 @@ impl ServerCore {
             negotiation.device_info.clone(),
             final_format,
             final_compression,
-            negotiation.user_id.clone(),
+            auth_user_id.clone(),
         ) {
             error!("[ServerCore] 更新连接协商信息失败: {}", e);
         } else {
             // 验证更新是否成功（立即读取连接信息确认）
-            if let Some(user_id) = &negotiation.user_id {
+            if let Some(user_id) = &auth_user_id {
                 debug!(
                     "[ServerCore] 已更新连接协商信息: connection_id={}, user_id={}",
                     connection_id,
@@ -371,7 +487,30 @@ impl ServerCore {
             }
         }
         
-        // 5. 创建 CONNECT_ACK（使用最终确定的格式）
+        // 6. 标记连接为已验证
+        // 如果启用认证：验证通过后标记为已验证
+        // 如果未启用认证：直接标记为已验证（连接在创建时已经标记为已验证，但这里确保 user_id 正确）
+        let manager = Arc::clone(&self.connection_manager);
+        let manager_trait = manager as Arc<dyn ConnectionManagerTrait>;
+        if let Err(e) = manager_trait.set_connection_authenticated(connection_id, auth_user_id.clone()).await {
+            error!("[ServerCore] 标记连接为已验证失败: {}", e);
+        } else {
+            if auth_enabled {
+                info!(
+                    "[ServerCore] ✅ 连接已标记为已验证（认证通过）: connection_id={}, user_id={:?}",
+                    connection_id,
+                    auth_user_id
+                );
+            } else {
+                debug!(
+                    "[ServerCore] ✅ 连接已标记为已验证（无需认证）: connection_id={}, user_id={:?}",
+                    connection_id,
+                    auth_user_id
+                );
+            }
+        }
+        
+        // 7. 创建 CONNECT_ACK（使用最终确定的格式）
         let mut ack_metadata = std::collections::HashMap::new();
         ack_metadata.insert(
             "compression".to_string(),

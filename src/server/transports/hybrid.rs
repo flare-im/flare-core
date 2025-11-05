@@ -46,7 +46,7 @@ impl HybridServer {
     /// # 返回
     /// 混合服务端实例
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
-        Self::with_connection_manager(config, handler, None, None, None)
+        Self::with_connection_manager(config, handler, None, None, None, None)
     }
     
     /// 使用指定的连接管理器创建混合服务端
@@ -57,6 +57,7 @@ impl HybridServer {
     /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的并统一管理
     /// - `device_manager`: 可选的设备管理器，如果为 None 且配置中指定了设备冲突策略，则自动创建
     /// - `event_handler`: 可选的事件处理器
+    /// - `authenticator`: 可选的认证器，如果配置中启用认证，必须提供
     /// 
     /// # 返回
     /// 混合服务端实例
@@ -66,6 +67,7 @@ impl HybridServer {
         connection_manager: Option<Arc<crate::server::connection::ConnectionManager>>,
         device_manager: Option<Arc<crate::server::device::DeviceManager>>,
         event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
+        authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
     ) -> Result<Self> {
         // 创建服务器核心，统一管理连接和心跳
         let mut core = ServerCore::new(&config, connection_manager.clone());
@@ -82,7 +84,8 @@ impl HybridServer {
         };
         
         core = core.with_device_manager(final_device_manager)
-            .with_event_handler(event_handler);
+            .with_event_handler(event_handler)
+            .with_authenticator(authenticator);
         
         // 将 ServerCore 包装为 Arc，以便共享给 WebSocketServer 和 QUICServer
         let shared_core = Arc::new(core);

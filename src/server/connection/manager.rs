@@ -31,12 +31,21 @@ pub struct ConnectionInfo {
     pub serialization_format: crate::common::protocol::SerializationFormat,
     /// 压缩算法（由客户端协商决定，默认不压缩）
     pub compression: crate::common::compression::CompressionAlgorithm,
+    /// 是否已验证（如果启用认证，只有已验证的连接才能收发消息）
+    pub authenticated: bool,
+    /// 认证时间戳（Unix 时间戳，秒，如果已验证）
+    pub authenticated_at: Option<u64>,
 }
 
 impl ConnectionInfo {
     /// 创建新的连接信息
-    pub fn new(connection_id: String) -> Self {
+    /// 
+    /// # 参数
+    /// - `connection_id`: 连接 ID
+    /// - `requires_auth`: 是否需要认证（如果为 false，连接直接标记为已验证）
+    pub fn new(connection_id: String, requires_auth: bool) -> Self {
         let now = Instant::now();
+        let authenticated = !requires_auth; // 如果不需要认证，直接标记为已验证
         Self {
             connection_id,
             user_id: None,
@@ -47,7 +56,35 @@ impl ConnectionInfo {
             // 默认使用 JSON 且不压缩（客户端可以协商）
             serialization_format: crate::common::protocol::SerializationFormat::Json,
             compression: crate::common::compression::CompressionAlgorithm::None,
+            authenticated,
+            authenticated_at: if authenticated {
+                Some(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs())
+            } else {
+                None
+            },
         }
+    }
+    
+    /// 标记为已验证
+    pub fn set_authenticated(&mut self, user_id: Option<String>) {
+        self.authenticated = true;
+        self.authenticated_at = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        if let Some(uid) = user_id {
+            self.user_id = Some(uid);
+        }
+    }
+    
+    /// 检查连接是否已验证
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated
     }
     
     /// 设置设备信息
@@ -110,6 +147,7 @@ impl ConnectionManager {
     /// - `connection_id`: 连接唯一标识符
     /// - `connection`: 连接实例
     /// - `user_id`: 可选的用户 ID（如果已认证）
+    /// - `requires_auth`: 是否需要认证（如果为 false，连接直接标记为已验证）
     /// 
     /// # 返回
     /// 如果连接 ID 已存在，返回错误
@@ -118,6 +156,7 @@ impl ConnectionManager {
         connection_id: String,
         connection: Box<dyn Connection>,
         user_id: Option<String>,
+        requires_auth: bool,
     ) -> Result<()> {
         let mut connections = self.connections.write()
             .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
@@ -129,7 +168,7 @@ impl ConnectionManager {
             )));
         }
 
-        let mut info = ConnectionInfo::new(connection_id.clone());
+        let mut info = ConnectionInfo::new(connection_id.clone(), requires_auth);
         info.user_id = user_id.clone();
         
         connections.insert(connection_id.clone(), (Arc::new(Mutex::new(connection)), info));
@@ -263,6 +302,43 @@ impl ConnectionManager {
         Ok(())
     }
     
+    /// 设置连接为已验证状态
+    pub fn set_connection_authenticated(&self, connection_id: &str, user_id: Option<String>) -> Result<()> {
+        let mut connections = self.connections.write()
+            .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
+        
+        let (_, info) = connections.get_mut(connection_id)
+            .ok_or_else(|| FlareError::protocol_error(format!("Connection {} not found", connection_id)))?;
+        
+        info.set_authenticated(user_id.clone());
+        
+        // 如果提供了用户 ID，更新用户连接映射
+        if let Some(user_id) = user_id {
+            let mut user_connections = self.user_connections.write()
+                .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
+            
+            // 如果之前有用户 ID，先移除旧映射
+            if let Some(old_user_id) = &info.user_id {
+                if old_user_id != &user_id {
+                    if let Some(conn_ids) = user_connections.get_mut(old_user_id) {
+                        conn_ids.retain(|id| id != connection_id);
+                        if conn_ids.is_empty() {
+                            user_connections.remove(old_user_id);
+                        }
+                    }
+                }
+            }
+            
+            // 添加新映射
+            user_connections
+                .entry(user_id)
+                .or_insert_with(Vec::new)
+                .push(connection_id.to_string());
+        }
+        
+        Ok(())
+    }
+    
     /// 更新连接的协商信息（设备信息、序列化格式、压缩算法）
     pub fn update_connection_negotiation(
         &self,
@@ -389,6 +465,12 @@ impl ConnectionManagerTrait for ConnectionManager {
         connection: Arc<Mutex<Box<dyn Connection>>>,
         user_id: Option<String>,
     ) -> Result<()> {
+        // 注意：trait 方法不能直接传递 requires_auth，我们需要从 ServerCore 获取
+        // 但这里我们暂时使用 true（需要认证），实际值应该在调用时通过 ServerCore 的 auth_enabled() 获取
+        // 由于 ConnectionManager 不知道 ServerCore，我们暂时使用 true
+        // 实际应用中，连接会在 CONNECT 消息处理时被标记为已验证
+        let requires_auth = true; // 默认需要认证，如果不需要认证，连接会在 CONNECT 消息处理时被标记为已验证
+        
         // 将 Arc<Mutex<Box<dyn Connection>>> 转换为 Box<dyn Connection>
         // 注意：这需要从 Arc 中取出，但 Arc 可能被多个地方引用
         // 对于默认实现，我们需要一个不同的方式
@@ -404,7 +486,7 @@ impl ConnectionManagerTrait for ConnectionManager {
             )));
         }
 
-        let mut info = ConnectionInfo::new(connection_id.clone());
+        let mut info = ConnectionInfo::new(connection_id.clone(), requires_auth);
         info.user_id = user_id.clone();
         
         connections.insert(connection_id.clone(), (Arc::clone(&connection), info));
@@ -445,6 +527,8 @@ impl ConnectionManagerTrait for ConnectionManager {
                 device_info: info.device_info.clone(),
                 serialization_format: info.serialization_format,
                 compression: info.compression,
+                authenticated: info.authenticated,
+                authenticated_at: info.authenticated_at,
             };
             (conn, trait_info)
         })
@@ -460,6 +544,11 @@ impl ConnectionManagerTrait for ConnectionManager {
 
     async fn update_connection_active(&self, connection_id: &str) -> Result<()> {
         ConnectionManager::update_connection_active(self, connection_id)
+    }
+    
+    async fn set_connection_authenticated(&self, connection_id: &str, user_id: Option<String>) -> Result<()> {
+        // ConnectionManager::set_connection_authenticated 是同步方法，直接调用
+        ConnectionManager::set_connection_authenticated(self, connection_id, user_id)
     }
 
     async fn list_connections(&self) -> Vec<String> {
@@ -565,7 +654,7 @@ mod tests {
         let manager = ConnectionManager::new();
         let connection = Box::new(MockConnection::new());
         
-        manager.add_connection("conn1".to_string(), connection, None).unwrap();
+        manager.add_connection("conn1".to_string(), connection, None, false).unwrap();
         
         let (_, info) = manager.get_connection("conn1").unwrap();
         assert_eq!(info.connection_id, "conn1");
@@ -576,7 +665,7 @@ mod tests {
         let manager = ConnectionManager::new();
         let connection = Box::new(MockConnection::new());
         
-        manager.add_connection("conn1".to_string(), connection, None).unwrap();
+        manager.add_connection("conn1".to_string(), connection, None, false).unwrap();
         assert_eq!(manager.connection_count(), 1);
         
         manager.remove_connection("conn1").unwrap();
@@ -588,7 +677,7 @@ mod tests {
         let manager = ConnectionManager::new();
         let connection = Box::new(MockConnection::new());
         
-        manager.add_connection("conn1".to_string(), connection, None).unwrap();
+        manager.add_connection("conn1".to_string(), connection, None, false).unwrap();
         manager.bind_user("conn1", "user1".to_string()).unwrap();
         
         let connections = manager.get_user_connections("user1");
@@ -600,7 +689,7 @@ mod tests {
         let manager = ConnectionManager::new();
         let connection = Box::new(MockConnection::new());
         
-        manager.add_connection("conn1".to_string(), connection, None).unwrap();
+        manager.add_connection("conn1".to_string(), connection, None, false).unwrap();
         
         // 等待一段时间，让连接超时
         std::thread::sleep(Duration::from_millis(10));

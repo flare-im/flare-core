@@ -121,6 +121,12 @@ impl ObserverClientBuilder {
         self.config = self.config.with_device_info(device_info);
         self
     }
+    
+    /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
+    pub fn with_token(mut self, token: String) -> Self {
+        self.config = self.config.with_token(token);
+        self
+    }
 
     /// 构建客户端（使用协议竞速）
     pub async fn build_with_race(self) -> Result<ObserverClient> {

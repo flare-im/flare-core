@@ -2,6 +2,7 @@
 //! 
 //! 提供服务端实现，支持 WebSocket 和 QUIC 协议
 
+pub mod auth;
 pub mod config;
 pub mod connection;
 pub mod device;
@@ -15,6 +16,7 @@ pub use config::ServerConfig;
 pub use connection::{ConnectionManager, ConnectionManagerTrait, ConnectionInfo, ConnectionStats};
 pub use device::{DeviceManager, DeviceConflictStrategy, DeviceConflictStrategyBuilder};
 pub use events::{ServerEventHandler, DefaultServerMessageObserver};
+pub use auth::{Authenticator, DefaultAuthenticator, AuthResult};
 pub use handle::{ServerHandle, DefaultServerHandle};
 pub use heartbeat::HeartbeatDetector;
 pub use transports::{Server, ConnectionHandler, QUICServer, HybridServer, WebSocketServer};

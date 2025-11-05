@@ -311,6 +311,7 @@ pub struct ServerBuilder {
     message_handler: Option<MessageHandlerFn>,
     on_connect: Option<OnConnectFn>,
     on_disconnect: Option<OnDisconnectFn>,
+    authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
 }
 
 impl ServerBuilder {
@@ -324,7 +325,32 @@ impl ServerBuilder {
             message_handler: None,
             on_connect: None,
             on_disconnect: None,
+            authenticator: None,
         }
+    }
+    
+    /// 设置认证器（如果启用认证，必须提供）
+    /// 
+    /// 如果设置了认证器，还需要在配置中启用认证：
+    /// ```rust
+    /// .enable_auth()
+    /// .with_authenticator(authenticator)
+    /// ```
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn crate::server::auth::Authenticator>) -> Self {
+        self.authenticator = Some(authenticator);
+        self
+    }
+    
+    /// 启用认证
+    pub fn enable_auth(mut self) -> Self {
+        self.config = self.config.enable_auth();
+        self
+    }
+    
+    /// 设置认证超时时间
+    pub fn with_auth_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config = self.config.with_auth_timeout(timeout);
+        self
     }
 
     /// 设置消息处理函数
@@ -423,7 +449,15 @@ impl ServerBuilder {
             handle: Arc::new(Mutex::new(None)),
         });
 
-        let server = HybridServer::new(self.config, handler.clone() as Arc<dyn ConnectionHandler>)?;
+        // 使用 with_connection_manager 以传递 authenticator
+        let server = HybridServer::with_connection_manager(
+            self.config,
+            handler.clone() as Arc<dyn ConnectionHandler>,
+            None,
+            None,
+            None,
+            self.authenticator,
+        )?;
         let server_arc = Arc::new(Mutex::new(server));
         let server_wrapper = Arc::new(ServerWrapper {
             server: Arc::clone(&server_arc),

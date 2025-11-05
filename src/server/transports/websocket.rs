@@ -215,7 +215,10 @@ async fn handle_websocket_connection(
     
     // 添加连接
     debug!("[DEBUG WebSocketServer] handle_websocket_connection: 准备添加连接");
-    if let Err(e) = manager.add_connection(connection_id.clone(), connection, None) {
+    // 从 ServerCore 获取是否需要认证
+    let requires_auth = core.auth_enabled();
+    
+    if let Err(e) = manager.add_connection(connection_id.clone(), connection, None, requires_auth) {
         debug!("Failed to add connection: {}", e);
         return;
     }
