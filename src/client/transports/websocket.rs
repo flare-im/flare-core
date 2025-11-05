@@ -1,48 +1,43 @@
 //! WebSocket 客户端实现
+//! 
+//! 只处理协议层，连接状态管理、心跳、消息路由等功能委托给 ClientCore
 
-use crate::client::transports::Client;
+use crate::client::transports::{Client, ClientCore};
 use crate::client::config::ClientConfig;
-use crate::client::connection::ConnectionStateManager;
 use crate::common::error::Result;
-use crate::client::heartbeat::HeartbeatManager;
-use crate::common::MessageParser;
 use crate::common::protocol::Frame;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{ConnectionEvent, ConnectionObserver, ArcObserver};
 use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 
 /// WebSocket 客户端
+/// 
+/// 只处理协议层，其他功能委托给 ClientCore
 pub struct WebSocketClient {
     config: ClientConfig,
     connection: Option<Arc<Mutex<Box<dyn Connection>>>>,
     connection_id: String,
-    parser: MessageParser,
-    observers: Arc<StdMutex<Vec<ArcObserver>>>,
-    state_manager: Arc<ConnectionStateManager>,
-    heartbeat_manager: Option<HeartbeatManager>,
+    core: ClientCore,
     reconnect_attempts: u32,
 }
 
 impl WebSocketClient {
     /// 创建新的 WebSocket 客户端
     pub fn new(config: ClientConfig) -> Self {
-        let parser = MessageParser::new(config.serialization_format, config.compression);
         let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        let core = ClientCore::new(&config);
         
         Self {
             config,
             connection: None,
             connection_id,
-            parser: parser.clone(),
-            observers: Arc::new(StdMutex::new(Vec::new())),
-            state_manager: Arc::new(ConnectionStateManager::new()),
-            heartbeat_manager: None,
+            core,
             reconnect_attempts: 0,
         }
     }
@@ -53,14 +48,22 @@ impl WebSocketClient {
         client.connect().await?;
         Ok(client)
     }
+    
+    /// 使用 ClientCore 创建（用于 HybridClient）
+    pub fn with_core(config: ClientConfig, core: ClientCore) -> Self {
+        let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        Self {
+            config,
+            connection: None,
+            connection_id,
+            core,
+            reconnect_attempts: 0,
+        }
+    }
 
     async fn internal_connect(&mut self) -> Result<()> {
         let url_str = &self.config.server_url;
         
-        // WebSocket 客户端：不使用 TLS
-        // 使用 ws:// 协议（非 wss://），connect_async 会自动处理
-        // tokio-tungstenite 根据 URL 协议自动选择是否使用 TLS
-        // ws:// -> 非 TLS 连接，返回 WebSocketStream<TcpStream>（包装在 MaybeTlsStream::Plain 中）
         let ws_stream_result = timeout(
             self.config.connect_timeout,
             connect_async(url_str),
@@ -74,19 +77,17 @@ impl WebSocketClient {
         let connection: Box<dyn Connection> = Box::new(transport);
         let connection_arc = Arc::new(Mutex::new(connection));
 
-        // 添加消息观察者
-        let parser_clone = self.parser.clone();
-        let observers_clone = Arc::clone(&self.observers);
-        let connection_clone = Arc::clone(&connection_arc);
-        let conn_id_clone = self.connection_id.clone();
-        let state_mgr = Arc::clone(&self.state_manager);
-
+        // 创建消息观察者，委托给 ClientCore
+        let core_state_mgr = Arc::clone(&self.core.state_manager);
+        let core_parser = self.core.parser.clone();
+        let core_observers = Arc::clone(&self.core.observers);
+        let core_clone = Arc::new(self.core.clone()); // 用于记录 PONG
+        
         let message_observer = Arc::new(ClientMessageObserver {
-            parser: parser_clone,
-            observers: observers_clone,
-            connection_id: conn_id_clone,
-            state_manager: state_mgr,
-            heartbeat_manager: None,
+            state_manager: core_state_mgr,
+            parser: core_parser,
+            observers: core_observers,
+            core: core_clone,
         });
         
         {
@@ -94,7 +95,7 @@ impl WebSocketClient {
             conn.add_observer(message_observer);
         }
 
-        self.connection = Some(connection_clone);
+        self.connection = Some(connection_arc.clone());
         
         // 发送 CONNECT 消息
         let mut metadata = std::collections::HashMap::new();
@@ -110,36 +111,25 @@ impl WebSocketClient {
             crate::common::protocol::Reliability::AtLeastOnce,
         );
         
-        // 简化：直接发送，不等待 ACK
         self.send_frame_internal(&connect_frame).await?;
 
-        // 启动心跳
-        let mut heartbeat = HeartbeatManager::new(
-            self.config.heartbeat.interval,
-            self.config.heartbeat.timeout,
-        );
-        
-        if let Some(ref conn) = self.connection {
-            heartbeat.start(Arc::clone(conn), self.parser.clone());
-            self.heartbeat_manager = Some(heartbeat);
-        }
+        // 启动心跳（通过 ClientCore）
+        self.core.start_heartbeat(connection_arc);
 
-        self.state_manager.set_connected();
+        self.core.handle_connection_event(&ConnectionEvent::Connected);
         self.reconnect_attempts = 0;
         
         Ok(())
     }
 
     async fn send_frame_internal(&self, frame: &Frame) -> Result<()> {
-        let can_send = self.state_manager.get_state().can_send();
-        
-        if !can_send {
+        if !self.core.can_send() {
             return Err(crate::common::error::FlareError::connection_failed(
                 "Cannot send: connection state is not ready".to_string()
             ));
         }
 
-        let data = self.parser.serialize(frame)?;
+        let data = self.core.parser.serialize(frame)?;
         if let Some(ref conn) = self.connection {
             let mut c = conn.lock().await;
             c.send(&data).await?;
@@ -158,50 +148,49 @@ impl WebSocketClient {
             }
         }
 
-        self.state_manager.set_reconnecting();
+        self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
 
-        // 等待重连间隔
         sleep(self.config.reconnect_interval).await;
 
-        // 断开旧连接
         if let Some(ref conn) = self.connection.take() {
             let mut c = conn.lock().await;
             let _ = c.close().await;
         }
 
-        // 尝试重新连接
         self.internal_connect().await
+    }
+    
+    /// 获取 ClientCore（用于外部访问）
+    pub fn core(&self) -> &ClientCore {
+        &self.core
     }
 }
 
+// 消息观察者，委托给 ClientCore
 struct ClientMessageObserver {
-    parser: MessageParser,
-    observers: Arc<StdMutex<Vec<ArcObserver>>>,
-    connection_id: String,
-    state_manager: Arc<ConnectionStateManager>,
-    heartbeat_manager: Option<Arc<StdMutex<HeartbeatManager>>>,
+    state_manager: Arc<crate::client::connection::ConnectionStateManager>,
+    parser: crate::common::MessageParser,
+    observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
+    core: Arc<ClientCore>,
 }
 
-impl crate::transport::events::ConnectionObserver for ClientMessageObserver {
+impl ConnectionObserver for ClientMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
+                // 解析消息
                 if let Ok(frame) = self.parser.parse(data) {
-                    // 检查是否是 PONG
+                    // 检查是否是 PONG（心跳响应）
                     if let Some(cmd) = &frame.command {
                         if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
                             if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
-                                // 记录 PONG，更新心跳
-                                if let Some(ref hb) = self.heartbeat_manager {
-                                    if let Ok(hb_mgr) = hb.lock() {
-                                        hb_mgr.record_pong();
-                                    }
-                                }
+                                // 记录 PONG，更新心跳（通过 ClientCore）
+                                self.core.record_pong();
                             }
                         }
                     }
-
+                    
                     // 通知所有观察者
                     if let Ok(observers) = self.observers.lock() {
                         for observer in observers.iter() {
@@ -212,7 +201,6 @@ impl crate::transport::events::ConnectionObserver for ClientMessageObserver {
             }
             ConnectionEvent::Connected => {
                 self.state_manager.set_connected();
-                // 转发事件
                 if let Ok(observers) = self.observers.lock() {
                     for observer in observers.iter() {
                         observer.on_event(event);
@@ -221,16 +209,14 @@ impl crate::transport::events::ConnectionObserver for ClientMessageObserver {
             }
             ConnectionEvent::Disconnected(_) => {
                 self.state_manager.set_disconnected();
-                // 转发事件
                 if let Ok(observers) = self.observers.lock() {
                     for observer in observers.iter() {
                         observer.on_event(event);
                     }
                 }
             }
-            ConnectionEvent::Error(_e) => {
+            ConnectionEvent::Error(_) => {
                 self.state_manager.set_failed();
-                // 转发事件
                 if let Ok(observers) = self.observers.lock() {
                     for observer in observers.iter() {
                         observer.on_event(event);
@@ -244,29 +230,20 @@ impl crate::transport::events::ConnectionObserver for ClientMessageObserver {
 #[async_trait]
 impl Client for WebSocketClient {
     async fn connect(&mut self) -> Result<()> {
-        let can_connect = self.state_manager.get_state().can_connect();
-        
-        if !can_connect {
+        if !self.core.can_connect() {
             return Err(crate::common::error::FlareError::protocol_error(
                 format!("Cannot connect: state is unavailable")
             ));
         }
 
-        self.state_manager.start_connecting();
+        self.core.state_manager.start_connecting();
         
         match self.internal_connect().await {
             Ok(()) => {
-                self.state_manager.set_connected();
-                // 通知观察者连接成功
-                if let Ok(observers) = self.observers.lock() {
-                    for observer in observers.iter() {
-                        observer.on_event(&ConnectionEvent::Connected);
-                    }
-                }
                 Ok(())
             }
             Err(e) => {
-                self.state_manager.set_failed();
+                self.core.state_manager.set_failed();
                 // 如果允许重连，尝试重连
                 if self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
                     self.try_reconnect().await
@@ -278,26 +255,17 @@ impl Client for WebSocketClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
+        self.core.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
 
-        // 停止心跳
-        if let Some(ref mut hb) = self.heartbeat_manager.take() {
-            hb.stop();
-        }
+        // 停止心跳（通过 ClientCore）
+        self.core.stop_heartbeat();
 
         if let Some(ref conn) = self.connection.take() {
             let mut c = conn.lock().await;
             c.close().await?;
         }
         
-        // 通知观察者断开连接
-        if let Ok(observers) = self.observers.lock() {
-            for observer in observers.iter() {
-                observer.on_event(&ConnectionEvent::Disconnected("Client disconnected".to_string()));
-            }
-        }
-
-        self.state_manager.set_disconnected();
+        self.core.handle_connection_event(&ConnectionEvent::Disconnected("Client disconnected".to_string()));
         Ok(())
     }
 
@@ -313,26 +281,16 @@ impl Client for WebSocketClient {
     }
 
     fn is_connected(&self) -> bool {
-        let state_ok = matches!(self.state_manager.get_state(), crate::client::connection::ConnectionState::Connected);
-        
-        state_ok && self.connection.is_some()
-            && {
-                // 注意：这个方法可能在同步上下文中调用，但 conn 是 tokio::sync::Mutex
-                // 需要异步上下文，这里简化为检查连接是否存在
-                self.connection.is_some()
-            }
+        matches!(self.core.state(), crate::client::connection::ConnectionState::Connected)
+            && self.connection.is_some()
     }
 
     fn add_observer(&mut self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.push(observer);
-        }
+        self.core.add_observer(observer);
     }
 
     fn remove_observer(&mut self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.retain(|o| !Arc::ptr_eq(o, &observer));
-        }
+        self.core.remove_observer(observer);
     }
 
     fn connection_id(&self) -> Option<String> {

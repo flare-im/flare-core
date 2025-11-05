@@ -295,6 +295,10 @@ impl Default for ConnectionManager {
 
 #[async_trait]
 impl ConnectionManagerTrait for ConnectionManager {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
     async fn add_connection(
         &self,
         connection_id: String,

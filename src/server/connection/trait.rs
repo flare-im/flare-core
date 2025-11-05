@@ -32,7 +32,9 @@ pub struct ConnectionInfo {
 /// 实现此 trait 以提供自定义的连接管理逻辑
 /// 例如：基于 Redis 的分布式连接管理、基于数据库的持久化等
 #[async_trait]
-pub trait ConnectionManagerTrait: Send + Sync {
+pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
+    /// 获取 Any 引用，用于类型向下转换
+    fn as_any(&self) -> &dyn std::any::Any;
     /// 添加连接
     async fn add_connection(
         &self,

@@ -8,12 +8,15 @@ use std::time::Duration;
 /// 服务端配置
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerConfig {
-    /// 监听地址
+    /// 监听地址（单个协议时使用，多协议时用作默认地址）
     pub bind_address: String,
     /// 传输协议（单个）
     pub transport: TransportProtocol,
     /// 传输协议列表（用于同时监听多个协议）
     pub transports: Option<Vec<TransportProtocol>>,
+    /// 每个协议的独立地址配置（协议 -> 地址映射）
+    /// 如果设置了此映射，每个协议将使用对应的地址
+    pub protocol_addresses: Option<std::collections::HashMap<TransportProtocol, String>>,
     /// 序列化格式（默认格式）
     pub default_serialization_format: SerializationFormat,
     /// 压缩算法（默认）
@@ -36,6 +39,7 @@ impl Default for ServerConfig {
             bind_address: "0.0.0.0:8080".to_string(),
             transport: TransportProtocol::WebSocket,
             transports: None,
+            protocol_addresses: None,
             default_serialization_format: SerializationFormat::Protobuf,
             default_compression: CompressionAlgorithm::None,
             max_connections: 10000,
@@ -90,6 +94,33 @@ impl ServerConfig {
     pub fn with_protocols(mut self, protocols: Vec<TransportProtocol>) -> Self {
         self.transports = Some(protocols);
         self
+    }
+    
+    /// 为特定协议设置监听地址
+    pub fn with_protocol_address(mut self, protocol: TransportProtocol, address: String) -> Self {
+        if self.protocol_addresses.is_none() {
+            self.protocol_addresses = Some(std::collections::HashMap::new());
+        }
+        if let Some(ref mut addresses) = self.protocol_addresses {
+            addresses.insert(protocol, address);
+        }
+        self
+    }
+    
+    /// 批量设置协议地址映射
+    pub fn with_protocol_addresses(mut self, addresses: std::collections::HashMap<TransportProtocol, String>) -> Self {
+        self.protocol_addresses = Some(addresses);
+        self
+    }
+    
+    /// 获取指定协议的地址
+    pub fn get_protocol_address(&self, protocol: &TransportProtocol) -> String {
+        if let Some(ref addresses) = self.protocol_addresses {
+            if let Some(addr) = addresses.get(protocol) {
+                return addr.clone();
+            }
+        }
+        self.bind_address.clone()
     }
 
     /// 设置默认心跳配置

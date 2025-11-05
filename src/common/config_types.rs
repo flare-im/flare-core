@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 /// 传输协议类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TransportProtocol {
     /// WebSocket 协议
     WebSocket,

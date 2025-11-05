@@ -5,90 +5,63 @@
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::server::{ServerConfig, ConnectionHandler, HybridServer, Server};
-use std::sync::{Arc, Weak};
+use crate::server::handle::ServerHandle;
+use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 /// 消息处理上下文
 /// 
-/// 提供给消息处理函数的上下文，包含连接信息和服务器引用
+/// 提供给消息处理函数的上下文，包含连接信息和服务器操作处理器
 pub struct MessageContext {
     /// 连接 ID
     pub connection_id: String,
-    /// 服务器弱引用（用于广播等操作）
-    server: Weak<ServerWrapper>,
+    /// 服务器操作处理器（轻量级，用于发送消息和连接管理）
+    handle: Arc<dyn ServerHandle>,
 }
 
 impl MessageContext {
     /// 创建新的消息上下文
-    fn new(connection_id: String, server: Weak<ServerWrapper>) -> Self {
+    fn new(connection_id: String, handle: Arc<dyn ServerHandle>) -> Self {
         Self {
             connection_id,
-            server,
+            handle,
         }
     }
 
     /// 向指定连接发送消息
     pub async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        if let Some(server) = self.server.upgrade() {
-            server.send_to(connection_id, frame).await
-        } else {
-            Err(crate::common::error::FlareError::general_error("Server is not available"))
-        }
+        self.handle.send_to(connection_id, frame).await
     }
 
     /// 向指定用户的所有连接发送消息
     pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        if let Some(server) = self.server.upgrade() {
-            server.send_to_user(user_id, frame).await
-        } else {
-            Err(crate::common::error::FlareError::general_error("Server is not available"))
-        }
+        self.handle.send_to_user(user_id, frame).await
     }
 
     /// 广播消息到所有连接
     pub async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        if let Some(server) = self.server.upgrade() {
-            server.broadcast(frame).await
-        } else {
-            Err(crate::common::error::FlareError::general_error("Server is not available"))
-        }
+        self.handle.broadcast(frame).await
     }
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        if let Some(server) = self.server.upgrade() {
-            server.broadcast_except(frame, exclude_connection_id).await
-        } else {
-            Err(crate::common::error::FlareError::general_error("Server is not available"))
-        }
+        self.handle.broadcast_except(frame, exclude_connection_id).await
     }
 
     /// 断开指定连接
     pub async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        if let Some(server) = self.server.upgrade() {
-            server.disconnect(connection_id).await
-        } else {
-            Err(crate::common::error::FlareError::general_error("Server is not available"))
-        }
+        self.handle.disconnect(connection_id).await
     }
 
     /// 获取连接数量
     pub fn connection_count(&self) -> usize {
-        if let Some(server) = self.server.upgrade() {
-            server.connection_count()
-        } else {
-            0
-        }
+        self.handle.connection_count()
     }
 
     /// 获取用户数量
     pub fn user_count(&self) -> usize {
-        if let Some(server) = self.server.upgrade() {
-            server.user_count()
-        } else {
-            0
-        }
+        self.handle.user_count()
     }
 }
 
@@ -106,7 +79,7 @@ struct SimpleConnectionHandler {
     message_handler: Option<MessageHandlerFn>,
     on_connect: Option<OnConnectFn>,
     on_disconnect: Option<OnDisconnectFn>,
-    server: Arc<Mutex<Option<Weak<ServerWrapper>>>>,
+    handle: Arc<Mutex<Option<Arc<dyn ServerHandle>>>>,
 }
 
 impl SimpleConnectionHandler {
@@ -115,27 +88,29 @@ impl SimpleConnectionHandler {
             message_handler: None,
             on_connect: None,
             on_disconnect: None,
-            server: Arc::new(Mutex::new(None)),
+            handle: Arc::new(Mutex::new(None)),
         }
     }
 
-    async fn set_server(&self, server: Weak<ServerWrapper>) {
-        *self.server.lock().await = Some(server);
+    async fn set_handle(&self, handle: Arc<dyn ServerHandle>) {
+        *self.handle.lock().await = Some(handle);
     }
 }
 
 #[async_trait]
 impl ConnectionHandler for SimpleConnectionHandler {
     async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        let server_weak = {
-            let server_guard = self.server.lock().await;
-            server_guard.clone()
+        let handle = {
+            let handle_guard = self.handle.lock().await;
+            handle_guard.clone()
         };
 
-        let context = if let Some(server_weak) = server_weak {
-            MessageContext::new(connection_id.to_string(), server_weak)
+        let context = if let Some(ref handle) = handle {
+            MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            MessageContext::new(connection_id.to_string(), Weak::<ServerWrapper>::new())
+            // 如果没有 handle，创建一个空的（使用 ServerCore 的默认实现）
+            // 这里暂时返回错误，实际上应该在 build 时设置 handle
+            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
         };
 
         if let Some(ref handler) = self.message_handler {
@@ -146,15 +121,15 @@ impl ConnectionHandler for SimpleConnectionHandler {
     }
 
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        let server_weak = {
-            let server_guard = self.server.lock().await;
-            server_guard.clone()
+        let handle = {
+            let handle_guard = self.handle.lock().await;
+            handle_guard.clone()
         };
 
-        let context = if let Some(server_weak) = server_weak {
-            MessageContext::new(connection_id.to_string(), server_weak)
+        let context = if let Some(ref handle) = handle {
+            MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            MessageContext::new(connection_id.to_string(), Weak::<ServerWrapper>::new())
+            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
         };
 
         if let Some(ref handler) = self.on_connect {
@@ -165,15 +140,15 @@ impl ConnectionHandler for SimpleConnectionHandler {
     }
 
     async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
-        let server_weak = {
-            let server_guard = self.server.lock().await;
-            server_guard.clone()
+        let handle = {
+            let handle_guard = self.handle.lock().await;
+            handle_guard.clone()
         };
 
-        let context = if let Some(server_weak) = server_weak {
-            MessageContext::new(connection_id.to_string(), server_weak)
+        let context = if let Some(ref handle) = handle {
+            MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            MessageContext::new(connection_id.to_string(), Weak::<ServerWrapper>::new())
+            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
         };
 
         if let Some(ref handler) = self.on_disconnect {
@@ -189,6 +164,61 @@ struct ServerWrapper {
     server: Arc<Mutex<HybridServer>>,
 }
 
+/// ServerWrapper 的 ServerHandle 适配器
+/// 让 ServerWrapper 可以作为 ServerHandle 使用
+struct ServerWrapperHandle {
+    server: Arc<Mutex<HybridServer>>,
+}
+
+#[async_trait]
+impl crate::server::handle::ServerHandle for ServerWrapperHandle {
+    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        let s = self.server.lock().await;
+        crate::server::handle::ServerHandle::send_to(&*s, connection_id, frame).await
+    }
+    
+    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        let s = self.server.lock().await;
+        crate::server::handle::ServerHandle::send_to_user(&*s, user_id, frame).await
+    }
+    
+    async fn broadcast(&self, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        let s = self.server.lock().await;
+        crate::server::handle::ServerHandle::broadcast(&*s, frame).await
+    }
+    
+    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        let s = self.server.lock().await;
+        crate::server::handle::ServerHandle::broadcast_except(&*s, frame, exclude_connection_id).await
+    }
+    
+    async fn disconnect(&self, connection_id: &str) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        let s = self.server.lock().await;
+        crate::server::handle::ServerHandle::disconnect(&*s, connection_id).await
+    }
+    
+    fn connection_count(&self) -> usize {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        tokio::task::block_in_place(|| {
+            let s = self.server.blocking_lock();
+            crate::server::handle::ServerHandle::connection_count(&*s)
+        })
+    }
+    
+    fn user_count(&self) -> usize {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
+        tokio::task::block_in_place(|| {
+            let s = self.server.blocking_lock();
+            crate::server::handle::ServerHandle::user_count(&*s)
+        })
+    }
+}
+
 #[async_trait]
 impl Server for ServerWrapper {
     async fn start(&mut self) -> Result<()> {
@@ -201,50 +231,11 @@ impl Server for ServerWrapper {
         s.stop().await
     }
 
-    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        let s = self.server.lock().await;
-        Server::send_to(&*s, connection_id, frame).await
-    }
-
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        let s = self.server.lock().await;
-        Server::send_to_user(&*s, user_id, frame).await
-    }
-
-    async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        let s = self.server.lock().await;
-        Server::broadcast(&*s, frame).await
-    }
-
-    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        let s = self.server.lock().await;
-        Server::broadcast_except(&*s, frame, exclude_connection_id).await
-    }
-
     fn is_running(&self) -> bool {
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
             s.is_running()
         })
-    }
-
-    fn connection_count(&self) -> usize {
-        tokio::task::block_in_place(|| {
-            let s = self.server.blocking_lock();
-            s.connection_count()
-        })
-    }
-
-    fn user_count(&self) -> usize {
-        tokio::task::block_in_place(|| {
-            let s = self.server.blocking_lock();
-            s.user_count()
-        })
-    }
-
-    async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        let s = self.server.lock().await;
-        Server::disconnect(&*s, connection_id).await
     }
 }
 
@@ -255,14 +246,14 @@ pub struct SimpleServer {
     server: Arc<Mutex<HybridServer>>,
     handler: Arc<SimpleConnectionHandler>,
     server_wrapper: Arc<ServerWrapper>,
+    handle: Arc<dyn ServerHandle>,
 }
 
 impl SimpleServer {
     /// 启动服务器
     pub async fn start(&mut self) -> Result<()> {
-        // 设置服务器引用
-        let server_weak = Arc::downgrade(&self.server_wrapper);
-        self.handler.set_server(server_weak).await;
+        // 设置 ServerHandle
+        self.handler.set_handle(Arc::clone(&self.handle)).await;
 
         let mut s = self.server.lock().await;
         s.start().await
@@ -281,37 +272,42 @@ impl SimpleServer {
 
     /// 获取连接数量
     pub fn connection_count(&self) -> usize {
-        self.server_wrapper.connection_count()
+        self.handle.connection_count()
     }
 
     /// 获取用户数量
     pub fn user_count(&self) -> usize {
-        self.server_wrapper.user_count()
+        self.handle.user_count()
+    }
+
+    /// 获取 ServerHandle（用于消息发送和连接管理）
+    pub fn handle(&self) -> Arc<dyn ServerHandle> {
+        Arc::clone(&self.handle)
     }
 
     /// 向指定连接发送消息
     pub async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        self.server_wrapper.send_to(connection_id, frame).await
+        ServerHandle::send_to(&*self.handle, connection_id, frame).await
     }
 
     /// 向指定用户的所有连接发送消息
     pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        self.server_wrapper.send_to_user(user_id, frame).await
+        ServerHandle::send_to_user(&*self.handle, user_id, frame).await
     }
 
     /// 广播消息到所有连接
     pub async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        self.server_wrapper.broadcast(frame).await
+        ServerHandle::broadcast(&*self.handle, frame).await
     }
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        self.server_wrapper.broadcast_except(frame, exclude_connection_id).await
+        ServerHandle::broadcast_except(&*self.handle, frame, exclude_connection_id).await
     }
 
     /// 断开指定连接
     pub async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        self.server_wrapper.disconnect(connection_id).await
+        ServerHandle::disconnect(&*self.handle, connection_id).await
     }
 }
 
@@ -420,7 +416,7 @@ impl ServerBuilder {
             message_handler: self.message_handler,
             on_connect: self.on_connect,
             on_disconnect: self.on_disconnect,
-            server: Arc::new(Mutex::new(None)),
+            handle: Arc::new(Mutex::new(None)),
         });
 
         let server = HybridServer::new(self.config, handler.clone() as Arc<dyn ConnectionHandler>)?;
@@ -428,11 +424,17 @@ impl ServerBuilder {
         let server_wrapper = Arc::new(ServerWrapper {
             server: Arc::clone(&server_arc),
         });
+        
+        // 创建 ServerHandle 适配器（转换为 trait object）
+        let handle: Arc<dyn ServerHandle> = Arc::new(ServerWrapperHandle {
+            server: server_arc.clone(),
+        }) as Arc<dyn ServerHandle>;
 
         Ok(SimpleServer {
             server: server_arc,
             handler,
             server_wrapper,
+            handle,
         })
     }
 }

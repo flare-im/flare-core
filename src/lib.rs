@@ -9,4 +9,4 @@ pub use server::HybridServer;
 
 // 重新导出 Builder API（观察者模式和简单模式）
 pub use client::{ClientBuilder, SimpleClient, ObserverClientBuilder, ObserverClient};
-pub use server::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer};
+pub use server::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer, ServerHandle, DefaultServerHandle};

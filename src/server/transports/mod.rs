@@ -49,12 +49,13 @@ pub trait ConnectionHandler: Send + Sync {
 /// 
 /// 实现此 trait 以创建自定义服务端实现
 /// 
+/// 注意：消息发送和连接管理功能请使用 `ServerHandle` trait
+/// 
 /// # 示例
 /// 
 /// ```rust
 /// use flare_core::server::{Server, ConnectionHandler};
 /// use flare_core::common::error::Result;
-/// use flare_core::common::protocol::Frame;
 /// 
 /// struct MyCustomServer {
 ///     handler: Arc<dyn ConnectionHandler>,
@@ -69,11 +70,6 @@ pub trait ConnectionHandler: Send + Sync {
 ///     
 ///     async fn stop(&mut self) -> Result<()> {
 ///         // 实现停止逻辑
-///         Ok(())
-///     }
-///     
-///     async fn broadcast(&self, frame: &Frame) -> Result<()> {
-///         // 实现广播逻辑
 ///         Ok(())
 ///     }
 ///     
@@ -96,76 +92,17 @@ pub trait Server: Send + Sync {
     /// 停止成功返回 `Ok(())`，失败返回错误
     async fn stop(&mut self) -> Result<()>;
     
-    /// 向指定连接发送消息
-    /// 
-    /// # 参数
-    /// - `connection_id`: 目标连接 ID
-    /// - `frame`: 要发送的 Frame
-    /// 
-    /// # 返回
-    /// 发送成功返回 `Ok(())`，失败返回错误
-    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()>;
-    
-    /// 向指定用户的所有连接发送消息
-    /// 
-    /// # 参数
-    /// - `user_id`: 目标用户 ID
-    /// - `frame`: 要发送的 Frame
-    /// 
-    /// # 返回
-    /// 发送成功返回 `Ok(())`，失败返回错误
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()>;
-    
-    /// 广播消息到所有连接
-    /// 
-    /// # 参数
-    /// - `frame`: 要广播的 Frame
-    /// 
-    /// # 返回
-    /// 广播成功返回 `Ok(())`，失败返回错误
-    async fn broadcast(&self, frame: &Frame) -> Result<()>;
-    
-    /// 广播消息到所有连接，排除指定的连接
-    /// 
-    /// # 参数
-    /// - `frame`: 要广播的 Frame
-    /// - `exclude_connection_id`: 要排除的连接 ID
-    /// 
-    /// # 返回
-    /// 广播成功返回 `Ok(())`，失败返回错误
-    async fn broadcast_except(&self, frame: &Frame, _exclude_connection_id: &str) -> Result<()> {
-        // 默认实现：获取所有连接，排除指定连接，然后逐个发送
-        // 子类可以覆盖此方法以提供更高效的实现
-        // 注意：默认实现会广播给所有人，包括要排除的连接
-        // 子类应该覆盖此方法以正确实现排除逻辑
-        self.broadcast(frame).await
-    }
-    
     /// 检查服务器运行状态
     /// 
     /// # 返回
     /// 如果正在运行返回 `true`，否则返回 `false`
     fn is_running(&self) -> bool;
-    
-    /// 获取连接数量
-    fn connection_count(&self) -> usize;
-    
-    /// 获取用户数量
-    fn user_count(&self) -> usize;
-    
-    /// 断开指定连接
-    /// 
-    /// # 参数
-    /// - `connection_id`: 要断开的连接 ID
-    /// 
-    /// # 返回
-    /// 断开成功返回 `Ok(())`，失败返回错误
-    async fn disconnect(&self, connection_id: &str) -> Result<()>;
 }
 
 pub mod quic;
 pub mod hybrid;
 pub mod websocket;
+pub mod server_core;
 
 // 重新导出常用类型
 pub use quic::QUICServer;

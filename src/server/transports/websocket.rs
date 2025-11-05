@@ -1,13 +1,15 @@
 //! WebSocket 服务端实现
+//! 
+//! 专注于 WebSocket 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
 use crate::server::config::ServerConfig;
 use tracing::{debug, error};
 use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use crate::common::error::Result;
-// 服务端不再使用 HeartbeatManager，改用 HeartbeatDetector 和 ConnectionManager 的更新机制
-use crate::common::MessageParser;
 use crate::common::protocol::{Frame, pong};
 use crate::server::transports::{Server, ConnectionHandler};
+use crate::server::transports::server_core::ServerCore;
+use crate::server::handle::ServerHandle;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
 use crate::transport::events::ConnectionEvent;
@@ -15,50 +17,61 @@ use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_tungstenite::accept_async;
 
 /// WebSocket 服务端
+/// 
+/// 专注于 WebSocket 协议层面的连接处理
 pub struct WebSocketServer {
     config: ServerConfig,
-    connection_manager: Arc<ConnectionManager>,
+    core: ServerCore,
     handler: Arc<dyn ConnectionHandler>,
-    parser: MessageParser,
     listener: Option<TcpListener>,
     is_running: Arc<Mutex<bool>>,
-    heartbeat_detector: Option<crate::server::heartbeat::HeartbeatDetector>,
 }
 
 impl WebSocketServer {
     /// 创建新的 WebSocket 服务端
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Self {
-        Self::with_connection_manager(config, handler, None)
+        Self::with_server_core(config, handler, None)
     }
     
-    /// 使用指定的连接管理器创建 WebSocket 服务端
+    /// 使用指定的 ServerCore 创建 WebSocket 服务端
     /// 
     /// # 参数
     /// - `config`: 服务端配置
     /// - `handler`: 连接处理器
-    /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的
+    /// - `connection_manager`: 可选的连接管理器，如果为 None，则由 ServerCore 创建新的
     pub fn with_connection_manager(
         config: ServerConfig,
         handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<ConnectionManager>>,
     ) -> Self {
-        let parser = MessageParser::new(config.default_serialization_format, config.default_compression);                                                       
+        Self::with_server_core(config, handler, connection_manager)
+    }
+    
+    /// 使用指定的连接管理器创建 WebSocket 服务端（内部方法）
+    fn with_server_core(
+        config: ServerConfig,
+        handler: Arc<dyn ConnectionHandler>,
+        connection_manager: Option<Arc<ConnectionManager>>,
+    ) -> Self {
+        let core = ServerCore::new(&config, connection_manager);
         
         Self {
             config,
-            connection_manager: connection_manager.unwrap_or_else(|| Arc::new(ConnectionManager::new())),
+            core,
             handler,
-            parser,
             listener: None,
             is_running: Arc::new(Mutex::new(false)),
-            heartbeat_detector: None,
         }
+    }
+    
+    /// 获取 ServerCore（用于内部访问）
+    fn core(&self) -> &ServerCore {
+        &self.core
     }
 }
 
@@ -73,24 +86,15 @@ impl Server for WebSocketServer {
         
         *self.is_running.lock().await = true;
         
-        // 启动心跳检测器
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        let timeout = self.config.connection_timeout;
-        let check_interval = Duration::from_secs(timeout.as_secs() / 3).max(Duration::from_secs(10));
-        let mut detector = crate::server::heartbeat::HeartbeatDetector::new(
-            manager_trait,
-            timeout,
-            check_interval,
-        );
-        detector.start();
-        self.heartbeat_detector = Some(detector);
+        // 启动心跳检测（由 ServerCore 统一管理）
+        self.core.start_heartbeat(&self.config);
         
         // 注意：listener 将被 move 到闭包中，所以不能存储到 self.listener
         // 我们需要在闭包中使用它，但不能同时存储它
         // 解决方案：不存储 listener，只在闭包中使用
         let handler = Arc::clone(&self.handler);
-        let manager = Arc::clone(&self.connection_manager);
-        let parser = self.parser.clone();
+        let manager = Arc::clone(&self.core.connection_manager);
+        let parser = self.core.parser.clone();
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
         
@@ -133,33 +137,23 @@ impl Server for WebSocketServer {
     async fn stop(&mut self) -> Result<()> {
         *self.is_running.lock().await = false;
         
-        // 断开所有连接
-        let connection_ids = self.connection_manager.list_connections();
+        // 停止心跳检测（由 ServerCore 统一管理）
+        self.core.stop_heartbeat();
+        
+        // 断开所有连接（通过 ServerHandle）
+        let connection_ids = self.core.list_connections().await;
         for conn_id in connection_ids {
-            let _ = self.disconnect(&conn_id).await;
+            // 先关闭连接
+            let manager_trait = self.core.connection_manager_trait();
+            if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
+                let mut c = conn.lock().await;
+                let _ = c.close().await;
+            }
+            // 然后从连接管理器中移除
+            let _ = ServerHandle::disconnect(&self.core, &conn_id).await;
         }
         
         Ok(())
-    }
-
-    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.send_frame_to(connection_id, frame, &self.parser).await
-    }
-
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.send_frame_to_user(user_id, frame, &self.parser).await
-    }
-
-    async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.broadcast_frame(frame, &self.parser).await
-    }
-    
-    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.broadcast_frame_except(frame, exclude_connection_id, &self.parser).await
     }
 
     fn is_running(&self) -> bool {
@@ -175,33 +169,13 @@ impl Server for WebSocketServer {
         debug!("[DEBUG WebSocketServer] is_running 返回: {}", result);
         result
     }
-
-    fn connection_count(&self) -> usize {
-        self.connection_manager.connection_count()
-    }
-
-    fn user_count(&self) -> usize {
-        self.connection_manager.stats().total_users
-    }
-
-    async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        
-        if let Some((conn, _)) = manager_trait.get_connection(connection_id).await {
-            let mut c = conn.lock().await;
-            let _ = c.close().await;
-        }
-        let _ = manager_trait.remove_connection(connection_id).await;
-        Ok(())
-    }
 }
 
 async fn handle_websocket_connection(
     stream: TcpStream,
     handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
-    parser: MessageParser,
+    parser: crate::common::MessageParser,
     config: ServerConfig,
 ) {
     // WebSocket 服务端：不使用 TLS
@@ -305,7 +279,7 @@ async fn handle_websocket_connection(
 struct ServerMessageObserver {
     handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
-    parser: MessageParser,
+    parser: crate::common::MessageParser,
     connection_id: String,
     config: ServerConfig,
 }
@@ -394,10 +368,19 @@ impl crate::transport::events::ConnectionObserver for ServerMessageObserver {
                 let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
                 let conn_id = self.connection_id.clone();
                 
+                debug!("[WebSocketServer] Connection disconnected: {}", conn_id);
                 tokio::spawn(async move {
-                    // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
+                    // 通知连接断开
                     let _ = handler.on_disconnect(&conn_id).await;
-                    let _ = manager.remove_connection(&conn_id).await;
+                    // 立即从连接管理器中移除连接
+                    match manager.remove_connection(&conn_id).await {
+                        Ok(_) => {
+                            debug!("[WebSocketServer] Successfully removed connection: {}", conn_id);
+                        }
+                        Err(e) => {
+                            debug!("[WebSocketServer] Connection {} already removed or not found: {}", conn_id, e);
+                        }
+                    }
                 });
             }
             ConnectionEvent::Connected => {
@@ -405,6 +388,25 @@ impl crate::transport::events::ConnectionObserver for ServerMessageObserver {
             }
             ConnectionEvent::Error(e) => {
                 error!("Connection error for {}: {:?}", self.connection_id, e);
+                // 连接出错时，立即从管理器中移除连接（避免连接一直存在）
+                let handler = Arc::clone(&self.handler);
+                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
+                let conn_id = self.connection_id.clone();
+                
+                debug!("[WebSocketServer] Connection error detected, removing connection: {}", conn_id);
+                tokio::spawn(async move {
+                    // 通知连接断开
+                    let _ = handler.on_disconnect(&conn_id).await;
+                    // 从连接管理器中移除（如果连接存在）
+                    match manager.remove_connection(&conn_id).await {
+                        Ok(_) => {
+                            debug!("[WebSocketServer] Successfully removed connection after error: {}", conn_id);
+                        }
+                        Err(e) => {
+                            debug!("[WebSocketServer] Connection {} already removed or not found after error: {}", conn_id, e);
+                        }
+                    }
+                });
             }
         }
     }

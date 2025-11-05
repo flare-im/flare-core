@@ -136,20 +136,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("✅ 聊天室服务器已启动：0.0.0.0:8080");
     info!("使用 ws:// 协议连接（非 wss://）");
     
-    // 获取连接数
-    let conn_count = server.connection_count();
+    // 获取 ServerHandle 用于查询连接数
+    let handle = server.handle();
+    let conn_count = handle.connection_count();
     info!("当前在线用户: {}", conn_count);
     info!("\n服务器运行中，按 Ctrl+C 停止...");
 
     // 定期打印连接数
-    let server_clone = Arc::new(tokio::sync::Mutex::new(server));
-    let server_clone_for_task = Arc::clone(&server_clone);
+    let handle_clone = Arc::clone(&handle);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            let server = server_clone_for_task.lock().await;
-            let conn_count = server.connection_count();
+            let conn_count = handle_clone.connection_count();
             if conn_count > 0 {
                 info!("当前在线用户: {}", conn_count);
             }
@@ -160,10 +159,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tokio::signal::ctrl_c().await?;
 
     info!("\n正在停止服务器...");
-    {
-        let mut server = server_clone.lock().await;
-        server.stop().await?;
-    }
+    server.stop().await?;
     info!("服务器已停止");
 
     Ok(())

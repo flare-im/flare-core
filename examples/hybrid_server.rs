@@ -8,10 +8,10 @@
 //! 此示例展示了如何：
 //! 1. 实现 ConnectionHandler trait 来处理消息
 //! 2. 使用 ObserverServerBuilder 创建服务器（支持多协议）
-//! 3. 使用共享的 ConnectionManager 管理连接状态
+//! 3. 使用 DefaultServerHandle 进行消息发送和连接管理
 
 use flare_core::server::{ConnectionHandler, ObserverServerBuilder};
-use flare_core::server::connection::ConnectionManagerTrait;
+use flare_core::server::handle::{ServerHandle, DefaultServerHandle};
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::protocol::{Frame, frame_with_message_command, send_message, generate_message_id, Reliability};
 use flare_core::common::protocol::flare::core::commands::command::Type;
@@ -25,36 +25,38 @@ use tracing::{debug, info, error};
 struct ChatRoomHandler {
     // 存储连接ID到用户名的映射
     usernames: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
-    // 连接管理器引用，用于发送消息（更灵活，可以直接注入使用）
-    connection_manager: Arc<dyn ConnectionManagerTrait>,
-    // 消息解析器，用于序列化 Frame
-    parser: flare_core::common::MessageParser,
+    // 服务器操作处理器（轻量级，用于发送消息和连接管理）
+    server_handle: Arc<tokio::sync::Mutex<Option<Arc<dyn ServerHandle>>>>,
 }
 
 impl ChatRoomHandler {
-    fn new(
-        connection_manager: Arc<dyn ConnectionManagerTrait>,
-        parser: flare_core::common::MessageParser,
-    ) -> Self {
+    fn new() -> Self {
         Self {
             usernames: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            connection_manager,
-            parser,
+            server_handle: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
     
+    async fn set_server_handle(&self, handle: Arc<dyn ServerHandle>) {
+        *self.server_handle.lock().await = Some(handle);
+    }
+    
     // 广播消息给所有连接的客户端（排除发送者）
-    // 现在直接使用 ConnectionManager，不需要依赖 Server
     async fn broadcast_message_except(&self, frame: &Frame, exclude_connection_id: &str) {
         debug!("broadcast_message_except 开始: exclude={}", exclude_connection_id);
-        if let Err(e) = self.connection_manager.broadcast_frame_except(
-            frame,
-            exclude_connection_id,
-            &self.parser,
-        ).await {
-            error!("[聊天室] 广播消息失败: {}", e);
+        let handle = {
+            let handle_guard = self.server_handle.lock().await;
+            handle_guard.clone()
+        };
+        
+        if let Some(ref handle) = handle {
+            if let Err(e) = handle.broadcast_except(frame, exclude_connection_id).await {
+                error!("[聊天室] 广播消息失败: {}", e);
+            } else {
+                debug!("broadcast_message_except: 广播成功（已排除发送者）");
+            }
         } else {
-            debug!("broadcast_message_except: 广播成功（已排除发送者）");
+            error!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
         }
         debug!("broadcast_message_except 完成");
     }
@@ -62,8 +64,17 @@ impl ChatRoomHandler {
     // 广播消息给所有连接的客户端
     async fn broadcast_message(&self, frame: &Frame) {
         debug!("broadcast_message 开始");
-        if let Err(e) = self.connection_manager.broadcast_frame(frame, &self.parser).await {
-            error!("[聊天室] 广播消息失败: {}", e);
+        let handle = {
+            let handle_guard = self.server_handle.lock().await;
+            handle_guard.clone()
+        };
+        
+        if let Some(ref handle) = handle {
+            if let Err(e) = handle.broadcast(frame).await {
+                error!("[聊天室] 广播消息失败: {}", e);
+            }
+        } else {
+            error!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
         }
     }
     
@@ -166,7 +177,6 @@ impl ConnectionHandler for ChatRoomHandler {
     }
 }
 
-
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // 初始化 tracing（默认使用 debug 级别，方便调试）
@@ -178,57 +188,63 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     
-        info!("=== 混合服务端聊天室（WebSocket + QUIC）===");
+    info!("=== 混合服务端聊天室（WebSocket + QUIC）===");
     
-    // 创建一个共享的 ConnectionManager 和 MessageParser
+    // 创建一个共享的 ConnectionManager
     let connection_manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
-    let connection_manager_trait: Arc<dyn ConnectionManagerTrait> = Arc::clone(&connection_manager) as Arc<dyn ConnectionManagerTrait>;
     
-    let parser = flare_core::common::MessageParser::new(
-        flare_core::common::protocol::SerializationFormat::Protobuf,
-        flare_core::common::compression::CompressionAlgorithm::None,
-    );
-    
-    // 创建 handler，直接注入 ConnectionManager 和 MessageParser
-    let handler = Arc::new(ChatRoomHandler::new(
-        Arc::clone(&connection_manager_trait),
-        parser.clone(),
-    ));
+    // 创建 handler
+    let handler = Arc::new(ChatRoomHandler::new());
+    let handler_for_setup = Arc::clone(&handler);
     
     // 使用 ObserverServerBuilder 创建服务器
-    let mut server = ObserverServerBuilder::new("0.0.0.0:8080")
+    // 为每个协议配置独立的地址
+    let mut observer_server = ObserverServerBuilder::new("0.0.0.0:8080")
         .with_handler(handler as Arc<dyn ConnectionHandler>)
         .with_connection_manager(connection_manager)
         .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
+        .with_protocol_address(TransportProtocol::WebSocket, "0.0.0.0:8080".to_string())
+        .with_protocol_address(TransportProtocol::QUIC, "0.0.0.0:8081".to_string())
         .with_max_connections(2000)
         .build()?;
     
+    // 从 ObserverServer 获取连接管理器和解析器，创建 DefaultServerHandle
+    let server_handle: Arc<dyn ServerHandle> = if let Some((manager_trait, parser)) = observer_server.get_server_handle_components() {
+        Arc::new(DefaultServerHandle::new(manager_trait, parser))
+    } else {
+        return Err("无法获取连接管理器和解析器".into());
+    };
+    
+    // 设置服务器处理器到 handler
+    handler_for_setup.set_server_handle(server_handle).await;
+    
     // 启动服务器
-    server.start().await?;
+    observer_server.start().await?;
     
     info!("✅ 聊天室服务器已启动");
     info!("   - WebSocket: ws://0.0.0.0:8080");
     info!("   - QUIC: quic://0.0.0.0:8081");
     
-    let protocols = server.protocols();
+    let protocols = observer_server.protocols();
     info!("支持的协议: {:?}", protocols);
     
     // 获取连接数
-    let conn_count = server.connection_count();
+    let conn_count = observer_server.connection_count();
     info!("当前在线用户: {}", conn_count);
     info!("\n服务器运行中，按 Ctrl+C 停止...");
     
     // 定期打印连接数
-    let server_clone = Arc::new(tokio::sync::Mutex::new(server));
-    let server_clone_for_task = Arc::clone(&server_clone);
+    let server_handle_clone = Arc::clone(&handler_for_setup.server_handle);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            let server = server_clone_for_task.lock().await;
-            let conn_count = server.connection_count();
-            if conn_count > 0 {
-                info!("当前在线用户: {}", conn_count);
+            let handle_guard = server_handle_clone.lock().await;
+            if let Some(ref handle) = *handle_guard {
+                let conn_count = handle.connection_count();
+                if conn_count > 0 {
+                    info!("当前在线用户: {}", conn_count);
+                }
             }
         }
     });
@@ -236,10 +252,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tokio::signal::ctrl_c().await?;
     
     info!("\n正在停止服务器...");
-    {
-        let mut server = server_clone.lock().await;
-        server.stop().await?;
-    }
+    observer_server.stop().await?;
     
     info!("服务器已停止");
     Ok(())

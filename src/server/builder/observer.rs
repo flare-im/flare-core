@@ -6,6 +6,7 @@ use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::server::{ServerConfig, ConnectionHandler, HybridServer, Server};
 use crate::server::connection::ConnectionManager;
+use crate::server::transports::server_core::ServerCore;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -49,6 +50,12 @@ impl ObserverServerBuilder {
     /// 启用多协议监听
     pub fn with_protocols(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
         self.config = self.config.with_protocols(protocols);
+        self
+    }
+
+    /// 为特定协议设置监听地址
+    pub fn with_protocol_address(mut self, protocol: crate::common::config_types::TransportProtocol, address: String) -> Self {
+        self.config = self.config.with_protocol_address(protocol, address);
         self
     }
 
@@ -120,48 +127,55 @@ impl ObserverServer {
 
     /// 获取连接数量
     pub fn connection_count(&self) -> usize {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
-            s.connection_count()
+            crate::server::handle::ServerHandle::connection_count(&*s)
         })
     }
 
     /// 获取用户数量
     pub fn user_count(&self) -> usize {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
-            s.user_count()
+            crate::server::handle::ServerHandle::user_count(&*s)
         })
     }
 
     /// 向指定连接发送消息
     pub async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         let s = self.server.lock().await;
-        Server::send_to(&*s, connection_id, frame).await
+        crate::server::handle::ServerHandle::send_to(&*s, connection_id, frame).await
     }
 
     /// 向指定用户的所有连接发送消息
     pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         let s = self.server.lock().await;
-        Server::send_to_user(&*s, user_id, frame).await
+        crate::server::handle::ServerHandle::send_to_user(&*s, user_id, frame).await
     }
 
     /// 广播消息到所有连接
     pub async fn broadcast(&self, frame: &Frame) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         let s = self.server.lock().await;
-        Server::broadcast(&*s, frame).await
+        crate::server::handle::ServerHandle::broadcast(&*s, frame).await
     }
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         let s = self.server.lock().await;
-        Server::broadcast_except(&*s, frame, exclude_connection_id).await
+        crate::server::handle::ServerHandle::broadcast_except(&*s, frame, exclude_connection_id).await
     }
 
     /// 断开指定连接
     pub async fn disconnect(&self, connection_id: &str) -> Result<()> {
+        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
         let s = self.server.lock().await;
-        Server::disconnect(&*s, connection_id).await
+        crate::server::handle::ServerHandle::disconnect(&*s, connection_id).await
     }
 
     /// 获取协议列表
@@ -169,6 +183,23 @@ impl ObserverServer {
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
             s.protocols().to_vec()
+        })
+    }
+    
+    /// 获取连接管理器和消息解析器（用于创建 DefaultServerHandle）
+    /// 
+    /// # 返回
+    /// 返回 (ConnectionManagerTrait, MessageParser) 元组
+    pub fn get_server_handle_components(&self) -> Option<(Arc<dyn crate::server::connection::ConnectionManagerTrait>, crate::common::MessageParser)> {
+        tokio::task::block_in_place(|| {
+            let s = self.server.blocking_lock();
+            if let Some(core) = s.core() {
+                let manager_trait = core.connection_manager_trait();
+                let parser = core.parser.clone();
+                Some((manager_trait, parser))
+            } else {
+                None
+            }
         })
     }
 }

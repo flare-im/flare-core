@@ -1,36 +1,31 @@
 //! QUIC 客户端实现
+//! 
+//! 只处理协议层，连接状态管理、心跳、消息路由等功能委托给 ClientCore
 
-use crate::client::transports::Client;
+use crate::client::transports::{Client, ClientCore};
 use crate::client::config::ClientConfig;
-use crate::client::connection::ConnectionStateManager;
 use crate::common::error::Result;
-use crate::client::heartbeat::HeartbeatManager;
-use crate::common::MessageParser;
 use crate::common::protocol::Frame;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{ConnectionEvent, ConnectionObserver, ArcObserver};
 use crate::transport::quic::QUICTransport;
 use async_trait::async_trait;
 use quinn::Endpoint;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tokio::net::lookup_host;
 
-// 使用标准的 rustls 0.23 API 进行证书验证
-// 服务器证书已添加到客户端根证书存储中
-
 /// QUIC 客户端
+/// 
+/// 只处理协议层，其他功能委托给 ClientCore
 pub struct QUICClient {
     config: ClientConfig,
     connection: Option<Arc<Mutex<Box<dyn Connection>>>>,
     connection_id: String,
-    parser: MessageParser,
-    observers: Arc<StdMutex<Vec<ArcObserver>>>,
-    state_manager: Arc<ConnectionStateManager>,
-    heartbeat_manager: Option<HeartbeatManager>,
+    core: ClientCore,
     reconnect_attempts: u32,
     endpoint: Option<Endpoint>,
     _client_config: Option<quinn::ClientConfig>, // 保留用于将来的 TLS 配置
@@ -39,50 +34,37 @@ pub struct QUICClient {
 impl QUICClient {
     /// 创建新的 QUIC 客户端
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let parser = MessageParser::new(config.serialization_format, config.compression);
         let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        let core = ClientCore::new(&config);
         
         // 配置 rustls ClientConfig
-        // 注意：在 rustls 0.23 中使用新 API
-        // 使用标准的证书验证，将服务器证书添加到根证书存储
-        
         use crate::common::cert::create_client_config;
         
-        // 创建使用标准证书验证的客户端配置
         let rustls_config = create_client_config()
             .map_err(|e| crate::common::error::FlareError::protocol_error(
                 format!("Failed to create client TLS config: {}", e)
             ))?;
         
-        // 创建 quinn ClientConfig
-        // quinn 0.11 需要使用 QuicClientConfig 包装 rustls::ClientConfig
         use quinn::crypto::rustls::QuicClientConfig;
         let rustls_config_arc = Arc::new(rustls_config);
         
-        // QuicClientConfig 实现了 From<Arc<rustls::ClientConfig>>
         let quic_crypto_config = QuicClientConfig::try_from(rustls_config_arc)
             .map_err(|e| crate::common::error::FlareError::protocol_error(
                 format!("Failed to create QUIC client config: {}", e)
             ))?;
         
-        // quinn::ClientConfig::new 接受实现了 crypto::ClientConfig 的类型
         let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto_config));
         
-        // 创建 QUIC endpoint 并设置默认客户端配置
         let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
             .map_err(|e| crate::common::error::FlareError::connection_failed(format!("Failed to create endpoint: {}", e)))?;
         
-        // 设置默认客户端配置（quinn 0.11 API）
         endpoint.set_default_client_config(client_config.clone());
 
         Ok(Self {
             config,
             connection: None,
             connection_id,
-            parser,
-            observers: Arc::new(StdMutex::new(Vec::new())),
-            state_manager: Arc::new(ConnectionStateManager::new()),
-            heartbeat_manager: None,
+            core,
             reconnect_attempts: 0,
             endpoint: Some(endpoint),
             _client_config: Some(client_config),
@@ -95,17 +77,52 @@ impl QUICClient {
         client.connect().await?;
         Ok(client)
     }
+    
+    /// 使用 ClientCore 创建（用于 HybridClient）
+    pub fn with_core(config: ClientConfig, core: ClientCore) -> Result<Self> {
+        let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        
+        // 配置 rustls ClientConfig
+        use crate::common::cert::create_client_config;
+        
+        let rustls_config = create_client_config()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to create client TLS config: {}", e)
+            ))?;
+        
+        use quinn::crypto::rustls::QuicClientConfig;
+        let rustls_config_arc = Arc::new(rustls_config);
+        
+        let quic_crypto_config = QuicClientConfig::try_from(rustls_config_arc)
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to create QUIC client config: {}", e)
+            ))?;
+        
+        let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto_config));
+        
+        let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
+            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("Failed to create endpoint: {}", e)))?;
+        
+        endpoint.set_default_client_config(client_config.clone());
+
+        Ok(Self {
+            config,
+            connection: None,
+            connection_id,
+            core,
+            reconnect_attempts: 0,
+            endpoint: Some(endpoint),
+            _client_config: Some(client_config),
+        })
+    }
 
     async fn internal_connect(&mut self) -> Result<()> {
-        // 解析 URL，支持 hostname:port 格式
         let address_str = self.config.server_url
             .replace("quic://", "");
         
-        // 尝试直接解析为 SocketAddr，如果失败则进行 DNS 解析
         let server_addr = match address_str.parse::<SocketAddr>() {
             Ok(addr) => addr,
             Err(_) => {
-                // 解析 hostname:port 格式
                 lookup_host(&address_str)
                     .await
                     .map_err(|e| crate::common::error::FlareError::protocol_error(format!("DNS lookup failed: {}", e)))?
@@ -114,8 +131,6 @@ impl QUICClient {
             }
         };
         
-        // 提取 hostname 用于 SNI
-        // 注意：服务器证书是 "localhost"，所以这里使用 "localhost" 以确保证书验证通过
         let hostname = if address_str.starts_with("localhost") || address_str.starts_with("127.0.0.1") {
             "localhost"
         } else {
@@ -124,65 +139,49 @@ impl QUICClient {
                 .next()
                 .unwrap_or("localhost")
         };
-        
-        eprintln!("[QUIC Client] Connecting to {} with hostname {}", server_addr, hostname);
 
         let endpoint = self.endpoint.as_ref().ok_or_else(|| {
             crate::common::error::FlareError::connection_failed("Endpoint not initialized".to_string())
         })?;
 
-        // 连接服务器
-        eprintln!("[QUIC Client] Starting connection...");
         let connecting = endpoint.connect(server_addr, hostname)
             .map_err(|e| {
-                eprintln!("[QUIC Client] Failed to create connecting: {}", e);
                 crate::common::error::FlareError::connection_failed(e.to_string())
             })?;
         
-        eprintln!("[QUIC Client] Waiting for connection handshake...");
-
         let quinn_connection = timeout(
             self.config.connect_timeout,
             connecting,
         )
         .await
         .map_err(|_| {
-            eprintln!("[QUIC Client] Connection handshake timeout after {:?}", self.config.connect_timeout);
             crate::common::error::FlareError::connection_timeout("Connection timeout".to_string())
         })?
         .map_err(|e| {
-            eprintln!("[QUIC Client] Connection handshake failed: {}", e);
             crate::common::error::FlareError::connection_failed(e.to_string())
         })?;
         
-        eprintln!("[QUIC Client] Connection established, opening stream...");
-
-        // 打开双向流
-        eprintln!("[QUIC Client] Opening bidirectional stream...");
         let (send, recv) = quinn_connection.open_bi()
             .await
             .map_err(|e| {
-                eprintln!("[QUIC Client] Failed to open bidirectional stream: {}", e);
                 crate::common::error::FlareError::connection_failed(e.to_string())
             })?;
-        
-        eprintln!("[QUIC Client] Bidirectional stream opened successfully");
 
         let transport = QUICTransport::new(send, recv);
         let connection: Box<dyn Connection> = Box::new(transport);
         let connection_arc = Arc::new(Mutex::new(connection));
 
-        // 添加消息观察者
-        let parser_clone = self.parser.clone();
-        let observers_clone = Arc::clone(&self.observers);
-        let connection_clone = Arc::clone(&connection_arc);
-        let conn_id_clone = self.connection_id.clone();
-        let state_mgr = Arc::clone(&self.state_manager);
+        // 创建消息观察者，委托给 ClientCore
+        let core_state_mgr = Arc::clone(&self.core.state_manager);
+        let core_parser = self.core.parser.clone();
+        let core_observers = Arc::clone(&self.core.observers);
+        let core_clone = Arc::new(self.core.clone()); // 用于记录 PONG
+        
         let message_observer = Arc::new(QUICMessageObserver {
-            parser: parser_clone,
-            observers: observers_clone,
-            connection_id: conn_id_clone,
-            state_manager: state_mgr.clone(),
+            state_manager: core_state_mgr,
+            parser: core_parser,
+            observers: core_observers,
+            core: core_clone,
         });
         
         {
@@ -190,7 +189,7 @@ impl QUICClient {
             conn.add_observer(message_observer);
         }
 
-        self.connection = Some(connection_clone);
+        self.connection = Some(connection_arc.clone());
         
         // 发送 CONNECT 消息
         let mut metadata = std::collections::HashMap::new();
@@ -208,33 +207,23 @@ impl QUICClient {
         
         self.send_frame_internal(&connect_frame).await?;
 
-        // 启动心跳
-        let mut heartbeat = HeartbeatManager::new(
-            self.config.heartbeat.interval,
-            self.config.heartbeat.timeout,
-        );
-        
-        if let Some(ref conn) = self.connection {
-            heartbeat.start(Arc::clone(conn), self.parser.clone());
-            self.heartbeat_manager = Some(heartbeat);
-        }
+        // 启动心跳（通过 ClientCore）
+        self.core.start_heartbeat(connection_arc);
 
-        self.state_manager.set_connected();
+        self.core.handle_connection_event(&ConnectionEvent::Connected);
         self.reconnect_attempts = 0;
         
         Ok(())
     }
 
     async fn send_frame_internal(&self, frame: &Frame) -> Result<()> {
-        let can_send = self.state_manager.get_state().can_send();
-        
-        if !can_send {
+        if !self.core.can_send() {
             return Err(crate::common::error::FlareError::connection_failed(
                 "Cannot send: connection state is not ready".to_string()
             ));
         }
 
-        let data = self.parser.serialize(frame)?;
+        let data = self.core.parser.serialize(frame)?;
         if let Some(ref conn) = self.connection {
             let mut c = conn.lock().await;
             c.send(&data).await?;
@@ -253,7 +242,7 @@ impl QUICClient {
             }
         }
 
-        self.state_manager.set_reconnecting();
+        self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
 
         sleep(self.config.reconnect_interval).await;
@@ -265,21 +254,36 @@ impl QUICClient {
 
         self.internal_connect().await
     }
+    
+    /// 获取 ClientCore（用于外部访问）
+    pub fn core(&self) -> &ClientCore {
+        &self.core
+    }
 }
 
+// 消息观察者，委托给 ClientCore
 struct QUICMessageObserver {
-    parser: MessageParser,
-    observers: Arc<StdMutex<Vec<ArcObserver>>>,
-    connection_id: String,
-    state_manager: Arc<ConnectionStateManager>,
+    state_manager: Arc<crate::client::connection::ConnectionStateManager>,
+    parser: crate::common::MessageParser,
+    observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
+    core: Arc<ClientCore>,
 }
 
-impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
+impl ConnectionObserver for QUICMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                // 解析消息以验证格式，然后通知所有观察者
-                if self.parser.parse(data).is_ok() {
+                if let Ok(frame) = self.parser.parse(data) {
+                    // 检查是否是 PONG（心跳响应）
+                    if let Some(cmd) = &frame.command {
+                        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
+                                // 记录 PONG，更新心跳（通过 ClientCore）
+                                self.core.record_pong();
+                            }
+                        }
+                    }
+                    
                     // 通知所有观察者
                     if let Ok(observers) = self.observers.lock() {
                         for observer in observers.iter() {
@@ -304,7 +308,7 @@ impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
                     }
                 }
             }
-            ConnectionEvent::Error(_e) => {
+            ConnectionEvent::Error(_) => {
                 self.state_manager.set_failed();
                 if let Ok(observers) = self.observers.lock() {
                     for observer in observers.iter() {
@@ -316,31 +320,23 @@ impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
     }
 }
 
-    #[async_trait]
-    impl Client for QUICClient {
-        async fn connect(&mut self) -> Result<()> {
-            let can_connect = self.state_manager.get_state().can_connect();
-            
-            if !can_connect {
-                return Err(crate::common::error::FlareError::protocol_error(
-                    "Cannot connect: connection state is not ready".to_string()
-                ));
-            }
+#[async_trait]
+impl Client for QUICClient {
+    async fn connect(&mut self) -> Result<()> {
+        if !self.core.can_connect() {
+            return Err(crate::common::error::FlareError::protocol_error(
+                "Cannot connect: connection state is not ready".to_string()
+            ));
+        }
 
-            self.state_manager.start_connecting();
-            
-            match self.internal_connect().await {
-                Ok(()) => {
-                    self.state_manager.set_connected();
-                    if let Ok(observers) = self.observers.lock() {
-                        for observer in observers.iter() {
-                            observer.on_event(&ConnectionEvent::Connected);
-                        }
-                    }
-                    Ok(())
-                }
-                Err(e) => {
-                    self.state_manager.set_failed();
+        self.core.state_manager.start_connecting();
+        
+        match self.internal_connect().await {
+            Ok(()) => {
+                Ok(())
+            }
+            Err(e) => {
+                self.core.state_manager.set_failed();
                 if self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
                     self.try_reconnect().await
                 } else {
@@ -351,25 +347,17 @@ impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
+        self.core.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
 
-        if let Some(ref mut hb) = self.heartbeat_manager.take() {
-            hb.stop();
-        }
+        // 停止心跳（通过 ClientCore）
+        self.core.stop_heartbeat();
 
         if let Some(ref conn) = self.connection.take() {
             let mut c = conn.lock().await;
             c.close().await?;
         }
         
-        // 通知观察者断开连接
-        if let Ok(observers) = self.observers.lock() {
-            for observer in observers.iter() {
-                observer.on_event(&ConnectionEvent::Disconnected("Client disconnected".to_string()));
-            }
-        }
-
-        self.state_manager.set_disconnected();
+        self.core.handle_connection_event(&ConnectionEvent::Disconnected("Client disconnected".to_string()));
         Ok(())
     }
 
@@ -384,24 +372,19 @@ impl crate::transport::events::ConnectionObserver for QUICMessageObserver {
     }
 
     fn is_connected(&self) -> bool {
-        let state_ok = matches!(self.state_manager.get_state(), crate::client::connection::ConnectionState::Connected);
-        state_ok && self.connection.is_some()
+        matches!(self.core.state(), crate::client::connection::ConnectionState::Connected)
+            && self.connection.is_some()
     }
 
     fn add_observer(&mut self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.push(observer);
-        }
+        self.core.add_observer(observer);
     }
 
     fn remove_observer(&mut self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.retain(|o| !Arc::ptr_eq(o, &observer));
-        }
+        self.core.remove_observer(observer);
     }
 
     fn connection_id(&self) -> Option<String> {
         Some(self.connection_id.clone())
     }
 }
-

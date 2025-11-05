@@ -1,12 +1,14 @@
 //! QUIC 服务端实现
+//! 
+//! 专注于 QUIC 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
 use crate::server::config::ServerConfig;
 use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use crate::common::error::Result;
-// 服务端不再使用 HeartbeatManager，改用 HeartbeatDetector 和 ConnectionManager 的更新机制
-use crate::common::MessageParser;
 use crate::common::protocol::{Frame, pong};
 use crate::server::transports::{Server, ConnectionHandler};
+use crate::server::transports::server_core::ServerCore;
+use crate::server::handle::ServerHandle;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
 use crate::transport::events::ConnectionEvent;
@@ -16,19 +18,18 @@ use quinn::{Endpoint, ServerConfig as QuinnServerConfig};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::debug;
 
 /// QUIC 服务端
+/// 
+/// 专注于 QUIC 协议层面的连接处理
 pub struct QUICServer {
     config: ServerConfig,
-    connection_manager: Arc<ConnectionManager>,
+    core: ServerCore,
     handler: Arc<dyn ConnectionHandler>,
-    parser: MessageParser,
     endpoint: Option<Endpoint>,
     is_running: Arc<Mutex<bool>>,
-    heartbeat_detector: Option<crate::server::heartbeat::HeartbeatDetector>,
 }
 
 impl QUICServer {
@@ -42,7 +43,7 @@ impl QUICServer {
     /// # 参数
     /// - `config`: 服务端配置
     /// - `handler`: 连接处理器
-    /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的
+    /// - `connection_manager`: 可选的连接管理器，如果为 None，则由 ServerCore 创建新的
     pub fn with_connection_manager(
         config: ServerConfig,
         handler: Arc<dyn ConnectionHandler>,
@@ -55,7 +56,8 @@ impl QUICServer {
             let _ = rustls::crypto::ring::default_provider().install_default();
         });
         
-        let parser = MessageParser::new(config.default_serialization_format, config.default_compression);
+        // 创建 ServerCore（统一管理连接和心跳）
+        let core = ServerCore::new(&config, connection_manager);
         
         // 创建 QUIC server config（使用共享证书）
         // 使用共享证书工具，确保客户端和服务端使用相同的证书
@@ -115,12 +117,10 @@ impl QUICServer {
 
         Ok(Self {
             config,
-            connection_manager: connection_manager.unwrap_or_else(|| Arc::new(ConnectionManager::new())),
+            core,
             handler,
-            parser,
             endpoint: Some(endpoint),
             is_running: Arc::new(Mutex::new(false)),
-            heartbeat_detector: None,
         })
     }
 }
@@ -130,13 +130,16 @@ impl Server for QUICServer {
     async fn start(&mut self) -> Result<()> {
         *self.is_running.lock().await = true;
         
+        // 启动心跳检测（由 ServerCore 统一管理）
+        self.core.start_heartbeat(&self.config);
+        
         let endpoint = self.endpoint.take().ok_or_else(|| {
             crate::common::error::FlareError::connection_failed("Endpoint not initialized".to_string())
         })?;
 
         let handler = Arc::clone(&self.handler);
-        let manager = Arc::clone(&self.connection_manager);
-        let parser = self.parser.clone();
+        let manager = Arc::clone(&self.core.connection_manager);
+        let parser = self.core.parser.clone();
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
 
@@ -181,55 +184,27 @@ impl Server for QUICServer {
     async fn stop(&mut self) -> Result<()> {
         *self.is_running.lock().await = false;
         
-        let connection_ids = self.connection_manager.list_connections();
+        // 停止心跳检测（由 ServerCore 统一管理）
+        self.core.stop_heartbeat();
+        
+        // 断开所有连接（通过 ServerHandle）
+        let connection_ids = self.core.list_connections().await;
         for conn_id in connection_ids {
-            let _ = self.disconnect(&conn_id).await;
+            // 先关闭连接
+            let manager_trait = self.core.connection_manager_trait();
+            if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
+                let mut c = conn.lock().await;
+                let _ = c.close().await;
+            }
+            // 然后从连接管理器中移除
+            let _ = ServerHandle::disconnect(&self.core, &conn_id).await;
         }
         
         Ok(())
     }
 
-    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.send_frame_to(connection_id, frame, &self.parser).await
-    }
-
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.send_frame_to_user(user_id, frame, &self.parser).await
-    }
-
-    async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.broadcast_frame(frame, &self.parser).await
-    }
-    
-    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        let manager_trait = Arc::clone(&self.connection_manager) as Arc<dyn ConnectionManagerTrait>;
-        manager_trait.broadcast_frame_except(frame, exclude_connection_id, &self.parser).await
-    }
-
     fn is_running(&self) -> bool {
         *self.is_running.blocking_lock()
-    }
-
-    fn connection_count(&self) -> usize {
-        self.connection_manager.connection_count()
-    }
-
-    fn user_count(&self) -> usize {
-        self.connection_manager.stats().total_users
-    }
-
-    async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
-
-        if let Some((conn, _)) = self.connection_manager.get_connection(connection_id) {
-            let mut c = conn.lock().await;
-            let _ = c.close().await;
-        }
-        self.connection_manager.remove_connection(connection_id)?;
-        Ok(())
     }
 }
 
@@ -237,7 +212,7 @@ async fn handle_quic_connection(
     connection: quinn::Connection,
     handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
-    parser: MessageParser,
+    parser: crate::common::MessageParser,
     config: ServerConfig,
 ) {
     // connection 已经是 quinn::Connection，可以直接使用
@@ -310,28 +285,14 @@ async fn handle_quic_connection(
         }
 
         // 服务端不需要主动发送心跳，只需要检测超时
-        // 心跳检测由 HeartbeatDetector 统一处理
+        // 心跳检测由 ServerCore 统一管理
     }
-
-    // 定期清理超时连接
-    let manager_clone = Arc::clone(&manager);
-    let config_clone = config.clone();
-    tokio::spawn(async move {
-        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            cleanup_interval.tick().await;
-            let timeout_conns = manager_clone.cleanup_timeout_connections(config_clone.connection_timeout);
-            if !timeout_conns.is_empty() {
-                eprintln!("Cleaned up {} timeout connections", timeout_conns.len());
-            }
-        }
-    });
 }
 
 struct QUICServerMessageObserver {
     handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
-    parser: MessageParser,
+    parser: crate::common::MessageParser,
     connection_id: String,
     config: ServerConfig,
 }
@@ -419,15 +380,43 @@ impl crate::transport::events::ConnectionObserver for QUICServerMessageObserver 
                 let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
                 let conn_id = self.connection_id.clone();
                 
+                debug!("[QUICServer] Connection disconnected: {}", conn_id);
                 tokio::spawn(async move {
-                    // 心跳检测由 HeartbeatDetector 统一管理，不需要手动停止
+                    // 通知连接断开
                     let _ = handler.on_disconnect(&conn_id).await;
-                    let _ = manager.remove_connection(&conn_id).await;
+                    // 立即从连接管理器中移除连接
+                    match manager.remove_connection(&conn_id).await {
+                        Ok(_) => {
+                            debug!("[QUICServer] Successfully removed connection: {}", conn_id);
+                        }
+                        Err(e) => {
+                            debug!("[QUICServer] Connection {} already removed or not found: {}", conn_id, e);
+                        }
+                    }
                 });
             }
             ConnectionEvent::Connected => {}
             ConnectionEvent::Error(e) => {
-                eprintln!("Connection error for {}: {:?}", self.connection_id, e);
+                debug!("Connection error for {}: {:?}", self.connection_id, e);
+                // 连接出错时，立即从管理器中移除连接（避免连接一直存在）
+                let handler = Arc::clone(&self.handler);
+                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
+                let conn_id = self.connection_id.clone();
+                
+                debug!("[QUICServer] Connection error detected, removing connection: {}", conn_id);
+                tokio::spawn(async move {
+                    // 通知连接断开
+                    let _ = handler.on_disconnect(&conn_id).await;
+                    // 从连接管理器中移除（如果连接存在）
+                    match manager.remove_connection(&conn_id).await {
+                        Ok(_) => {
+                            debug!("[QUICServer] Successfully removed connection after error: {}", conn_id);
+                        }
+                        Err(e) => {
+                            debug!("[QUICServer] Connection {} already removed or not found after error: {}", conn_id, e);
+                        }
+                    }
+                });
             }
         }
     }

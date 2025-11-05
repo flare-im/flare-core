@@ -8,12 +8,16 @@ use std::time::Duration;
 /// 客户端配置
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientConfig {
-    /// 服务器地址
+    /// 服务器地址（单个协议时使用，多协议时用作默认地址）
     pub server_url: String,
     /// 传输协议（单个）
     pub transport: TransportProtocol,
     /// 传输协议列表（用于竞速，如果设置了此列表，transport 将被忽略）
+    /// 列表顺序就是优先级顺序，前面的优先级更高
     pub transports: Option<Vec<TransportProtocol>>,
+    /// 每个协议的独立地址配置（协议 -> 地址映射）
+    /// 如果设置了此映射，每个协议将使用对应的地址
+    pub protocol_urls: Option<std::collections::HashMap<TransportProtocol, String>>,
     /// 协议竞速超时时间（如果启用多协议竞速）
     pub race_timeout: Option<Duration>,
     /// 序列化格式
@@ -36,6 +40,8 @@ pub struct ClientConfig {
     pub user_id: Option<String>,
     /// 额外的元数据
     pub metadata: std::collections::HashMap<String, String>,
+    /// 是否启用消息路由（默认 false）
+    pub enable_router: bool,
 }
 
 impl Default for ClientConfig {
@@ -44,6 +50,7 @@ impl Default for ClientConfig {
             server_url: "ws://localhost:8080".to_string(),
             transport: TransportProtocol::WebSocket,
             transports: None,
+            protocol_urls: None,
             race_timeout: Some(Duration::from_secs(5)),
             serialization_format: SerializationFormat::Protobuf,
             compression: CompressionAlgorithm::None,
@@ -55,6 +62,7 @@ impl Default for ClientConfig {
             connection_id: None,
             user_id: None,
             metadata: std::collections::HashMap::new(),
+            enable_router: false,
         }
     }
 }
@@ -99,9 +107,39 @@ impl ClientConfig {
     }
     
     /// 启用多协议竞速
+    /// 
+    /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
+    /// 例如：with_protocol_race(vec![QUIC, WebSocket]) 表示 QUIC 优先级高于 WebSocket
     pub fn with_protocol_race(mut self, protocols: Vec<TransportProtocol>) -> Self {
         self.transports = Some(protocols);
         self
+    }
+    
+    /// 为特定协议设置服务器地址
+    pub fn with_protocol_url(mut self, protocol: TransportProtocol, url: String) -> Self {
+        if self.protocol_urls.is_none() {
+            self.protocol_urls = Some(std::collections::HashMap::new());
+        }
+        if let Some(ref mut urls) = self.protocol_urls {
+            urls.insert(protocol, url);
+        }
+        self
+    }
+    
+    /// 批量设置协议地址映射
+    pub fn with_protocol_urls(mut self, urls: std::collections::HashMap<TransportProtocol, String>) -> Self {
+        self.protocol_urls = Some(urls);
+        self
+    }
+    
+    /// 获取指定协议的地址
+    pub fn get_protocol_url(&self, protocol: &TransportProtocol) -> String {
+        if let Some(ref urls) = self.protocol_urls {
+            if let Some(url) = urls.get(protocol) {
+                return url.clone();
+            }
+        }
+        self.server_url.clone()
     }
     
     /// 设置竞速超时时间
@@ -137,6 +175,12 @@ impl ClientConfig {
     /// 设置最大重连次数（None 表示无限重连）
     pub fn with_max_reconnect_attempts(mut self, max: Option<u32>) -> Self {
         self.max_reconnect_attempts = max;
+        self
+    }
+    
+    /// 启用消息路由
+    pub fn enable_router(mut self) -> Self {
+        self.enable_router = true;
         self
     }
     
