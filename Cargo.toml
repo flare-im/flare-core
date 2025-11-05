@@ -1,15 +1,28 @@
 [package]
 name = "flare-core"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
-description = "Flare Core - 高性能、可靠的即时通讯长连接工具包"
-keywords = ["websocket", "quic"]
+description = "A high-performance, reliable long-connection communication toolkit for Rust, supporting WebSocket and QUIC protocols with features like authentication, device management, serialization negotiation, and protocol racing."
+keywords = ["websocket", "quic", "long-connection"]
+categories = ["network-programming", "asynchronous", "web-programming"]
 authors = ["Flare Team"]
 license = "MIT"
 repository = "https://github.com/flare-team/flare-core"
-homepage = "https://flare-core.dev"
+homepage = "https://github.com/flare-team/flare-core"
 documentation = "https://docs.rs/flare-core"
 readme = "README.md"
+exclude = [
+    "target/",
+    "Cargo.lock",
+    "examples/",
+    "scripts/",
+    "doc/",
+    "certs/",
+    ".git/",
+    ".github/",
+    "*.md",
+    "!README.md",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
