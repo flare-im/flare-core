@@ -51,9 +51,9 @@ impl ChatRoomHandler {
         
         if let Some(ref handle) = handle {
             if let Err(e) = handle.broadcast_except(frame, exclude_connection_id).await {
-                error!("[聊天室] 广播消息失败: {}", e);
-            } else {
-                debug!("broadcast_message_except: 广播成功（已排除发送者）");
+            error!("[聊天室] 广播消息失败: {}", e);
+        } else {
+            debug!("broadcast_message_except: 广播成功（已排除发送者）");
             }
         } else {
             error!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
@@ -71,7 +71,7 @@ impl ChatRoomHandler {
         
         if let Some(ref handle) = handle {
             if let Err(e) = handle.broadcast(frame).await {
-                error!("[聊天室] 广播消息失败: {}", e);
+            error!("[聊天室] 广播消息失败: {}", e);
             }
         } else {
             error!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
@@ -208,11 +208,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_max_connections(2000)
         .build()?;
     
-    // 从 ObserverServer 获取连接管理器和解析器，创建 DefaultServerHandle
-    let server_handle: Arc<dyn ServerHandle> = if let Some((manager_trait, parser)) = observer_server.get_server_handle_components() {
-        Arc::new(DefaultServerHandle::new(manager_trait, parser))
+    // 从 ObserverServer 获取连接管理器，创建 DefaultServerHandle
+    let server_handle: Arc<dyn ServerHandle> = if let Some(manager_trait) = observer_server.get_server_handle_components() {
+        Arc::new(DefaultServerHandle::new(manager_trait))
     } else {
-        return Err("无法获取连接管理器和解析器".into());
+        return Err("无法获取连接管理器".into());
     };
     
     // 设置服务器处理器到 handler
@@ -242,8 +242,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let handle_guard = server_handle_clone.lock().await;
             if let Some(ref handle) = *handle_guard {
                 let conn_count = handle.connection_count();
-                if conn_count > 0 {
-                    info!("当前在线用户: {}", conn_count);
+            if conn_count > 0 {
+                info!("当前在线用户: {}", conn_count);
                 }
             }
         }

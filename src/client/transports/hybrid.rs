@@ -96,7 +96,7 @@ impl HybridClient {
         })
     }
     
-    /// 协议竞速连接
+        /// 协议竞速连接
     /// 
     /// 同时尝试多个协议，按照优先级顺序选择第一个成功的
     /// 协议列表的顺序就是优先级顺序
@@ -232,7 +232,7 @@ impl HybridClient {
         // 策略：优先保留优先级高的，如果优先级高的失败，再保留连接速度最快的
         // 按照优先级顺序检查成功的连接
         if successful_clients.is_empty() {
-            // 所有协议都失败了
+        // 所有协议都失败了
             let error_details: Vec<String> = errors.iter()
                 .map(|(index, protocol, e)| format!("[{}] {:?}: {}", index, protocol, e))
                 .collect();
@@ -276,6 +276,11 @@ impl HybridClient {
     /// 获取 ClientCore（用于外部访问）
     pub fn core(&self) -> &ClientCore {
         &self.core
+    }
+    
+    /// 获取 ClientCore 的可变引用（用于外部修改）
+    pub fn core_mut(&mut self) -> &mut ClientCore {
+        &mut self.core
     }
     
     /// 解析基础 URL，提取主机和端口

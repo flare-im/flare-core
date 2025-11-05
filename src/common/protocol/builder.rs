@@ -231,6 +231,37 @@ pub fn auth_ack(
     }
 }
 
+/// 创建 KICKED 命令（被踢下线）
+/// 
+/// # 参数
+/// - `reason`: 被踢的原因（必需）
+/// - `metadata`: 可选的元数据（如设备信息、冲突连接ID等）
+/// 
+/// # 示例
+/// ```rust
+/// use flare_core::common::protocol::builder::kicked;
+/// use flare_core::common::protocol::frame_with_system_command;
+/// use std::collections::HashMap;
+/// 
+/// let mut metadata = HashMap::new();
+/// metadata.insert("conflict_device".to_string(), "device-123".as_bytes().to_vec());
+/// 
+/// let kick_cmd = kicked("设备冲突：同一平台已有其他设备在线", Some(metadata));
+/// let frame = frame_with_system_command(kick_cmd, Reliability::AtLeastOnce);
+/// ```
+pub fn kicked(
+    reason: impl Into<String>,
+    metadata: Option<HashMap<String, Vec<u8>>>,
+) -> SystemCommand {
+    SystemCommand {
+        r#type: SystemType::Kicked as i32,
+        format: SerializationFormat::Protobuf as i32,
+        message: reason.into(),
+        metadata: metadata.unwrap_or_default(),
+        data: Vec::new(),
+    }
+}
+
 // ============================================================
 // 消息命令构建方法
 // ============================================================

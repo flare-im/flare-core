@@ -3,6 +3,7 @@
 use crate::common::config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
 use crate::common::protocol::SerializationFormat;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::device::DeviceInfo;
 use std::time::Duration;
 
 /// 客户端配置
@@ -20,10 +21,15 @@ pub struct ClientConfig {
     pub protocol_urls: Option<std::collections::HashMap<TransportProtocol, String>>,
     /// 协议竞速超时时间（如果启用多协议竞速）
     pub race_timeout: Option<Duration>,
-    /// 序列化格式
+    /// 序列化格式（首选格式，用于协商）
     pub serialization_format: SerializationFormat,
-    /// 压缩算法
+    /// 压缩算法（首选算法，用于协商）
     pub compression: CompressionAlgorithm,
+    /// 强制指定的序列化格式（如果设置，则强制使用此格式，不进行协商）
+    /// 适用于某些端不支持 protobuf 等格式的场景
+    pub force_serialization_format: Option<SerializationFormat>,
+    /// 强制指定的压缩算法（如果设置，则强制使用此算法，不进行协商）
+    pub force_compression: Option<CompressionAlgorithm>,
     /// 连接超时时间
     pub connect_timeout: Duration,
     /// 重连间隔
@@ -42,6 +48,8 @@ pub struct ClientConfig {
     pub metadata: std::collections::HashMap<String, String>,
     /// 是否启用消息路由（默认 false）
     pub enable_router: bool,
+    /// 设备信息（用于协商和设备管理）
+    pub device_info: Option<DeviceInfo>,
 }
 
 impl Default for ClientConfig {
@@ -52,8 +60,11 @@ impl Default for ClientConfig {
             transports: None,
             protocol_urls: None,
             race_timeout: Some(Duration::from_secs(5)),
-            serialization_format: SerializationFormat::Protobuf,
+            // 默认使用 JSON 序列化，不压缩（客户端可以在协商时指定首选格式）
+            serialization_format: SerializationFormat::Json,
             compression: CompressionAlgorithm::None,
+            force_serialization_format: None,
+            force_compression: None,
             connect_timeout: Duration::from_secs(30),
             reconnect_interval: Duration::from_secs(5),
             max_reconnect_attempts: Some(5),
@@ -63,6 +74,7 @@ impl Default for ClientConfig {
             user_id: None,
             metadata: std::collections::HashMap::new(),
             enable_router: false,
+            device_info: None,
         }
     }
 }
@@ -184,6 +196,44 @@ impl ClientConfig {
         self
     }
     
+    /// 设置设备信息（用于协商和设备管理）
+    pub fn with_device_info(mut self, device_info: DeviceInfo) -> Self {
+        self.device_info = Some(device_info);
+        self
+    }
+    
+    /// 强制指定序列化格式（不进行协商，直接使用此格式）
+    /// 
+    /// 适用于某些端不支持 protobuf 等格式的场景
+    /// 如果设置了强制格式，客户端将直接使用此格式，服务端必须接受
+    pub fn force_format(mut self, format: SerializationFormat) -> Self {
+        self.force_serialization_format = Some(format);
+        self
+    }
+    
+    /// 强制指定压缩算法（不进行协商，直接使用此算法）
+    /// 
+    /// 如果设置了强制压缩，客户端将直接使用此算法，服务端必须接受
+    pub fn force_compression(mut self, compression: CompressionAlgorithm) -> Self {
+        self.force_compression = Some(compression);
+        self
+    }
+    
+    /// 检查是否强制指定了格式（不进行协商）
+    pub fn is_force_format(&self) -> bool {
+        self.force_serialization_format.is_some() || self.force_compression.is_some()
+    }
+    
+    /// 获取实际使用的序列化格式（强制格式优先，否则使用首选格式）
+    pub fn get_serialization_format(&self) -> SerializationFormat {
+        self.force_serialization_format.unwrap_or(self.serialization_format)
+    }
+    
+    /// 获取实际使用的压缩算法（强制算法优先，否则使用首选算法）
+    pub fn get_compression(&self) -> CompressionAlgorithm {
+        self.force_compression.unwrap_or(self.compression)
+    }
+    
     /// 获取要使用的协议列表
     pub fn get_protocols(&self) -> Vec<TransportProtocol> {
         if let Some(ref protocols) = self.transports {
@@ -198,8 +248,4 @@ impl ClientConfig {
         self.transports.is_some() && self.transports.as_ref().unwrap().len() > 1
     }
 
-    /// 获取心跳间隔（向后兼容）
-    pub fn heartbeat_interval(&self) -> Duration {
-        self.heartbeat.interval
-    }
 }

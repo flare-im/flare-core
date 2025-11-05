@@ -17,7 +17,6 @@ pub mod builder;
 mod conversions;
 
 // 导入转换实现（确保 From trait 实现可用）
-#[allow(unused_imports)]
 use conversions::*;
 
 // 重新导出公共类型和函数

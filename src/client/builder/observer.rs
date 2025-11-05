@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 pub struct ObserverClientBuilder {
     config: ClientConfig,
     observer: Option<Arc<dyn ConnectionObserver>>,
+    event_handler: Option<Arc<dyn crate::client::events::handler::ClientEventHandler>>,
 }
 
 impl ObserverClientBuilder {
@@ -23,7 +24,14 @@ impl ObserverClientBuilder {
         Self {
             config: ClientConfig::new(server_url.into()),
             observer: None,
+            event_handler: None,
         }
+    }
+    
+    /// 设置事件处理器（可选，用于自定义业务逻辑）
+    pub fn with_event_handler(mut self, event_handler: Arc<dyn crate::client::events::handler::ClientEventHandler>) -> Self {
+        self.event_handler = Some(event_handler);
+        self
     }
 
     /// 设置观察者（必须）
@@ -107,6 +115,12 @@ impl ObserverClientBuilder {
         self.config = self.config.enable_router();
         self
     }
+    
+    /// 设置设备信息（用于协商和设备管理）
+    pub fn with_device_info(mut self, device_info: crate::common::device::DeviceInfo) -> Self {
+        self.config = self.config.with_device_info(device_info);
+        self
+    }
 
     /// 构建客户端（使用协议竞速）
     pub async fn build_with_race(self) -> Result<ObserverClient> {
@@ -114,8 +128,16 @@ impl ObserverClientBuilder {
             crate::common::error::FlareError::general_error("Observer is required")
         })?;
 
-        let client = HybridClient::connect_with_race(self.config).await?;
+        let mut client = HybridClient::connect_with_race(self.config).await?;
         let client_arc = Arc::new(Mutex::new(client));
+        
+        // 设置事件处理器（如果提供）
+        {
+            let mut client = client_arc.lock().await;
+            if let Some(event_handler) = self.event_handler {
+                client.core_mut().set_event_handler(Some(event_handler));
+            }
+        }
         
         // 添加观察者
         {
@@ -136,7 +158,13 @@ impl ObserverClientBuilder {
             crate::common::error::FlareError::general_error("Observer is required")
         })?;
 
-        let client = HybridClient::new(self.config)?;
+        let mut client = HybridClient::new(self.config)?;
+        
+        // 设置事件处理器（如果提供）
+        if let Some(event_handler) = self.event_handler {
+            client.core_mut().set_event_handler(Some(event_handler));
+        }
+        
         let client_arc = Arc::new(Mutex::new(client));
 
         Ok(ObserverClient {

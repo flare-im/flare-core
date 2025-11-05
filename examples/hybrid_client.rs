@@ -229,9 +229,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // 处理命令
                                 match input.as_str() {
                                     "/quit" | "/exit" => {
-                                        println!("退出聊天室...");
-                                        break;
-                                    }
+                                    println!("退出聊天室...");
+                                    break;
+                                }
                                     "/stats" => {
                                         let count = observer_clone.get_message_count();
                                         println!("\n[统计] 已接收消息数: {}", count);
@@ -251,31 +251,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
                                     _ => {
-                                        // 发送消息
-                                        let mut msg_metadata = std::collections::HashMap::new();
-                                        msg_metadata.insert("username".to_string(), username.as_bytes().to_vec());
-                                        
-                                        let chat_msg = send_message(
-                                            generate_message_id(),
-                                            input.as_bytes().to_vec(),
-                                            Some(msg_metadata),
-                                            None,
-                                        );
-                                        
-                                        let chat_frame = frame_with_message_command(
-                                            chat_msg,
-                                            Reliability::BestEffort,
-                                        );
-                                        
-                                        if let Err(e) = client.send_frame(&chat_frame).await {
-                                            eprintln!("\n[错误] 发送消息失败: {}", e);
+                                // 发送消息
+                                let mut msg_metadata = std::collections::HashMap::new();
+                                msg_metadata.insert("username".to_string(), username.as_bytes().to_vec());
+                                
+                                let chat_msg = send_message(
+                                    generate_message_id(),
+                                    input.as_bytes().to_vec(),
+                                    Some(msg_metadata),
+                                    None,
+                                );
+                                
+                                let chat_frame = frame_with_message_command(
+                                    chat_msg,
+                                    Reliability::BestEffort,
+                                );
+                                
+                                if let Err(e) = client.send_frame(&chat_frame).await {
+                                    eprintln!("\n[错误] 发送消息失败: {}", e);
                                             println!("提示: 连接可能已断开，尝试重连...");
                                             // 客户端会自动重连（如果配置了重连）
-                                            break;
-                                        }
-                                        
-                                        print!("{}> ", username);
-                                        let _ = io::stdout().flush();
+                                    break;
+                                }
+                                
+                                print!("{}> ", username);
+                                let _ = io::stdout().flush();
                                     }
                                 }
                             }

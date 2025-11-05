@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tracing::error;
 
 use super::websocket::WebSocketServer;
 use super::quic::QUICServer;
@@ -31,7 +31,7 @@ pub struct HybridServer {
     /// 是否正在运行
     is_running: Arc<AtomicBool>,
     /// 服务器核心功能（统一管理连接和心跳）
-    core: Option<ServerCore>,
+    core: Option<Arc<ServerCore>>,
     /// 配置（用于启动心跳检测）
     config: ServerConfig,
 }
@@ -46,7 +46,7 @@ impl HybridServer {
     /// # 返回
     /// 混合服务端实例
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
-        Self::with_connection_manager(config, handler, None)
+        Self::with_connection_manager(config, handler, None, None, None)
     }
     
     /// 使用指定的连接管理器创建混合服务端
@@ -55,6 +55,8 @@ impl HybridServer {
     /// - `config`: 服务端配置
     /// - `handler`: 连接处理器
     /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的并统一管理
+    /// - `device_manager`: 可选的设备管理器，如果为 None 且配置中指定了设备冲突策略，则自动创建
+    /// - `event_handler`: 可选的事件处理器
     /// 
     /// # 返回
     /// 混合服务端实例
@@ -62,9 +64,28 @@ impl HybridServer {
         config: ServerConfig,
         handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<crate::server::connection::ConnectionManager>>,
+        device_manager: Option<Arc<crate::server::device::DeviceManager>>,
+        event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
     ) -> Result<Self> {
         // 创建服务器核心，统一管理连接和心跳
-        let  core = ServerCore::new(&config, connection_manager.clone());
+        let mut core = ServerCore::new(&config, connection_manager.clone());
+        
+        // 确定设备管理器：优先使用传入的，否则根据配置创建
+        let final_device_manager = if let Some(dm) = device_manager {
+            Some(dm)
+        } else if config.device_conflict_strategy != crate::common::device::DeviceConflictStrategy::AllowAll {
+            Some(Arc::new(crate::server::device::DeviceManager::new(
+                config.device_conflict_strategy.clone(),
+            )))
+        } else {
+            None
+        };
+        
+        core = core.with_device_manager(final_device_manager)
+            .with_event_handler(event_handler);
+        
+        // 将 ServerCore 包装为 Arc，以便共享给 WebSocketServer 和 QUICServer
+        let shared_core = Arc::new(core);
         
         let protocols = config.get_protocols();
         let mut servers = Vec::new();
@@ -78,19 +99,20 @@ impl HybridServer {
             let bind_address = config.get_protocol_address(protocol);
             server_config.bind_address = bind_address;
             
-                        let server: Box<dyn Server> = match protocol {
+            // 使用共享的 ServerCore，确保设备管理器等配置正确传递
+            let server: Box<dyn Server> = match protocol {
                 TransportProtocol::WebSocket => {
-                    Box::new(WebSocketServer::with_connection_manager(
+                    Box::new(WebSocketServer::with_shared_core(
                         server_config,
                         Arc::clone(&handler),
-                        connection_manager.clone(),
+                        shared_core.clone(),
                     ))                                                                         
                 }
                 TransportProtocol::QUIC => {
-                    Box::new(QUICServer::with_connection_manager(
+                    Box::new(QUICServer::with_shared_core(
                         server_config,
                         Arc::clone(&handler),
-                        connection_manager.clone(),
+                        shared_core.clone(),
                     )?)                                                                             
                 }
                 TransportProtocol::TCP => {
@@ -107,7 +129,7 @@ impl HybridServer {
             servers,
             protocols,
             is_running: Arc::new(AtomicBool::new(false)),
-            core: Some(core),
+            core: Some(shared_core),
             config,
         })
     }
@@ -118,8 +140,13 @@ impl HybridServer {
     }
     
     /// 获取 ServerCore 的引用（用于创建 ServerHandle）
-    pub fn core(&self) -> Option<&ServerCore> {
+    pub fn core(&self) -> Option<&Arc<ServerCore>> {
         self.core.as_ref()
+    }
+    
+    /// 获取 ServerCore 的可变引用（用于修改）
+    pub fn core_mut(&mut self) -> Option<&mut Arc<ServerCore>> {
+        self.core.as_mut()
     }
 }
 
@@ -193,8 +220,8 @@ impl ServerHandle for HybridServer {
     async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）发送消息
         if let Some(ref core) = self.core {
-            return ServerHandle::send_to(core, connection_id, frame).await;
-        }
+            return ServerHandle::send_to(&**core, connection_id, frame).await;
+                }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string()
         ))
@@ -203,8 +230,8 @@ impl ServerHandle for HybridServer {
     async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）发送消息
         if let Some(ref core) = self.core {
-            return ServerHandle::send_to_user(core, user_id, frame).await;
-        }
+            return ServerHandle::send_to_user(&**core, user_id, frame).await;
+            }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string()
         ))
@@ -213,7 +240,7 @@ impl ServerHandle for HybridServer {
     async fn broadcast(&self, frame: &Frame) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）广播消息
         if let Some(ref core) = self.core {
-            return ServerHandle::broadcast(core, frame).await;
+            return ServerHandle::broadcast(&**core, frame).await;
         }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string()
@@ -223,7 +250,7 @@ impl ServerHandle for HybridServer {
     async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）广播消息
         if let Some(ref core) = self.core {
-            return ServerHandle::broadcast_except(core, frame, exclude_connection_id).await;
+            return ServerHandle::broadcast_except(&**core, frame, exclude_connection_id).await;
         }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string()
@@ -233,7 +260,7 @@ impl ServerHandle for HybridServer {
     async fn disconnect(&self, connection_id: &str) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）断开连接
         if let Some(ref core) = self.core {
-            return ServerHandle::disconnect(core, connection_id).await;
+            return ServerHandle::disconnect(&**core, connection_id).await;
         }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string()
@@ -243,7 +270,7 @@ impl ServerHandle for HybridServer {
     fn connection_count(&self) -> usize {
         // 直接通过 ServerCore（实现了 ServerHandle）获取连接数量
         if let Some(ref core) = self.core {
-            return ServerHandle::connection_count(core);
+            return ServerHandle::connection_count(&**core);
         }
         0
     }
@@ -251,7 +278,7 @@ impl ServerHandle for HybridServer {
     fn user_count(&self) -> usize {
         // 直接通过 ServerCore（实现了 ServerHandle）获取用户数量
         if let Some(ref core) = self.core {
-            return ServerHandle::user_count(core);
+            return ServerHandle::user_count(&**core);
         }
         0
     }

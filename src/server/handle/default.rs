@@ -5,7 +5,6 @@
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::server::connection::ConnectionManagerTrait;
-use crate::common::MessageParser;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -102,21 +101,16 @@ pub trait ServerHandle: Send + Sync {
 /// ```rust
 /// use flare_core::server::DefaultServerHandle;
 /// use flare_core::server::connection::ConnectionManager;
-/// use flare_core::common::MessageParser;
 /// use std::sync::Arc;
 /// 
 /// let connection_manager = Arc::new(ConnectionManager::new());
-/// let parser = MessageParser::new(/* ... */);
 /// let handle = Arc::new(DefaultServerHandle::new(
 ///     connection_manager as Arc<dyn ConnectionManagerTrait>,
-///     parser,
 /// ));
 /// ```
 pub struct DefaultServerHandle {
     /// 连接管理器
     connection_manager: Arc<dyn ConnectionManagerTrait>,
-    /// 消息解析器（用于序列化 Frame）
-    parser: MessageParser,
 }
 
 impl DefaultServerHandle {
@@ -124,17 +118,14 @@ impl DefaultServerHandle {
     /// 
     /// # 参数
     /// - `connection_manager`: 连接管理器 trait 对象
-    /// - `parser`: 消息解析器，用于序列化 Frame
     /// 
     /// # 返回
     /// 返回新的 `DefaultServerHandle` 实例
     pub fn new(
         connection_manager: Arc<dyn ConnectionManagerTrait>,
-        parser: MessageParser,
     ) -> Self {
         Self {
             connection_manager,
-            parser,
         }
     }
     
@@ -217,26 +208,30 @@ impl DefaultServerHandle {
 #[async_trait]
 impl ServerHandle for DefaultServerHandle {
     async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
+        // 传入 None，让 ConnectionManager 根据连接的协商信息创建 parser
         self.connection_manager
-            .send_frame_to(connection_id, frame, &self.parser)
+            .send_frame_to(connection_id, frame, None)
             .await
     }
     
     async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+        // 传入 None，让 ConnectionManager 为每个连接使用其协商的格式
         self.connection_manager
-            .send_frame_to_user(user_id, frame, &self.parser)
+            .send_frame_to_user(user_id, frame, None)
             .await
     }
     
     async fn broadcast(&self, frame: &Frame) -> Result<()> {
+        // 传入 None，让 ConnectionManager 为每个连接使用其协商的格式
         self.connection_manager
-            .broadcast_frame(frame, &self.parser)
+            .broadcast_frame(frame, None)
             .await
     }
     
     async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
+        // 传入 None，让 ConnectionManager 为每个连接使用其协商的格式
         self.connection_manager
-            .broadcast_frame_except(frame, exclude_connection_id, &self.parser)
+            .broadcast_frame_except(frame, exclude_connection_id, None)
             .await
     }
     

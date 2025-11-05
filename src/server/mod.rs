@@ -4,6 +4,8 @@
 
 pub mod config;
 pub mod connection;
+pub mod device;
+pub mod events;
 pub mod handle;
 pub mod heartbeat;
 pub mod transports;
@@ -11,6 +13,8 @@ pub mod builder;
 
 pub use config::ServerConfig;
 pub use connection::{ConnectionManager, ConnectionManagerTrait, ConnectionInfo, ConnectionStats};
+pub use device::{DeviceManager, DeviceConflictStrategy, DeviceConflictStrategyBuilder};
+pub use events::{ServerEventHandler, DefaultServerMessageObserver};
 pub use handle::{ServerHandle, DefaultServerHandle};
 pub use heartbeat::HeartbeatDetector;
 pub use transports::{Server, ConnectionHandler, QUICServer, HybridServer, WebSocketServer};

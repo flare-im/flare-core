@@ -88,6 +88,8 @@ pub mod system_command {
         Auth = 8,
         /// 鉴权响应（可选 message、metadata）
         AuthAck = 9,
+        /// 被踢下线（需要 message 说明原因，可选 metadata）
+        Kicked = 10,
     }
     impl Type {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -106,6 +108,7 @@ pub mod system_command {
                 Self::Event => "EVENT",
                 Self::Auth => "AUTH",
                 Self::AuthAck => "AUTH_ACK",
+                Self::Kicked => "KICKED",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -121,6 +124,7 @@ pub mod system_command {
                 "EVENT" => Some(Self::Event),
                 "AUTH" => Some(Self::Auth),
                 "AUTH_ACK" => Some(Self::AuthAck),
+                "KICKED" => Some(Self::Kicked),
                 _ => None,
             }
         }

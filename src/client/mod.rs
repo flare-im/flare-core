@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod events;
 pub mod heartbeat;
 pub mod manager;
 pub mod router;
@@ -12,6 +13,7 @@ pub mod builder;
 
 pub use config::ClientConfig;
 pub use connection::{ConnectionState, ConnectionStateManager};
+pub use events::{ClientEventHandler, DefaultClientMessageObserver};
 pub use heartbeat::HeartbeatManager;
 pub use manager::ClientConnectionManager;
 pub use router::{MessageRouter, MessageHandler, SimpleHandler, AsyncHandler};

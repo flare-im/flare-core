@@ -3,19 +3,16 @@
 //! 专注于 QUIC 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
 use crate::server::config::ServerConfig;
-use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
+use crate::server::connection::ConnectionManager;
 use crate::common::error::Result;
-use crate::common::protocol::{Frame, pong};
 use crate::server::transports::{Server, ConnectionHandler};
 use crate::server::transports::server_core::ServerCore;
 use crate::server::handle::ServerHandle;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
-use crate::transport::events::ConnectionEvent;
 use crate::transport::quic::QUICTransport;
 use async_trait::async_trait;
 use quinn::{Endpoint, ServerConfig as QuinnServerConfig};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,7 +23,7 @@ use tracing::debug;
 /// 专注于 QUIC 协议层面的连接处理
 pub struct QUICServer {
     config: ServerConfig,
-    core: ServerCore,
+    core: Arc<ServerCore>,  // 改为 Arc，便于共享
     handler: Arc<dyn ConnectionHandler>,
     endpoint: Option<Endpoint>,
     is_running: Arc<Mutex<bool>>,
@@ -57,7 +54,7 @@ impl QUICServer {
         });
         
         // 创建 ServerCore（统一管理连接和心跳）
-        let core = ServerCore::new(&config, connection_manager);
+        let core = Arc::new(ServerCore::new(&config, connection_manager));
         
         // 创建 QUIC server config（使用共享证书）
         // 使用共享证书工具，确保客户端和服务端使用相同的证书
@@ -123,6 +120,61 @@ impl QUICServer {
             is_running: Arc::new(Mutex::new(false)),
         })
     }
+    
+    /// 使用指定的 ServerCore 创建 QUIC 服务端（用于共享 ServerCore）
+    pub fn with_shared_core(
+        config: ServerConfig,
+        handler: Arc<dyn ConnectionHandler>,
+        core: Arc<ServerCore>,
+    ) -> Result<Self> {
+        // 确保 rustls CryptoProvider 已初始化
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+        
+        // 创建 QUIC server config（使用共享证书）
+        use crate::common::cert::{get_server_cert_der, get_server_key_der};
+        
+        let cert_der = get_server_cert_der()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to load server certificate: {}", e)
+            ))?;
+        let key_der = get_server_key_der()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to load server key: {}", e)
+            ))?;
+        
+        let cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key_der)
+        );
+        
+        let server_config = QuinnServerConfig::with_single_cert(
+            vec![cert],
+            key,
+        ).map_err(|e| crate::common::error::FlareError::protocol_error(
+            format!("Failed to create QUIC server config: {}", e)
+        ))?;
+        
+        let addr = config.bind_address.parse()
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Invalid address: {}", e)
+            ))?;
+        let endpoint = Endpoint::server(server_config, addr)
+            .map_err(|e| crate::common::error::FlareError::protocol_error(
+                format!("Failed to create QUIC endpoint: {}", e)
+            ))?;
+        
+        Ok(Self {
+            config,
+            core,
+            handler,
+            endpoint: Some(endpoint),
+            is_running: Arc::new(Mutex::new(false)),
+        })
+    }
 }
 
 #[async_trait]
@@ -142,6 +194,10 @@ impl Server for QUICServer {
         let parser = self.core.parser.clone();
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
+        
+        // 直接使用 self.core 的 Arc，确保 device_manager 等配置正确传递
+        let core = Arc::clone(&self.core);
+        let core_clone = Arc::clone(&core);
 
         tokio::spawn(async move {
             eprintln!("[QUIC Server] Started listening for connections...");
@@ -152,7 +208,7 @@ impl Server for QUICServer {
                     let manager_clone = Arc::clone(&manager);
                     let parser_clone = parser.clone();
                     let config_clone = config.clone();
-                    
+                    let core_clone = Arc::clone(&core_clone);
                     tokio::spawn(async move {
                         // conn 是 Incoming (Future)，await 后得到 Connecting
                         match conn.await {
@@ -164,6 +220,7 @@ impl Server for QUICServer {
                                     manager_clone,
                                     parser_clone,
                                     config_clone,
+                                    core_clone,
                                 ).await;
                             }
                             Err(e) => {
@@ -197,7 +254,7 @@ impl Server for QUICServer {
                 let _ = c.close().await;
             }
             // 然后从连接管理器中移除
-            let _ = ServerHandle::disconnect(&self.core, &conn_id).await;
+            let _ = ServerHandle::disconnect(&*self.core, &conn_id).await;
         }
         
         Ok(())
@@ -214,6 +271,7 @@ async fn handle_quic_connection(
     manager: Arc<ConnectionManager>,
     parser: crate::common::MessageParser,
     config: ServerConfig,
+    core: Arc<ServerCore>,
 ) {
     // connection 已经是 quinn::Connection，可以直接使用
     let quinn_connection = connection;
@@ -247,41 +305,32 @@ async fn handle_quic_connection(
         return;
     }
 
-    if let Err(e) = handler.on_connect(&connection_id).await {
-        eprintln!("Handler on_connect error: {}", e);
-    }
+    // 注意：on_connect 将在收到 CONNECT 消息并完成协商后调用（在 QUICServerMessageObserver 中处理）
 
     let handler_clone = Arc::clone(&handler);
     let manager_clone = Arc::clone(&manager);
     let parser_clone = parser.clone();
     let conn_id_clone = connection_id.clone();
-    let config_clone = config.clone();
+    let core_clone = Arc::clone(&core);
 
-    let observer = Arc::new(QUICServerMessageObserver {
-        handler: handler_clone,
-        manager: manager_clone,
-        parser: parser_clone,
-        connection_id: conn_id_clone.clone(),
-        config: config_clone,
-    });
+    let device_manager = core.device_manager();
+    let event_handler = core.event_handler();
+    let observer = Arc::new(crate::server::events::DefaultServerMessageObserver::new(
+        handler_clone,
+        manager_clone,
+        parser_clone,
+        conn_id_clone.clone(),
+        core_clone,
+        device_manager,
+        event_handler, // 从 ServerCore 获取事件处理器
+    ));
 
     if let Some((conn, _)) = manager.get_connection(&connection_id) {
         {
             let mut c = conn.lock().await;
             c.add_observer(observer);
 
-            // 发送 CONNECT_ACK
-            let mut metadata = HashMap::new();
-            let format_bytes = format!("{:?}", config.default_serialization_format).into_bytes();
-            metadata.insert("format".to_string(), format_bytes);
-            let connect_ack_cmd = crate::common::protocol::connect_ack(config.default_serialization_format, metadata);
-            let connect_ack_frame = crate::common::protocol::frame_with_system_command(
-                connect_ack_cmd,
-                crate::common::protocol::Reliability::AtLeastOnce,
-            );
-            if let Ok(data) = parser.serialize(&connect_ack_frame) {
-                let _ = c.send(&data).await;
-            }
+            // 注意：CONNECT_ACK 将在收到 CONNECT 消息后发送（在 QUICServerMessageObserver 中处理）
         }
 
         // 服务端不需要主动发送心跳，只需要检测超时
@@ -289,136 +338,5 @@ async fn handle_quic_connection(
     }
 }
 
-struct QUICServerMessageObserver {
-    handler: Arc<dyn ConnectionHandler>,
-    manager: Arc<ConnectionManager>,
-    parser: crate::common::MessageParser,
-    connection_id: String,
-    config: ServerConfig,
-}
-
-impl crate::transport::events::ConnectionObserver for QUICServerMessageObserver {
-    fn on_event(&self, event: &ConnectionEvent) {
-        match event {
-            ConnectionEvent::Message(data) => {
-                if let Ok(frame) = self.parser.parse(data) {
-                    // 处理 PING/PONG
-                    if let Some(cmd) = &frame.command {
-                        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
-                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Ping as i32 {
-                                // 收到 PING，回复 PONG 并更新连接活跃时间
-                                let manager = Arc::clone(&self.manager);
-                                let conn_id = self.connection_id.clone();
-                                
-                                // 更新连接活跃时间（通过 trait 的异步方法）
-                                let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                                let conn_id_update = conn_id.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager_update.update_connection_active(&conn_id_update).await;
-                                });
-                                
-                                // 回复 PONG
-                                let pong_cmd = pong();
-                                let pong_frame = crate::common::protocol::frame_with_system_command(
-                                    pong_cmd,
-                                    crate::common::protocol::Reliability::AtLeastOnce,
-                                );
-                                if let Ok(pong_data) = self.parser.serialize(&pong_frame) {
-                                    let manager_get = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                                    tokio::spawn(async move {
-                                        if let Some((conn, _)) = manager_get.get_connection(&conn_id).await {
-                                            let conn_clone = Arc::clone(&conn);
-                                            let mut c = conn_clone.lock().await;
-                                            let _ = c.send(&pong_data).await;
-                                        }
-                                    });
-                                }
-                                return;
-                            }
-                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
-                                // 收到 PONG，更新连接活跃时间
-                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                                let conn_id = self.connection_id.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager.update_connection_active(&conn_id).await;
-                                });
-                                return;
-                            }
-                        }
-                    }
-
-                    // 处理消息 - 更新连接活跃时间
-                    let handler = Arc::clone(&self.handler);
-                    let manager = Arc::clone(&self.manager);
-                    let parser = self.parser.clone();
-                    let conn_id = self.connection_id.clone();
-                    
-                    // 更新连接活跃时间（收到任何消息都算活跃）
-                    let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                    let conn_id_update = conn_id.clone();
-                    tokio::spawn(async move {
-                        let _ = manager_update.update_connection_active(&conn_id_update).await;
-                    });
-                    
-                    tokio::spawn(async move {
-                                                if let Ok(Some(response)) = handler.handle_frame(&frame, &conn_id).await {                                                              
-                            let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                            if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                                if let Ok(data) = parser.serialize(&response) {
-                                    let conn_clone = Arc::clone(&conn);
-                                    let mut c = conn_clone.lock().await;
-                                    let _ = c.send(&data).await;
-                                }
-                            }
-                        }
-                        // 连接活跃时间已在收到消息时更新
-                    });
-                }
-            }
-            ConnectionEvent::Disconnected(_) => {
-                let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                
-                debug!("[QUICServer] Connection disconnected: {}", conn_id);
-                tokio::spawn(async move {
-                    // 通知连接断开
-                    let _ = handler.on_disconnect(&conn_id).await;
-                    // 立即从连接管理器中移除连接
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!("[QUICServer] Successfully removed connection: {}", conn_id);
-                        }
-                        Err(e) => {
-                            debug!("[QUICServer] Connection {} already removed or not found: {}", conn_id, e);
-                        }
-                    }
-                });
-            }
-            ConnectionEvent::Connected => {}
-            ConnectionEvent::Error(e) => {
-                debug!("Connection error for {}: {:?}", self.connection_id, e);
-                // 连接出错时，立即从管理器中移除连接（避免连接一直存在）
-                let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                
-                debug!("[QUICServer] Connection error detected, removing connection: {}", conn_id);
-                tokio::spawn(async move {
-                    // 通知连接断开
-                    let _ = handler.on_disconnect(&conn_id).await;
-                    // 从连接管理器中移除（如果连接存在）
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!("[QUICServer] Successfully removed connection after error: {}", conn_id);
-                        }
-                        Err(e) => {
-                            debug!("[QUICServer] Connection {} already removed or not found after error: {}", conn_id, e);
-                        }
-                    }
-                });
-            }
-        }
-    }
-}
+// 旧的 QUICServerMessageObserver 已移除，现在使用 DefaultServerMessageObserver
 

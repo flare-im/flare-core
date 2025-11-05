@@ -34,6 +34,7 @@ message SystemCommand {
     EVENT          = 7; // 系统事件（需要 message，可选 metadata、data）
     AUTH           = 8; // 鉴权请求（需要 metadata，可选 data）
     AUTH_ACK       = 9; // 鉴权响应（可选 message、metadata）
+    KICKED         = 10; // 被踢下线（需要 message 说明原因，可选 metadata）
   }
 
   // 序列化格式（仅在 CONNECT/CONNECT_ACK 时使用）

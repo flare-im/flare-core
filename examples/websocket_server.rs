@@ -51,13 +51,13 @@ impl ChatRoomHandler {
         };
         
         if let Some(ref handle) = handle {
-            debug!("broadcast_message_except: 使用 broadcast_except 排除发送者");
+                debug!("broadcast_message_except: 使用 broadcast_except 排除发送者");
             if let Err(e) = handle.broadcast_except(frame, exclude_connection_id).await {
-                error!("[聊天室] 广播消息失败: {}", e);
+                    error!("[聊天室] 广播消息失败: {}", e);
+                } else {
+                    debug!("broadcast_message_except: 广播成功（已排除发送者）");
+                }
             } else {
-                debug!("broadcast_message_except: 广播成功（已排除发送者）");
-            }
-        } else {
             warn!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
         }
         debug!("broadcast_message_except 完成");
@@ -73,7 +73,7 @@ impl ChatRoomHandler {
         
         if let Some(ref handle) = handle {
             if let Err(e) = handle.broadcast(frame).await {
-                error!("[聊天室] 广播消息失败: {}", e);
+                    error!("[聊天室] 广播消息失败: {}", e);
             }
         } else {
             warn!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
@@ -207,7 +207,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // 使用 ServerCore 创建 DefaultServerHandle
         Arc::new(DefaultServerHandle::new(
             core.connection_manager_trait(),
-            core.parser.clone(),
         ))
     } else {
         return Err("无法获取 ServerCore".into());
@@ -218,15 +217,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     
     // 启动服务器
     if let Err(e) = ws_server.start().await {
-        error!("❌ 服务器启动失败: {:?}", e);
-        error!("提示: 可能端口 8080 已被占用，请先关闭占用该端口的进程");
-        return Err(format!("服务器启动失败: {:?}", e).into());
-    }
-    
+            error!("❌ 服务器启动失败: {:?}", e);
+            error!("提示: 可能端口 8080 已被占用，请先关闭占用该端口的进程");
+            return Err(format!("服务器启动失败: {:?}", e).into());
+        }
+        
     // 验证服务器是否真的在运行
     if !ws_server.is_running() {
-        error!("❌ 服务器启动后未处于运行状态");
-        return Err("服务器未正常运行".into());
+            error!("❌ 服务器启动后未处于运行状态");
+            return Err("服务器未正常运行".into());
     }
     
     info!("✅ 聊天室服务器已启动：0.0.0.0:8080");
@@ -253,8 +252,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let handle_guard = server_handle_clone.lock().await;
             if let Some(ref handle) = *handle_guard {
                 let conn_count = handle.connection_count();
-                if conn_count > 0 {
-                    info!("当前在线用户: {}", conn_count);
+            if conn_count > 0 {
+                info!("当前在线用户: {}", conn_count);
                 }
             }
         }

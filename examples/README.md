@@ -151,6 +151,57 @@ cargo run --example simple_client
 
 ---
 
+## 协商和设备管理示例
+
+### negotiation_server.rs - 协商和设备管理服务器
+
+**功能特性：**
+- ✅ 客户端可以协商序列化格式（JSON/Protobuf）
+- ✅ 客户端可以协商压缩算法（none/gzip）
+- ✅ 移动端互斥：同一用户只能有一个移动端设备在线
+- ✅ 支持多端同时在线（Web/PC + 一个移动端）
+- ✅ 设备信息管理：记录设备ID、平台、型号、版本等
+- ✅ 设备冲突处理：自动踢掉冲突的旧设备
+
+**启动命令：**
+```bash
+RUST_LOG=debug cargo run --example negotiation_server
+```
+
+**客户端连接时需要发送：**
+- `device_id`: 设备唯一标识
+- `platform`: 平台类型（web/pc/android/ios/harmonyos）
+- `format`: 序列化格式（protobuf/json）
+- `compression`: 压缩算法（none/gzip）
+- `model`: 设备型号（可选）
+- `app_version`: 应用版本（可选）
+- `system_version`: 系统版本（可选）
+
+**服务器日志示例：**
+```
+✅ 新连接: 1234567890
+   设备: Android (ID: device-001, 平台: Android)
+   型号: Samsung Galaxy S23
+   应用版本: 1.0.0
+   序列化格式: Json, 压缩: None
+   用户 ID: user-123
+   用户当前在线设备数: 1
+```
+
+### negotiation_client.rs - 协商和设备管理客户端
+
+**功能特性：**
+- ✅ 发送协商信息（序列化格式、压缩算法）
+- ✅ 发送设备信息（设备ID、平台等）
+- ✅ 支持聊天室功能
+
+**启动命令：**
+```bash
+RUST_LOG=debug cargo run --example negotiation_client
+```
+
+**注意：** 当前客户端示例为简化版本，实际应用中需要在连接建立后立即发送 CONNECT 消息，包含所有协商信息。
+
 ## 快速开始
 
 ### 1. 运行简单模式示例（推荐新手）

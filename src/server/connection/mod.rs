@@ -6,8 +6,11 @@
 //! - 连接信息：连接元数据和统计信息
 
 pub mod manager;
+pub mod negotiation;
 pub mod r#trait;
+pub mod device_handler;
 
 // 重新导出常用类型
 pub use manager::{ConnectionManager, ConnectionInfo};
 pub use r#trait::{ConnectionManagerTrait, ConnectionInfo as TraitConnectionInfo, ConnectionStats};
+pub use device_handler::{handle_device_conflict, DeviceConflictResult};

@@ -25,6 +25,12 @@ pub struct ConnectionInfo {
     pub last_active: Instant,
     /// 连接元数据
     pub metadata: HashMap<String, String>,
+    /// 设备信息（如果已提供）
+    pub device_info: Option<crate::common::device::DeviceInfo>,
+    /// 序列化格式（由客户端协商决定，默认 JSON）
+    pub serialization_format: crate::common::protocol::SerializationFormat,
+    /// 压缩算法（由客户端协商决定，默认不压缩）
+    pub compression: crate::common::compression::CompressionAlgorithm,
 }
 
 impl ConnectionInfo {
@@ -37,7 +43,35 @@ impl ConnectionInfo {
             created_at: now,
             last_active: now,
             metadata: HashMap::new(),
+            device_info: None,
+            // 默认使用 JSON 且不压缩（客户端可以协商）
+            serialization_format: crate::common::protocol::SerializationFormat::Json,
+            compression: crate::common::compression::CompressionAlgorithm::None,
         }
+    }
+    
+    /// 设置设备信息
+    pub fn with_device_info(mut self, device_info: crate::common::device::DeviceInfo) -> Self {
+        self.device_info = Some(device_info);
+        self
+    }
+    
+    /// 设置序列化格式
+    pub fn with_serialization_format(
+        mut self,
+        format: crate::common::protocol::SerializationFormat,
+    ) -> Self {
+        self.serialization_format = format;
+        self
+    }
+    
+    /// 设置压缩算法
+    pub fn with_compression(
+        mut self,
+        compression: crate::common::compression::CompressionAlgorithm,
+    ) -> Self {
+        self.compression = compression;
+        self
     }
 
     /// 检查连接是否超时
@@ -157,6 +191,7 @@ impl ConnectionManager {
             .ok()
             .and_then(|connections| {
                 connections.get(connection_id).map(|(conn, info)| {
+                    // 返回最新的连接信息（包括最新的 user_id）
                     (Arc::clone(conn), info.clone())
                 })
             })
@@ -225,6 +260,55 @@ impl ConnectionManager {
             .ok_or_else(|| FlareError::protocol_error(format!("Connection {} not found", connection_id)))?;
         
         info.update_active();
+        Ok(())
+    }
+    
+    /// 更新连接的协商信息（设备信息、序列化格式、压缩算法）
+    pub fn update_connection_negotiation(
+        &self,
+        connection_id: &str,
+        device_info: Option<crate::common::device::DeviceInfo>,
+        serialization_format: crate::common::protocol::SerializationFormat,
+        compression: crate::common::compression::CompressionAlgorithm,
+        user_id: Option<String>,
+    ) -> Result<()> {
+        let mut connections = self.connections.write()
+            .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
+        
+        let (_, info) = connections.get_mut(connection_id)
+            .ok_or_else(|| FlareError::protocol_error(format!("Connection {} not found", connection_id)))?;
+        
+        // 更新协商信息
+        info.device_info = device_info;
+        info.serialization_format = serialization_format;
+        info.compression = compression;
+        
+        // 如果提供了用户 ID，更新用户 ID
+        if let Some(user_id) = user_id {
+            // 如果之前有用户 ID，先移除旧映射
+            if let Some(old_user_id) = &info.user_id {
+                let mut user_connections = self.user_connections.write()
+                    .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
+                if let Some(conn_ids) = user_connections.get_mut(old_user_id) {
+                    conn_ids.retain(|id| id != connection_id);
+                    if conn_ids.is_empty() {
+                        user_connections.remove(old_user_id);
+                    }
+                }
+            }
+            
+            // 更新用户 ID
+            info.user_id = Some(user_id.clone());
+            
+            // 添加到新用户映射
+            let mut user_connections = self.user_connections.write()
+                .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
+            user_connections
+                .entry(user_id)
+                .or_insert_with(Vec::new)
+                .push(connection_id.to_string());
+        }
+        
         Ok(())
     }
 
@@ -358,6 +442,9 @@ impl ConnectionManagerTrait for ConnectionManager {
                 created_at: created_at_secs,
                 last_active: last_active_secs,
                 metadata: info.metadata,
+                device_info: info.device_info.clone(),
+                serialization_format: info.serialization_format,
+                compression: info.compression,
             };
             (conn, trait_info)
         })
@@ -444,14 +531,12 @@ mod tests {
     use std::sync::Mutex;
 
     struct MockConnection {
-        observers: Mutex<Vec<ArcObserver>>,
         last_active: Mutex<Instant>,
     }
 
     impl MockConnection {
         fn new() -> Self {
             Self {
-                observers: Mutex::new(Vec::new()),
                 last_active: Mutex::new(Instant::now()),
             }
         }

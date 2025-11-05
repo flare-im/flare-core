@@ -83,14 +83,6 @@ struct SimpleConnectionHandler {
 }
 
 impl SimpleConnectionHandler {
-    fn new() -> Self {
-        Self {
-            message_handler: None,
-            on_connect: None,
-            on_disconnect: None,
-            handle: Arc::new(Mutex::new(None)),
-        }
-    }
 
     async fn set_handle(&self, handle: Arc<dyn ServerHandle>) {
         *self.handle.lock().await = Some(handle);
@@ -404,6 +396,18 @@ impl ServerBuilder {
     /// 设置 TLS 配置
     pub fn with_tls(mut self, tls: crate::common::config_types::TlsConfig) -> Self {
         self.config = self.config.with_tls(tls);
+        self
+    }
+
+    /// 设置默认序列化格式（用于协商，默认 Protobuf）
+    pub fn with_default_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {
+        self.config = self.config.with_format(format);
+        self
+    }
+
+    /// 设置默认压缩算法（用于协商，默认 None）
+    pub fn with_default_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+        self.config = self.config.with_compression(compression);
         self
     }
 

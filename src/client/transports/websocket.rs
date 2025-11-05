@@ -79,10 +79,10 @@ impl WebSocketClient {
 
         // 创建消息观察者，委托给 ClientCore
         let core_state_mgr = Arc::clone(&self.core.state_manager);
-        let core_parser = self.core.parser.clone();
+        let core_parser = Arc::clone(&self.core.parser); // Arc 可以安全克隆
         let core_observers = Arc::clone(&self.core.observers);
         let core_clone = Arc::new(self.core.clone()); // 用于记录 PONG
-        
+
         let message_observer = Arc::new(ClientMessageObserver {
             state_manager: core_state_mgr,
             parser: core_parser,
@@ -97,24 +97,11 @@ impl WebSocketClient {
 
         self.connection = Some(connection_arc.clone());
         
-        // 发送 CONNECT 消息
-        let mut metadata = std::collections::HashMap::new();
-        for (k, v) in &self.config.metadata {
-            metadata.insert(k.clone(), v.as_bytes().to_vec());
-        }
-        let connect_cmd = crate::common::protocol::connect(
-            self.config.serialization_format,
-            metadata,
-        );
-        let connect_frame = crate::common::protocol::frame_with_system_command(
-            connect_cmd,
-            crate::common::protocol::Reliability::AtLeastOnce,
-        );
-        
-        self.send_frame_internal(&connect_frame).await?;
+        // 使用 ClientCore 发送 CONNECT 消息进行协商
+        self.core.send_connect_message(connection_arc.clone()).await?;
 
         // 启动心跳（通过 ClientCore）
-        self.core.start_heartbeat(connection_arc);
+        self.core.start_heartbeat(connection_arc).await;
 
         self.core.handle_connection_event(&ConnectionEvent::Connected);
         self.reconnect_attempts = 0;
@@ -129,7 +116,8 @@ impl WebSocketClient {
             ));
         }
 
-        let data = self.core.parser.serialize(frame)?;
+        let parser = self.core.parser.lock().await;
+        let data = parser.serialize(frame)?;
         if let Some(ref conn) = self.connection {
             let mut c = conn.lock().await;
             c.send(&data).await?;
@@ -170,7 +158,7 @@ impl WebSocketClient {
 // 消息观察者，委托给 ClientCore
 struct ClientMessageObserver {
     state_manager: Arc<crate::client::connection::ConnectionStateManager>,
-    parser: crate::common::MessageParser,
+    parser: Arc<tokio::sync::Mutex<crate::common::MessageParser>>,
     observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
     core: Arc<ClientCore>,
 }
@@ -179,25 +167,13 @@ impl ConnectionObserver for ClientMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                // 解析消息
-                if let Ok(frame) = self.parser.parse(data) {
-                    // 检查是否是 PONG（心跳响应）
-                    if let Some(cmd) = &frame.command {
-                        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
-                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
-                                // 记录 PONG，更新心跳（通过 ClientCore）
-                                self.core.record_pong();
-                            }
-                        }
-                    }
-                    
-                    // 通知所有观察者
-                    if let Ok(observers) = self.observers.lock() {
-                        for observer in observers.iter() {
-                            observer.on_event(&ConnectionEvent::Message(data.clone()));
-                        }
-                    }
-                }
+                // 直接调用 ClientCore::handle_message 处理消息
+                // 它会在内部处理 CONNECT_ACK, PONG, KICKED 等系统命令
+                let core = Arc::clone(&self.core);
+                let data_clone = data.clone();
+                tokio::spawn(async move {
+                    core.handle_message(data_clone).await;
+                });
             }
             ConnectionEvent::Connected => {
                 self.state_manager.set_connected();

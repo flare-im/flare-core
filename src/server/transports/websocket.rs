@@ -3,19 +3,16 @@
 //! 专注于 WebSocket 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
 use crate::server::config::ServerConfig;
-use tracing::{debug, error};
-use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
+use tracing::debug;
+use crate::server::connection::ConnectionManager;
 use crate::common::error::Result;
-use crate::common::protocol::{Frame, pong};
 use crate::server::transports::{Server, ConnectionHandler};
 use crate::server::transports::server_core::ServerCore;
 use crate::server::handle::ServerHandle;
 use crate::common::{generate_id};
 use crate::transport::connection::Connection;
-use crate::transport::events::ConnectionEvent;
 use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -26,9 +23,8 @@ use tokio_tungstenite::accept_async;
 /// 专注于 WebSocket 协议层面的连接处理
 pub struct WebSocketServer {
     config: ServerConfig,
-    core: ServerCore,
+    core: Arc<ServerCore>,  // 改为 Arc，便于共享
     handler: Arc<dyn ConnectionHandler>,
-    listener: Option<TcpListener>,
     is_running: Arc<Mutex<bool>>,
 }
 
@@ -58,21 +54,30 @@ impl WebSocketServer {
         handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<ConnectionManager>>,
     ) -> Self {
-        let core = ServerCore::new(&config, connection_manager);
+        let core = Arc::new(ServerCore::new(&config, connection_manager));
         
         Self {
             config,
             core,
             handler,
-            listener: None,
             is_running: Arc::new(Mutex::new(false)),
         }
     }
     
-    /// 获取 ServerCore（用于内部访问）
-    fn core(&self) -> &ServerCore {
-        &self.core
+    /// 使用指定的 ServerCore 创建 WebSocket 服务端（用于共享 ServerCore）
+    pub fn with_shared_core(
+        config: ServerConfig,
+        handler: Arc<dyn ConnectionHandler>,
+        core: Arc<ServerCore>,
+    ) -> Self {
+        Self {
+            config,
+            core,
+            handler,
+            is_running: Arc::new(Mutex::new(false)),
+        }
     }
+    
 }
 
 #[async_trait]
@@ -98,6 +103,10 @@ impl Server for WebSocketServer {
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
         
+        // 直接使用 self.core 的 Arc，确保 device_manager 等配置正确传递
+        let core = Arc::clone(&self.core);
+        let core_clone = Arc::clone(&core);
+        
         tokio::spawn(async move {
             debug!("[DEBUG WebSocketServer] 开始监听连接");
             while *is_running.lock().await {
@@ -108,6 +117,7 @@ impl Server for WebSocketServer {
                         let manager_clone = Arc::clone(&manager);
                         let parser_clone = parser.clone();
                         let config_clone = config.clone();
+                        let core_clone = Arc::clone(&core_clone);
                         tokio::spawn(async move {
                             debug!("[DEBUG WebSocketServer] 连接处理任务开始");
                             handle_websocket_connection(
@@ -116,6 +126,7 @@ impl Server for WebSocketServer {
                                 manager_clone,
                                 parser_clone,
                                 config_clone,
+                                core_clone,
                             ).await;
                             debug!("[DEBUG WebSocketServer] 连接处理任务结束");
                         });
@@ -128,8 +139,8 @@ impl Server for WebSocketServer {
             debug!("[DEBUG WebSocketServer] 停止监听连接");
         });
         
-        // listener 已被 move，将其存储为 None（实际上不需要存储，但为了保持类型一致）
-        self.listener = None;
+        // listener 已在闭包中使用，不需要再存储
+        // self.listener = None; // 移除这行，因为 listener 已经在闭包中使用
         
         Ok(())
     }
@@ -150,7 +161,7 @@ impl Server for WebSocketServer {
                 let _ = c.close().await;
             }
             // 然后从连接管理器中移除
-            let _ = ServerHandle::disconnect(&self.core, &conn_id).await;
+            let _ = ServerHandle::disconnect(&*self.core, &conn_id).await;
         }
         
         Ok(())
@@ -177,6 +188,7 @@ async fn handle_websocket_connection(
     manager: Arc<ConnectionManager>,
     parser: crate::common::MessageParser,
     config: ServerConfig,
+    core: Arc<ServerCore>,
 ) {
     // WebSocket 服务端：不使用 TLS
     // accept_async 直接接受 TcpStream（无 TLS），返回 WebSocketStream<TcpStream>
@@ -222,15 +234,19 @@ async fn handle_websocket_connection(
     let manager_clone = Arc::clone(&manager);
     let parser_clone = parser.clone();
     let conn_id_clone = connection_id.clone();
-    let config_clone = config.clone();
+    let core_clone = Arc::clone(&core);
     
-    let observer = Arc::new(ServerMessageObserver {
-        handler: handler_clone,
-        manager: manager_clone,
-        parser: parser_clone,
-        connection_id: conn_id_clone.clone(),
-        config: config_clone,
-    });
+    let device_manager = core.device_manager();
+    let event_handler = core.event_handler();
+    let observer = Arc::new(crate::server::events::DefaultServerMessageObserver::new(
+        handler_clone,
+        manager_clone,
+        parser_clone,
+        conn_id_clone.clone(),
+        core_clone,
+        device_manager,
+        event_handler, // 从 ServerCore 获取事件处理器
+    ));
 
     // 获取连接并添加观察者
     debug!("[DEBUG WebSocketServer] handle_websocket_connection: 准备获取连接并添加观察者");
@@ -243,23 +259,7 @@ async fn handle_websocket_connection(
             c.add_observer(observer);
             debug!("[DEBUG WebSocketServer] handle_websocket_connection: 观察者已添加");
             
-            // 发送 CONNECT_ACK
-            debug!("[DEBUG WebSocketServer] handle_websocket_connection: 准备发送 CONNECT_ACK");
-            let mut metadata = HashMap::new();
-            let format_bytes = format!("{:?}", config.default_serialization_format).into_bytes();
-            metadata.insert("format".to_string(), format_bytes);
-            let connect_ack_cmd = crate::common::protocol::connect_ack(config.default_serialization_format, metadata);
-            let connect_ack_frame = crate::common::protocol::frame_with_system_command(
-                connect_ack_cmd,
-                crate::common::protocol::Reliability::AtLeastOnce,
-            );
-            if let Ok(data) = parser.serialize(&connect_ack_frame) {
-                debug!("[DEBUG WebSocketServer] handle_websocket_connection: CONNECT_ACK 序列化成功，准备发送");
-                let _ = c.send(&data).await;
-                debug!("[DEBUG WebSocketServer] handle_websocket_connection: CONNECT_ACK 已发送");
-            } else {
-                debug!("[DEBUG WebSocketServer] handle_websocket_connection: CONNECT_ACK 序列化失败");
-            }
+            // 注意：CONNECT_ACK 将在收到 CONNECT 消息后发送（在 ServerMessageObserver 中处理）
         }
         debug!("[DEBUG WebSocketServer] handle_websocket_connection: 连接锁已释放");
 
@@ -276,138 +276,4 @@ async fn handle_websocket_connection(
     // 函数返回后，连接处理任务继续在后台运行
 }
 
-struct ServerMessageObserver {
-    handler: Arc<dyn ConnectionHandler>,
-    manager: Arc<ConnectionManager>,
-    parser: crate::common::MessageParser,
-    connection_id: String,
-    config: ServerConfig,
-}
-
-impl crate::transport::events::ConnectionObserver for ServerMessageObserver {
-    fn on_event(&self, event: &ConnectionEvent) {
-        match event {
-            ConnectionEvent::Message(data) => {
-                if let Ok(frame) = self.parser.parse(data) {
-                    // 处理 PING 消息
-                    if let Some(cmd) = &frame.command {
-                        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
-                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Ping as i32 {
-                                // 收到 PING，回复 PONG 并更新连接活跃时间
-                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                                let conn_id = self.connection_id.clone();
-                                
-                                // 更新连接活跃时间（通过 trait 的异步方法）
-                                let manager_update = Arc::clone(&manager);
-                                let conn_id_update = conn_id.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager_update.update_connection_active(&conn_id_update).await;
-                                });
-                                
-                                // 回复 PONG
-                                let pong_cmd = pong();
-                                let pong_frame = crate::common::protocol::frame_with_system_command(
-                                    pong_cmd,
-                                    crate::common::protocol::Reliability::AtLeastOnce,
-                                );
-                                if let Ok(pong_data) = self.parser.serialize(&pong_frame) {
-                                    let manager_get = Arc::clone(&manager);
-                                    tokio::spawn(async move {
-                                        if let Some((conn, _)) = manager_get.get_connection(&conn_id).await {
-                                            let conn_clone = Arc::clone(&conn);
-                                            let mut c = conn_clone.lock().await;
-                                            let _ = c.send(&pong_data).await;
-                                        }
-                                    });
-                                }
-                                return;
-                            }
-                            if sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::Pong as i32 {
-                                // 收到 PONG，更新连接活跃时间
-                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                                let conn_id = self.connection_id.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager.update_connection_active(&conn_id).await;
-                                });
-                                return;
-                            }
-                        }
-                    }
-
-                    // 处理其他消息 - 更新连接活跃时间
-                    let handler = Arc::clone(&self.handler);
-                    let manager = Arc::clone(&self.manager);
-                    let parser = self.parser.clone();
-                    let conn_id = self.connection_id.clone();
-                    
-                    // 更新连接活跃时间（收到任何消息都算活跃）
-                    let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                    let conn_id_update = conn_id.clone();
-                    tokio::spawn(async move {
-                        let _ = manager_update.update_connection_active(&conn_id_update).await;
-                    });
-                    
-                    tokio::spawn(async move {
-                        if let Ok(Some(response)) = handler.handle_frame(&frame, &conn_id).await {
-                            // 发送回复
-                            let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                            if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                                if let Ok(data) = parser.serialize(&response) {
-                                    let conn_clone = Arc::clone(&conn);
-                                    let mut c = conn_clone.lock().await;
-                                    let _ = c.send(&data).await;
-                                }
-                            }
-                        }
-                        // 连接活跃时间已在收到消息时更新
-                    });
-                }
-            }
-            ConnectionEvent::Disconnected(_) => {
-                let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                
-                debug!("[WebSocketServer] Connection disconnected: {}", conn_id);
-                tokio::spawn(async move {
-                    // 通知连接断开
-                    let _ = handler.on_disconnect(&conn_id).await;
-                    // 立即从连接管理器中移除连接
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!("[WebSocketServer] Successfully removed connection: {}", conn_id);
-                        }
-                        Err(e) => {
-                            debug!("[WebSocketServer] Connection {} already removed or not found: {}", conn_id, e);
-                        }
-                    }
-                });
-            }
-            ConnectionEvent::Connected => {
-                // 连接已建立（在 handle_websocket_connection 中已处理）
-            }
-            ConnectionEvent::Error(e) => {
-                error!("Connection error for {}: {:?}", self.connection_id, e);
-                // 连接出错时，立即从管理器中移除连接（避免连接一直存在）
-                let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                
-                debug!("[WebSocketServer] Connection error detected, removing connection: {}", conn_id);
-                tokio::spawn(async move {
-                    // 通知连接断开
-                    let _ = handler.on_disconnect(&conn_id).await;
-                    // 从连接管理器中移除（如果连接存在）
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!("[WebSocketServer] Successfully removed connection after error: {}", conn_id);
-                        }
-                        Err(e) => {
-                            debug!("[WebSocketServer] Connection {} already removed or not found after error: {}", conn_id, e);
-                        }
-                    }
-                });
-            }
-        }
-    }
-}
+// 旧的 ServerMessageObserver 已移除，现在使用 DefaultServerMessageObserver

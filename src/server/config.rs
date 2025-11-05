@@ -3,6 +3,7 @@
 use crate::common::config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
 use crate::common::protocol::SerializationFormat;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::device::DeviceConflictStrategy;
 use std::time::Duration;
 
 /// 服务端配置
@@ -31,6 +32,8 @@ pub struct ServerConfig {
     pub tls: TlsConfig,
     /// 消息大小限制（字节）
     pub max_message_size: usize,
+    /// 设备冲突策略（用于多端设备管理）
+    pub device_conflict_strategy: DeviceConflictStrategy,
 }
 
 impl Default for ServerConfig {
@@ -47,6 +50,7 @@ impl Default for ServerConfig {
             default_heartbeat: HeartbeatConfig::default(),
             tls: TlsConfig::none(),
             max_message_size: 10 * 1024 * 1024, // 10MB
+            device_conflict_strategy: DeviceConflictStrategy::default(),
         }
     }
 }
@@ -150,8 +154,10 @@ impl ServerConfig {
         }
     }
 
-    /// 获取心跳间隔（向后兼容）
-    pub fn heartbeat_interval(&self) -> Duration {
-        self.default_heartbeat.interval
+    
+    /// 设置设备冲突策略
+    pub fn with_device_conflict_strategy(mut self, strategy: DeviceConflictStrategy) -> Self {
+        self.device_conflict_strategy = strategy;
+        self
     }
 }

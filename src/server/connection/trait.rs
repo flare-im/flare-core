@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
 
-/// 连接信息
+/// 连接信息（Trait 版本，用于跨异步边界传递）
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     /// 连接 ID（唯一标识符）
@@ -25,6 +25,12 @@ pub struct ConnectionInfo {
     pub last_active: u64,
     /// 连接元数据
     pub metadata: std::collections::HashMap<String, String>,
+    /// 设备信息（如果已提供）
+    pub device_info: Option<crate::common::device::DeviceInfo>,
+    /// 序列化格式（由客户端协商决定）
+    pub serialization_format: crate::common::protocol::SerializationFormat,
+    /// 压缩算法（由客户端协商决定）
+    pub compression: crate::common::compression::CompressionAlgorithm,
 }
 
 /// 连接管理器抽象 trait
@@ -91,17 +97,35 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// # 参数
     /// - `connection_id`: 连接 ID
     /// - `frame`: 要发送的 Frame
-    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则从连接的协商信息创建）
     /// 
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
+    /// 
+    /// # 注意
+    /// 如果 parser 为 None，将从连接的 ConnectionInfo 中获取协商后的序列化格式和压缩算法创建 parser
     async fn send_frame_to(
         &self,
         connection_id: &str,
         frame: &Frame,
-        parser: &MessageParser,
+        parser: Option<&MessageParser>,
     ) -> Result<()> {
-        let data = parser.serialize(frame)?;
+        // 如果提供了 parser，使用它；否则从连接的协商信息创建 parser
+        let data = if let Some(p) = parser {
+            p.serialize(frame)?
+        } else {
+            // 从连接的协商信息创建 parser
+            if let Some((_, info)) = self.get_connection(connection_id).await {
+                let connection_parser = MessageParser::new(
+                    info.serialization_format,
+                    info.compression,
+                );
+                connection_parser.serialize(frame)?
+            } else {
+                // 如果连接不存在，使用默认 JSON parser
+                MessageParser::json().serialize(frame)?
+            }
+        };
         self.send_to_connection(connection_id, &data).await?;
         self.update_connection_active(connection_id).await?;
         Ok(())
@@ -112,7 +136,7 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// # 参数
     /// - `user_id`: 用户 ID
     /// - `frame`: 要发送的 Frame
-    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
     /// 
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
@@ -120,10 +144,11 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         &self,
         user_id: &str,
         frame: &Frame,
-        parser: &MessageParser,
+        parser: Option<&MessageParser>,
     ) -> Result<()> {
         let connection_ids = self.get_user_connections(user_id).await;
         for conn_id in connection_ids {
+            // 为每个连接使用其协商的格式（如果 parser 为 None）
             let _ = self.send_frame_to(&conn_id, frame, parser).await;
         }
         Ok(())
@@ -133,17 +158,18 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// 
     /// # 参数
     /// - `frame`: 要广播的 Frame
-    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
     /// 
     /// # 返回
     /// 广播成功返回 `Ok(())`，失败返回错误
     async fn broadcast_frame(
         &self,
         frame: &Frame,
-        parser: &MessageParser,
+        parser: Option<&MessageParser>,
     ) -> Result<()> {
         let connection_ids = self.list_connections().await;
         for conn_id in connection_ids {
+            // 为每个连接使用其协商的格式（如果 parser 为 None）
             let _ = self.send_frame_to(&conn_id, frame, parser).await;
         }
         Ok(())
@@ -154,7 +180,7 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// # 参数
     /// - `frame`: 要广播的 Frame
     /// - `exclude_connection_id`: 要排除的连接 ID
-    /// - `parser`: 消息解析器，用于序列化 Frame
+    /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
     /// 
     /// # 返回
     /// 广播成功返回 `Ok(())`，失败返回错误
@@ -162,11 +188,12 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         &self,
         frame: &Frame,
         exclude_connection_id: &str,
-        parser: &MessageParser,
+        parser: Option<&MessageParser>,
     ) -> Result<()> {
         let connection_ids = self.list_connections().await;
         for conn_id in connection_ids {
             if conn_id != exclude_connection_id {
+                // 为每个连接使用其协商的格式（如果 parser 为 None）
                 let _ = self.send_frame_to(&conn_id, frame, parser).await;
             }
         }

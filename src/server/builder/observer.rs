@@ -6,7 +6,6 @@ use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::server::{ServerConfig, ConnectionHandler, HybridServer, Server};
 use crate::server::connection::ConnectionManager;
-use crate::server::transports::server_core::ServerCore;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -17,6 +16,8 @@ pub struct ObserverServerBuilder {
     config: ServerConfig,
     handler: Option<Arc<dyn ConnectionHandler>>,
     connection_manager: Option<Arc<ConnectionManager>>,
+    device_manager: Option<Arc<crate::server::device::DeviceManager>>,
+    event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
 }
 
 impl ObserverServerBuilder {
@@ -26,7 +27,21 @@ impl ObserverServerBuilder {
             config: ServerConfig::new(bind_address.into()),
             handler: None,
             connection_manager: None,
+            device_manager: None,
+            event_handler: None,
         }
+    }
+    
+    /// 设置设备管理器（用于设备冲突管理）
+    pub fn with_device_manager(mut self, device_manager: Arc<crate::server::device::DeviceManager>) -> Self {
+        self.device_manager = Some(device_manager);
+        self
+    }
+
+    /// 设置事件处理器（可选，用于细化的命令处理）
+    pub fn with_event_handler(mut self, event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>) -> Self {
+        self.event_handler = Some(event_handler);
+        self
     }
 
     /// 设置连接处理器（必须）
@@ -77,20 +92,42 @@ impl ObserverServerBuilder {
         self
     }
 
+    /// 设置默认序列化格式（用于协商，默认 Protobuf）
+    pub fn with_default_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {
+        self.config = self.config.with_format(format);
+        self
+    }
+
+    /// 设置默认压缩算法（用于协商，默认 None）
+    pub fn with_default_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+        self.config = self.config.with_compression(compression);
+        self
+    }
+
     /// 构建服务端
     pub fn build(self) -> Result<ObserverServer> {
         let handler = self.handler.ok_or_else(|| {
             crate::common::error::FlareError::general_error("Handler is required")
         })?;
 
+        // 在创建 HybridServer 时就传入设备管理器和事件处理器
+        // 这样确保 ServerCore 在创建时就有正确的配置，避免后续修改 Arc 的问题
         let server = if let Some(manager) = self.connection_manager {
             HybridServer::with_connection_manager(
                 self.config,
                 handler,
                 Some(manager),
+                self.device_manager,
+                self.event_handler,
             )?
         } else {
-            HybridServer::new(self.config, handler)?
+            HybridServer::with_connection_manager(
+                self.config,
+                handler,
+                None,
+                self.device_manager,
+                self.event_handler,
+            )?
         };
 
         Ok(ObserverServer {
@@ -186,17 +223,15 @@ impl ObserverServer {
         })
     }
     
-    /// 获取连接管理器和消息解析器（用于创建 DefaultServerHandle）
+    /// 获取连接管理器（用于创建 DefaultServerHandle）
     /// 
     /// # 返回
-    /// 返回 (ConnectionManagerTrait, MessageParser) 元组
-    pub fn get_server_handle_components(&self) -> Option<(Arc<dyn crate::server::connection::ConnectionManagerTrait>, crate::common::MessageParser)> {
+    /// 返回 ConnectionManagerTrait
+    pub fn get_server_handle_components(&self) -> Option<Arc<dyn crate::server::connection::ConnectionManagerTrait>> {
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
             if let Some(core) = s.core() {
-                let manager_trait = core.connection_manager_trait();
-                let parser = core.parser.clone();
-                Some((manager_trait, parser))
+                Some(core.connection_manager_trait())
             } else {
                 None
             }
