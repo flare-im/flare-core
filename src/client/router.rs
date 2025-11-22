@@ -114,39 +114,42 @@ impl MessageRouter {
         if let Some(ref command) = frame.command {
             match &command.r#type {
                 Some(crate::common::protocol::command::Type::System(sys_cmd)) => {
-                    // SystemCommand 的 type 是 i32，需要使用 from_i32 转换
+                    // SystemCommand 的 type 是 i32，使用 TryFrom 替代已弃用的 from_i32
                     use crate::common::protocol::system_command::Type as SysType;
-                    match SysType::from_i32(sys_cmd.r#type) {
-                        Some(SysType::Connect) => "system.connect".to_string(),
-                        Some(SysType::ConnectAck) => "system.connect_ack".to_string(),
-                        Some(SysType::Close) => "system.close".to_string(),
-                        Some(SysType::Ping) => "system.ping".to_string(),
-                        Some(SysType::Pong) => "system.pong".to_string(),
-                        Some(SysType::Error) => "system.error".to_string(),
-                        Some(SysType::Event) => "system.event".to_string(),
-                        Some(SysType::Auth) => "system.auth".to_string(),
-                        Some(SysType::AuthAck) => "system.auth_ack".to_string(),
+                    use std::convert::TryFrom;
+                    match SysType::try_from(sys_cmd.r#type) {
+                        Ok(SysType::Connect) => "system.connect".to_string(),
+                        Ok(SysType::ConnectAck) => "system.connect_ack".to_string(),
+                        Ok(SysType::Close) => "system.close".to_string(),
+                        Ok(SysType::Ping) => "system.ping".to_string(),
+                        Ok(SysType::Pong) => "system.pong".to_string(),
+                        Ok(SysType::Error) => "system.error".to_string(),
+                        Ok(SysType::Event) => "system.event".to_string(),
+                        Ok(SysType::Auth) => "system.auth".to_string(),
+                        Ok(SysType::AuthAck) => "system.auth_ack".to_string(),
                         _ => "system.unknown".to_string(),
                     }
                 }
                 Some(crate::common::protocol::command::Type::Message(msg_cmd)) => {
-                    // 使用消息类型作为路由键
+                    // 使用消息类型作为路由键（使用 TryFrom 替代已弃用的 from_i32）
                     use crate::common::protocol::message_command::Type as MsgType;
-                    match MsgType::from_i32(msg_cmd.r#type) {
-                        Some(MsgType::Send) => "message.send".to_string(),
-                        Some(MsgType::Ack) => "message.ack".to_string(),
-                        Some(MsgType::Data) => "message.data".to_string(),
+                    use std::convert::TryFrom;
+                    match MsgType::try_from(msg_cmd.r#type) {
+                        Ok(MsgType::Send) => "message.send".to_string(),
+                        Ok(MsgType::Ack) => "message.ack".to_string(),
+                        Ok(MsgType::Data) => "message.data".to_string(),
                         _ => format!("message.{}", msg_cmd.r#type),
                     }
                 }
                 Some(crate::common::protocol::command::Type::Notification(notif_cmd)) => {
                     use crate::common::protocol::notification_command::Type as NotifType;
-                    match NotifType::from_i32(notif_cmd.r#type) {
-                        Some(NotifType::System) => "notification.system".to_string(),
-                        Some(NotifType::Broadcast) => "notification.broadcast".to_string(),
-                        Some(NotifType::Alert) => "notification.alert".to_string(),
-                        Some(NotifType::User) => "notification.user".to_string(),
-                        Some(NotifType::Connection) => "notification.connection".to_string(),
+                    use std::convert::TryFrom;
+                    match NotifType::try_from(notif_cmd.r#type) {
+                        Ok(NotifType::System) => "notification.system".to_string(),
+                        Ok(NotifType::Broadcast) => "notification.broadcast".to_string(),
+                        Ok(NotifType::Alert) => "notification.alert".to_string(),
+                        Ok(NotifType::User) => "notification.user".to_string(),
+                        Ok(NotifType::Connection) => "notification.connection".to_string(),
                         _ => format!("notification.{}", notif_cmd.r#type),
                     }
                 }

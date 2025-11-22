@@ -34,6 +34,7 @@ pub struct ClientConnectionManager {
     /// 心跳管理器
     heartbeat_manager: Arc<Mutex<Option<HeartbeatManager>>>,
     /// 消息解析器
+    #[allow(dead_code)] // 保留用于未来扩展
     parser: MessageParser,
     /// 观察者列表
     observers: Arc<StdMutex<Vec<ArcObserver>>>,
@@ -147,7 +148,7 @@ impl ClientConnectionManager {
                self.config.heartbeat.interval,
                self.config.heartbeat.timeout);
 
-        let mut heartbeat = HeartbeatManager::new(
+        let heartbeat = HeartbeatManager::new(
             self.config.heartbeat.interval,
             self.config.heartbeat.timeout,
         );
@@ -224,7 +225,7 @@ impl ClientConnectionManager {
                         
                         // 重新启动心跳
                         if heartbeat_cfg.enabled {
-                            let mut hb_mgr = heartbeat_mgr.lock().await;
+                            let _hb_mgr = heartbeat_mgr.lock().await;
                             // 重新创建心跳管理器
                             // 注意：这里简化了，实际应该从 Client 获取 Connection
                         }

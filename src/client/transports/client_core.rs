@@ -123,7 +123,7 @@ impl ClientCore {
     
     /// 停止心跳
     pub fn stop_heartbeat(&mut self) {
-        if let Some(ref heartbeat) = self.heartbeat_manager {
+        if let Some(ref _heartbeat) = self.heartbeat_manager {
             // 需要获取锁来停止心跳
             // 但由于 stop_heartbeat 是 &mut self，我们可以直接 take
             if let Some(mut hb) = self.heartbeat_manager.take() {
@@ -533,13 +533,14 @@ impl ClientCore {
     pub fn handle_connect_ack(&self, frame: &Frame) -> Result<(crate::common::protocol::SerializationFormat, crate::common::compression::CompressionAlgorithm)> {
         if let Some(cmd) = &frame.command {
             if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
-                use prost::Enumeration;
-                let cmd_type = crate::common::protocol::flare::core::commands::system_command::Type::from_i32(sys_cmd.r#type)
-                    .ok_or_else(|| crate::common::error::FlareError::protocol_error("Invalid system command type".to_string()))?;
+                // 使用 TryFrom 替代已弃用的 from_i32
+                use std::convert::TryFrom;
+                let cmd_type = crate::common::protocol::flare::core::commands::system_command::Type::try_from(sys_cmd.r#type)
+                    .map_err(|_| crate::common::error::FlareError::protocol_error("Invalid system command type".to_string()))?;
                 
                 if cmd_type == crate::common::protocol::flare::core::commands::system_command::Type::ConnectAck {
-                    // 解析协商结果
-                    let format = crate::common::protocol::SerializationFormat::from_i32(sys_cmd.format)
+                    // 解析协商结果（使用 TryFrom 替代已弃用的 from_i32）
+                    let format = crate::common::protocol::SerializationFormat::try_from(sys_cmd.format)
                         .unwrap_or(crate::common::protocol::SerializationFormat::Json);
                     
                     // 从 metadata 中解析压缩算法

@@ -158,6 +158,7 @@ impl WebSocketClient {
 // 消息观察者，委托给 ClientCore
 struct ClientMessageObserver {
     state_manager: Arc<crate::client::connection::ConnectionStateManager>,
+    #[allow(dead_code)] // 保留用于未来扩展
     parser: Arc<tokio::sync::Mutex<crate::common::MessageParser>>,
     observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
     core: Arc<ClientCore>,

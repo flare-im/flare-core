@@ -280,7 +280,7 @@ impl ServerCore {
             self.default_compression
         };
         
-        info!(
+        debug!(
             "[ServerCore] 📥 收到 CONNECT 消息: connection_id={}",
             connection_id
         );
@@ -391,7 +391,7 @@ impl ServerCore {
                 };
                 
                 if let Some(token) = token {
-                    info!(
+                    debug!(
                         "[ServerCore] 🔐 开始验证 token: connection_id={}",
                         connection_id
                     );
@@ -410,7 +410,7 @@ impl ServerCore {
                     ).await {
                         Ok(auth_result) => {
                             if auth_result.authenticated {
-                                info!(
+                                debug!(
                                     "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}",
                                     connection_id,
                                     auth_result.user_id
@@ -496,7 +496,7 @@ impl ServerCore {
             error!("[ServerCore] 标记连接为已验证失败: {}", e);
         } else {
             if auth_enabled {
-                info!(
+                debug!(
                     "[ServerCore] ✅ 连接已标记为已验证（认证通过）: connection_id={}, user_id={:?}",
                     connection_id,
                     auth_user_id
@@ -566,7 +566,7 @@ impl ServerCore {
         // 记录最终协商结果
         let final_format = negotiation_parser.default_format();
         let final_compression = negotiation_parser.default_compression();
-        info!(
+        debug!(
             "[ServerCore] ✅ 协商完成: connection_id={}, 最终序列化方式={:?}, 最终压缩方式={:?}",
             connection_id,
             final_format,

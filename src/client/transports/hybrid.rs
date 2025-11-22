@@ -284,6 +284,7 @@ impl HybridClient {
     }
     
     /// 解析基础 URL，提取主机和端口
+    #[allow(dead_code)] // 保留用于未来扩展
     fn parse_base_url(url: &str) -> (String, u16) {
         let url = url
             .trim_start_matches("ws://")

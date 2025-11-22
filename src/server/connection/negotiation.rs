@@ -52,8 +52,9 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
         if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
             use crate::common::protocol::flare::core::commands::system_command::Type as SystemType;
             if sys_cmd.r#type == SystemType::Connect as i32 {
-                // 解析序列化格式
-                result.serialization_format = SerializationFormat::from_i32(sys_cmd.format)
+                // 解析序列化格式（使用 TryFrom 替代已弃用的 from_i32）
+                use std::convert::TryFrom;
+                result.serialization_format = SerializationFormat::try_from(sys_cmd.format)
                     .unwrap_or(SerializationFormat::Json);
                 
                 // 解析压缩算法（从 metadata 中）

@@ -105,7 +105,7 @@ impl SimpleClient {
     /// 获取 ClientCore（用于访问路由等功能）
     pub fn core(&self) -> Option<std::sync::Arc<crate::client::transports::ClientCore>> {
         tokio::task::block_in_place(|| {
-            let client = self.client.blocking_lock();
+            let _client = self.client.blocking_lock();
             // 注意：HybridClient 的 core() 返回 &ClientCore，我们需要包装
             // 但实际上，由于 ClientCore 不可克隆完整（心跳管理器不克隆），
             // 这里暂时返回 None，或者我们可以通过其他方式访问
