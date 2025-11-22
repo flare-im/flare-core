@@ -6,6 +6,7 @@
 //! - 压缩/序列化：可扩展的压缩和序列化框架
 //! - 消息处理：消息解析和处理机制
 //! - 连接管理：连接存储和查询
+//! - 会话ID生成：客户端和服务端通用的会话ID生成和验证
 //! - 工具函数：常用工具和常量
 
 pub mod cert;
@@ -17,6 +18,7 @@ pub mod error;
 pub mod message;
 pub mod protocol;
 pub mod serializer;
+pub mod session_id;
 pub mod utils;
 
 // 重新导出常用类型和函数，方便使用
@@ -29,4 +31,5 @@ pub use error::{FlareError, Result, ClientError, ServerError, ErrorCode, ErrorBu
 pub use message::{MessageParser, MessageHandler, MessageObserver, MessageEvent, ArcMessageObserver};
 pub use protocol::{Frame, Command, SystemCommand, MessageCommand, NotificationCommand, CustomCommand, Reliability, SerializationFormat};
 pub use serializer::{Serializer, SerializationUtil};
+pub use session_id::*;
 pub use utils::*;

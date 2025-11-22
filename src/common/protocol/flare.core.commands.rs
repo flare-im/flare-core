@@ -26,9 +26,9 @@ pub mod command {
         Custom(super::CustomCommand),
     }
 }
-/// ---
-///
-/// ## 系统命令
+/// ------------------------------------------------------------
+/// 系统命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -171,9 +171,9 @@ pub mod system_command {
         }
     }
 }
-/// ---
-///
-/// ## 消息命令
+/// ------------------------------------------------------------
+/// 消息命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -243,9 +243,9 @@ pub mod message_command {
         }
     }
 }
-/// ---
-///
-/// ## 通知命令
+/// ------------------------------------------------------------
+/// 通知命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -320,9 +320,9 @@ pub mod notification_command {
         }
     }
 }
-/// ---
-///
-/// ## 自定义命令
+/// ------------------------------------------------------------
+/// 自定义命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
