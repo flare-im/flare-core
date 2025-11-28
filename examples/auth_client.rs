@@ -350,6 +350,7 @@ impl ConnectionObserver for AuthChatObserverWithErrorFlag {
             
             ConnectionEvent::Message(data) => {
                 // 解析消息：MessageParser 支持自动检测格式（JSON/Protobuf）
+                // 默认使用JSON格式，parse()会自动检测实际格式
                 let parser = flare_core::common::MessageParser::json();
                 
                 match parser.parse(data) {

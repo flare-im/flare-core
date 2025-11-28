@@ -108,6 +108,7 @@ pub mod quic;
 pub mod hybrid;
 pub mod websocket;
 pub mod client_core;
+mod common;
 
 // 重新导出常用类型
 pub use quic::QUICClient;

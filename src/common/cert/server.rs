@@ -28,9 +28,63 @@ fn default_key_path() -> &'static Path {
     Path::new("certs/server.key")
 }
 
+/// 自动生成证书（如果不存在）
+fn ensure_certificates_exist() -> Result<()> {
+    use std::fs;
+    
+    let cert_path = default_cert_path();
+    let key_path = default_key_path();
+    
+    // 如果证书文件不存在，自动生成
+    if !cert_path.exists() || !key_path.exists() {
+        // 确保证书目录存在
+        if let Some(parent) = cert_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| FlareError::protocol_error(
+                    format!("Failed to create certs directory: {}", e)
+                ))?;
+        }
+        
+        // 生成证书
+        let subject_alt_names = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        
+        let certified_key = rcgen::generate_simple_self_signed(subject_alt_names)
+            .map_err(|e| FlareError::protocol_error(
+                format!("Failed to generate certificate: {}", e)
+            ))?;
+        
+        let cert_der = certified_key.cert.der().to_vec();
+        let key_der = certified_key.signing_key.serialize_der();
+        
+        // 保存证书
+        fs::write(cert_path, &cert_der)
+            .map_err(|e| FlareError::protocol_error(
+                format!("Failed to write certificate file: {}", e)
+            ))?;
+        
+        // 保存私钥
+        fs::write(key_path, &key_der)
+            .map_err(|e| FlareError::protocol_error(
+                format!("Failed to write private key file: {}", e)
+            ))?;
+        
+        tracing::info!("✅ 自动生成证书: certs/server.crt 和 certs/server.key");
+    }
+    
+    Ok(())
+}
+
 /// 获取服务器证书的 DER 格式字节数组
 /// 从默认路径 certs/server.crt 加载证书（带缓存）
+/// 如果证书不存在，会自动生成
 pub fn get_server_cert_der() -> Result<Vec<u8>> {
+    // 确保证书存在
+    ensure_certificates_exist()?;
+    
     let mut cache = CERT_DER_CACHE.lock().unwrap();
     
     if let Some(ref cert_der) = *cache {
@@ -47,7 +101,11 @@ pub fn get_server_cert_der() -> Result<Vec<u8>> {
 
 /// 获取服务器私钥的 DER 格式字节数组
 /// 从默认路径 certs/server.key 加载私钥（带缓存）
+/// 如果私钥不存在，会自动生成
 pub fn get_server_key_der() -> Result<Vec<u8>> {
+    // 确保证书存在
+    ensure_certificates_exist()?;
+    
     let mut cache = KEY_DER_CACHE.lock().unwrap();
     
     if let Some(ref key_der) = *cache {

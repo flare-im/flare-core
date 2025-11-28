@@ -13,7 +13,6 @@ lazy_static::lazy_static! {
     /// 全局压缩器注册表
     static ref COMPRESSION_REGISTRY: CompressionRegistry = {
         let registry = CompressionRegistry::new();
-        // 注册内置压缩器
         registry.register_defaults();
         registry
     };
@@ -75,7 +74,7 @@ impl CompressionRegistry {
         self.compressors
             .read()
             .ok()
-            .and_then(|compressors| compressors.get(name).map(|c| Arc::clone(c)))
+            .and_then(|compressors| compressors.get(name).map(Arc::clone))
     }
 
     /// 根据算法类型查找压缩器
@@ -83,23 +82,44 @@ impl CompressionRegistry {
         self.find(algorithm.as_str())
     }
 
+    /// 检查压缩器是否已注册
+    /// 
+    /// # 参数
+    /// - `name`: 压缩器名称
+    /// 
+    /// # 返回
+    /// 如果已注册返回 `true`，否则返回 `false`
+    pub fn is_registered(&self, name: &str) -> bool {
+        self.compressors
+            .read()
+            .map(|compressors| compressors.contains_key(name))
+            .unwrap_or(false)
+    }
+
     /// 尝试自动检测压缩算法
     /// 
     /// 遍历所有注册的压缩器，使用 `can_detect` 方法检测
     pub fn auto_detect(&self, data: &[u8]) -> Option<Arc<dyn Compressor>> {
-        if let Ok(compressors) = self.compressors.read() {
-            for compressor in compressors.values() {
-                if compressor.can_detect(data) {
-                    return Some(Arc::clone(compressor));
-                }
-            }
-        }
-        None
+        self.compressors
+            .read()
+            .ok()
+            .and_then(|compressors| {
+                compressors
+                    .values()
+                    .find(|compressor| compressor.can_detect(data))
+                    .map(Arc::clone)
+            })
     }
 
     /// 获取全局注册表实例
     pub fn global() -> &'static CompressionRegistry {
         &COMPRESSION_REGISTRY
+    }
+}
+
+impl Default for CompressionRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -131,6 +151,17 @@ impl CompressionUtil {
     pub fn decompress(data: &[u8], algorithm: CompressionAlgorithm) -> Result<Vec<u8>> {
         let compressor = Self::get_compressor(algorithm);
         compressor.decompress(data)
+    }
+
+    /// 检查压缩器是否已注册
+    /// 
+    /// # 参数
+    /// - `name`: 压缩器名称
+    /// 
+    /// # 返回
+    /// 如果已注册返回 `true`，否则返回 `false`
+    pub fn is_registered(name: &str) -> bool {
+        CompressionRegistry::global().is_registered(name)
     }
 
     /// 尝试自动检测压缩算法并解压
@@ -190,4 +221,3 @@ mod tests {
         assert_eq!(compressor.unwrap().algorithm(), CompressionAlgorithm::Gzip);
     }
 }
-

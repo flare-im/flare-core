@@ -29,11 +29,8 @@ impl ConnectionObserver for ChatObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                // 解析接收到的消息
-                if let Ok(frame) = flare_core::common::MessageParser::new(
-                    flare_core::common::protocol::SerializationFormat::Protobuf,
-                    flare_core::common::compression::CompressionAlgorithm::None,
-                ).parse(data) {
+                // 解析接收到的消息（默认使用JSON，parse()会自动检测实际格式）
+                if let Ok(frame) = flare_core::common::MessageParser::json().parse(data) {
                     if let Some(cmd) = &frame.command {
                         if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
                             let message = String::from_utf8_lossy(&msg_cmd.payload);
@@ -100,9 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("正在连接到聊天室服务器...");
     
     // 使用 quic:// 协议
+    // 不指定格式，将使用服务端默认JSON（客户端可以在协商时指定格式）
     let quic_config = ClientConfig::new("quic://127.0.0.1:8081".to_string())
-        .quic()
-        .with_format(flare_core::common::protocol::SerializationFormat::Protobuf);
+        .quic();
+        // 可选：指定序列化格式（如果不指定，使用服务端默认JSON）
+        // .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
     
     match HybridClient::connect_with_config(quic_config).await {
         Ok(mut quic_client) => {

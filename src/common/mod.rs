@@ -9,13 +9,16 @@
 //! - 会话ID生成：客户端和服务端通用的会话ID生成和验证
 //! - 工具函数：常用工具和常量
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cert;
 pub mod compression;
 pub mod config_types;
 pub mod constants;
 pub mod device;
+pub mod encryption;
 pub mod error;
 pub mod message;
+pub mod message_observer;
 pub mod protocol;
 pub mod serializer;
 pub mod session_id;
@@ -27,8 +30,16 @@ pub use compression::{Compressor, CompressionAlgorithm, CompressionUtil};
 pub use config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
 pub use constants::*;
 pub use device::{DevicePlatform, DeviceInfo, DeviceConflictStrategy, DeviceConflictStrategyBuilder};
+pub use encryption::{Encryptor, EncryptionAlgorithm, EncryptionUtil};
 pub use error::{FlareError, Result, ClientError, ServerError, ErrorCode, ErrorBuilder};
-pub use message::{MessageParser, MessageHandler, MessageObserver, MessageEvent, ArcMessageObserver};
+pub use message::{
+    MessageParser, MessageHandler, MessageEvent,
+    MessagePipeline, MessageContext, MessageMiddleware, MessageProcessor,
+    ArcMessageMiddleware, ArcMessageProcessor,
+    FunctionProcessor, DelegateProcessor,
+    LoggingMiddleware, MetricsMiddleware, ValidationMiddleware, LogLevel,
+};
+pub use message_observer::{MessageObserver, ArcMessageObserver};
 pub use protocol::{Frame, Command, SystemCommand, MessageCommand, NotificationCommand, CustomCommand, Reliability, SerializationFormat};
 pub use serializer::{Serializer, SerializationUtil};
 pub use session_id::*;

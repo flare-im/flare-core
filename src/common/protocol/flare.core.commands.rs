@@ -26,9 +26,9 @@ pub mod command {
         Custom(super::CustomCommand),
     }
 }
-/// ------------------------------------------------------------
-/// 系统命令
-/// ------------------------------------------------------------
+/// ---
+///
+/// ## 系统命令
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -51,6 +51,12 @@ pub struct SystemCommand {
     /// 数据载荷（EVENT、AUTH等）
     #[prost(bytes = "vec", tag = "5")]
     pub data: ::prost::alloc::vec::Vec<u8>,
+    /// 压缩算法（仅 CONNECT_ACK，必须是已注册的算法）
+    #[prost(string, tag = "6")]
+    pub compression: ::prost::alloc::string::String,
+    /// 加密方式（仅 CONNECT_ACK，为未来扩展预留）
+    #[prost(string, tag = "7")]
+    pub encryption: ::prost::alloc::string::String,
 }
 /// Nested message and enum types in `SystemCommand`.
 pub mod system_command {
@@ -171,9 +177,9 @@ pub mod system_command {
         }
     }
 }
-/// ------------------------------------------------------------
-/// 消息命令
-/// ------------------------------------------------------------
+/// ---
+///
+/// ## 消息命令
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -243,9 +249,9 @@ pub mod message_command {
         }
     }
 }
-/// ------------------------------------------------------------
-/// 通知命令
-/// ------------------------------------------------------------
+/// ---
+///
+/// ## 通知命令
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -320,9 +326,9 @@ pub mod notification_command {
         }
     }
 }
-/// ------------------------------------------------------------
-/// 自定义命令
-/// ------------------------------------------------------------
+/// ---
+///
+/// ## 自定义命令
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]

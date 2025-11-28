@@ -4,7 +4,9 @@
 
 pub mod handler;
 pub mod observer;
+pub mod factory;
 
 pub use handler::ServerEventHandler;
 pub use observer::DefaultServerMessageObserver;
+pub use factory::{ServerMessageObserverFactory, DefaultServerMessageObserverFactory, ChainedObserverFactory};
 

@@ -37,6 +37,67 @@ pub fn current_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+// ============================================================================
+// SystemCommand 构建辅助函数
+// ============================================================================
+
+/// 创建基础 SystemCommand（内部辅助函数）
+fn create_base_system_command(
+    r#type: SystemType,
+    format: SerializationFormat,
+) -> SystemCommand {
+    SystemCommand {
+        r#type: r#type as i32,
+        format: format as i32,
+        message: String::new(),
+        metadata: HashMap::new(),
+        data: Vec::new(),
+        compression: String::new(),
+        encryption: String::new(),
+    }
+}
+
+/// 创建带消息的 SystemCommand（内部辅助函数）
+fn create_system_command_with_message(
+    r#type: SystemType,
+    format: SerializationFormat,
+    message: impl Into<String>,
+    metadata: Option<HashMap<String, Vec<u8>>>,
+) -> SystemCommand {
+    SystemCommand {
+        r#type: r#type as i32,
+        format: format as i32,
+        message: message.into(),
+        metadata: metadata.unwrap_or_default(),
+        data: Vec::new(),
+        compression: String::new(),
+        encryption: String::new(),
+    }
+}
+
+/// 创建带数据的 SystemCommand（内部辅助函数）
+fn create_system_command_with_data(
+    r#type: SystemType,
+    format: SerializationFormat,
+    message: impl Into<String>,
+    metadata: Option<HashMap<String, Vec<u8>>>,
+    data: Option<Vec<u8>>,
+) -> SystemCommand {
+    SystemCommand {
+        r#type: r#type as i32,
+        format: format as i32,
+        message: message.into(),
+        metadata: metadata.unwrap_or_default(),
+        data: data.unwrap_or_default(),
+        compression: String::new(),
+        encryption: String::new(),
+    }
+}
+
+// ============================================================================
+// Frame 构建器
+// ============================================================================
+
 /// Frame 构建器
 pub struct FrameBuilder {
     command: Option<Command>,
@@ -59,36 +120,42 @@ impl FrameBuilder {
     }
 
     /// 设置命令
+    #[must_use]
     pub fn with_command(mut self, command: Command) -> Self {
         self.command = Some(command);
         self
     }
 
     /// 设置消息 ID（不设置则自动生成）
+    #[must_use]
     pub fn with_message_id(mut self, message_id: String) -> Self {
         self.message_id = Some(message_id);
         self
     }
 
     /// 设置可靠性等级
+    #[must_use]
     pub fn with_reliability(mut self, reliability: Reliability) -> Self {
         self.reliability = reliability;
         self
     }
 
     /// 设置时间戳（不设置则使用当前时间）
+    #[must_use]
     pub fn with_timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = Some(timestamp);
         self
     }
 
     /// 添加元数据
+    #[must_use]
     pub fn with_metadata(mut self, key: String, value: Vec<u8>) -> Self {
         self.metadata.insert(key, value);
         self
     }
 
     /// 添加字符串元数据
+    #[must_use]
     pub fn with_metadata_str(mut self, key: String, value: String) -> Self {
         self.metadata.insert(key, value.into_bytes());
         self
@@ -112,30 +179,18 @@ impl Default for FrameBuilder {
     }
 }
 
-// ============================================================
+// ============================================================================
 // 系统命令构建方法
-// ============================================================
+// ============================================================================
 
-/// 创建 PING 命令（最简单，只需类型）
+/// 创建 PING 命令
 pub fn ping() -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Ping as i32,
-        format: SerializationFormat::Protobuf as i32,
-        message: String::new(),
-        metadata: HashMap::new(),
-        data: Vec::new(),
-    }
+    create_base_system_command(SystemType::Ping, SerializationFormat::Protobuf)
 }
 
 /// 创建 PONG 命令
 pub fn pong() -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Pong as i32,
-        format: SerializationFormat::Protobuf as i32,
-        message: String::new(),
-        metadata: HashMap::new(),
-        data: Vec::new(),
-    }
+    create_base_system_command(SystemType::Pong, SerializationFormat::Protobuf)
 }
 
 /// 创建 CONNECT 命令
@@ -146,12 +201,16 @@ pub fn connect(format: SerializationFormat, metadata: HashMap<String, Vec<u8>>) 
         message: String::new(),
         metadata,
         data: Vec::new(),
+        compression: String::new(),
+        encryption: String::new(),
     }
 }
 
 /// 创建 CONNECT_ACK 命令
 pub fn connect_ack(
     format: SerializationFormat,
+    compression: Option<&str>,
+    encryption: Option<&str>,
     metadata: HashMap<String, Vec<u8>>,
 ) -> SystemCommand {
     SystemCommand {
@@ -160,18 +219,19 @@ pub fn connect_ack(
         message: String::new(),
         metadata,
         data: Vec::new(),
+        compression: compression.unwrap_or("none").to_string(),
+        encryption: encryption.unwrap_or("none").to_string(),
     }
 }
 
 /// 创建 CLOSE 命令
 pub fn close(message: Option<String>, metadata: Option<HashMap<String, Vec<u8>>>) -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Close as i32,
-        format: SerializationFormat::Protobuf as i32,
-        message: message.unwrap_or_default(),
-        metadata: metadata.unwrap_or_default(),
-        data: Vec::new(),
-    }
+    create_system_command_with_message(
+        SystemType::Close,
+        SerializationFormat::Protobuf,
+        message.unwrap_or_default(),
+        metadata,
+    )
 }
 
 /// 创建 ERROR 命令
@@ -179,13 +239,12 @@ pub fn error(
     message: String,
     metadata: Option<HashMap<String, Vec<u8>>>,
 ) -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Error as i32,
-        format: SerializationFormat::Protobuf as i32,
+    create_system_command_with_message(
+        SystemType::Error,
+        SerializationFormat::Protobuf,
         message,
-        metadata: metadata.unwrap_or_default(),
-        data: Vec::new(),
-    }
+        metadata,
+    )
 }
 
 /// 创建 EVENT 命令
@@ -194,13 +253,13 @@ pub fn event(
     metadata: Option<HashMap<String, Vec<u8>>>,
     data: Option<Vec<u8>>,
 ) -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Event as i32,
-        format: SerializationFormat::Protobuf as i32,
+    create_system_command_with_data(
+        SystemType::Event,
+        SerializationFormat::Protobuf,
         message,
-        metadata: metadata.unwrap_or_default(),
-        data: data.unwrap_or_default(),
-    }
+        metadata,
+        data,
+    )
 }
 
 /// 创建 AUTH 命令
@@ -214,6 +273,8 @@ pub fn auth(
         message: String::new(),
         metadata,
         data: data.unwrap_or_default(),
+        compression: String::new(),
+        encryption: String::new(),
     }
 }
 
@@ -222,13 +283,12 @@ pub fn auth_ack(
     message: Option<String>,
     metadata: Option<HashMap<String, Vec<u8>>>,
 ) -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::AuthAck as i32,
-        format: SerializationFormat::Protobuf as i32,
-        message: message.unwrap_or_default(),
-        metadata: metadata.unwrap_or_default(),
-        data: Vec::new(),
-    }
+    create_system_command_with_message(
+        SystemType::AuthAck,
+        SerializationFormat::Protobuf,
+        message.unwrap_or_default(),
+        metadata,
+    )
 }
 
 /// 创建 KICKED 命令（被踢下线）
@@ -253,18 +313,34 @@ pub fn kicked(
     reason: impl Into<String>,
     metadata: Option<HashMap<String, Vec<u8>>>,
 ) -> SystemCommand {
-    SystemCommand {
-        r#type: SystemType::Kicked as i32,
-        format: SerializationFormat::Protobuf as i32,
-        message: reason.into(),
-        metadata: metadata.unwrap_or_default(),
-        data: Vec::new(),
-    }
+    create_system_command_with_message(
+        SystemType::Kicked,
+        SerializationFormat::Protobuf,
+        reason,
+        metadata,
+    )
 }
 
-// ============================================================
+// ============================================================================
 // 消息命令构建方法
-// ============================================================
+// ============================================================================
+
+/// 创建消息命令（内部辅助函数）
+fn create_message_command(
+    r#type: MessageType,
+    message_id: String,
+    payload: Vec<u8>,
+    metadata: Option<HashMap<String, Vec<u8>>>,
+    seq: Option<u64>,
+) -> MessageCommand {
+    MessageCommand {
+        r#type: r#type as i32,
+        message_id,
+        payload,
+        metadata: metadata.unwrap_or_default(),
+        seq: seq.unwrap_or(0),
+    }
+}
 
 /// 创建 SEND 消息命令
 pub fn send_message(
@@ -273,13 +349,7 @@ pub fn send_message(
     metadata: Option<HashMap<String, Vec<u8>>>,
     seq: Option<u64>,
 ) -> MessageCommand {
-    MessageCommand {
-        r#type: MessageType::Send as i32,
-        message_id,
-        payload,
-        metadata: metadata.unwrap_or_default(),
-        seq: seq.unwrap_or(0),
-    }
+    create_message_command(MessageType::Send, message_id, payload, metadata, seq)
 }
 
 /// 创建 ACK 消息命令
@@ -303,18 +373,12 @@ pub fn data_message(
     metadata: Option<HashMap<String, Vec<u8>>>,
     seq: Option<u64>,
 ) -> MessageCommand {
-    MessageCommand {
-        r#type: MessageType::Data as i32,
-        message_id,
-        payload,
-        metadata: metadata.unwrap_or_default(),
-        seq: seq.unwrap_or(0),
-    }
+    create_message_command(MessageType::Data, message_id, payload, metadata, seq)
 }
 
-// ============================================================
+// ============================================================================
 // 通知命令构建方法
-// ============================================================
+// ============================================================================
 
 /// 创建通知命令
 pub fn notification(
@@ -331,9 +395,9 @@ pub fn notification(
     }
 }
 
-// ============================================================
+// ============================================================================
 // 自定义命令构建方法
-// ============================================================
+// ============================================================================
 
 /// 创建自定义命令
 pub fn custom_command(
@@ -348,21 +412,29 @@ pub fn custom_command(
     }
 }
 
-// ============================================================
+// ============================================================================
 // Frame 快速构建方法
-// ============================================================
+// ============================================================================
+
+/// 创建包含命令的 Frame（内部辅助函数）
+fn create_frame_with_command(
+    command_type: CommandType,
+    reliability: Reliability,
+) -> Frame {
+    FrameBuilder::new()
+        .with_command(Command {
+            r#type: Some(command_type),
+        })
+        .with_reliability(reliability)
+        .build()
+}
 
 /// 创建包含系统命令的 Frame
 pub fn frame_with_system_command(
     system_command: SystemCommand,
     reliability: Reliability,
 ) -> Frame {
-    FrameBuilder::new()
-        .with_command(Command {
-            r#type: Some(CommandType::System(system_command)),
-        })
-        .with_reliability(reliability)
-        .build()
+    create_frame_with_command(CommandType::System(system_command), reliability)
 }
 
 /// 创建包含消息命令的 Frame
@@ -370,12 +442,7 @@ pub fn frame_with_message_command(
     message_command: MessageCommand,
     reliability: Reliability,
 ) -> Frame {
-    FrameBuilder::new()
-        .with_command(Command {
-            r#type: Some(CommandType::Message(message_command)),
-        })
-        .with_reliability(reliability)
-        .build()
+    create_frame_with_command(CommandType::Message(message_command), reliability)
 }
 
 /// 创建包含通知命令的 Frame
@@ -383,12 +450,7 @@ pub fn frame_with_notification_command(
     notification_command: NotificationCommand,
     reliability: Reliability,
 ) -> Frame {
-    FrameBuilder::new()
-        .with_command(Command {
-            r#type: Some(CommandType::Notification(notification_command)),
-        })
-        .with_reliability(reliability)
-        .build()
+    create_frame_with_command(CommandType::Notification(notification_command), reliability)
 }
 
 /// 创建包含自定义命令的 Frame
@@ -396,12 +458,7 @@ pub fn frame_with_custom_command(
     custom_command: CustomCommand,
     reliability: Reliability,
 ) -> Frame {
-    FrameBuilder::new()
-        .with_command(Command {
-            r#type: Some(CommandType::Custom(custom_command)),
-        })
-        .with_reliability(reliability)
-        .build()
+    create_frame_with_command(CommandType::Custom(custom_command), reliability)
 }
 
 #[cfg(test)]

@@ -219,18 +219,44 @@ pub fn generate_system_session_id(system_id: &str, suffix: Option<String>) -> St
 ///
 /// # 返回
 /// 格式化的会话ID：`6-{ulid}`
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_temp_session_id() -> String {
     use ulid::Ulid;
     format!("6-{}", Ulid::new().to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn generate_temp_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("6-{}-{}", ts, c)
 }
 
 /// 生成服务端会话ID（向后兼容，使用ULID）
 ///
 /// 注意：推荐使用具体的生成函数（如 `generate_temp_session_id`）
 #[deprecated(note = "Use specific generation functions like generate_temp_session_id()")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_server_session_id(session_type: SessionType) -> String {
     use ulid::Ulid;
     format!("{}-{}", session_type.prefix(), Ulid::new().to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn generate_server_session_id(session_type: SessionType) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", session_type.prefix(), ts, c)
 }
 
 /// 验证会话ID格式
@@ -601,4 +627,3 @@ mod tests {
         assert!(is_group_chat(&group_id));
     }
 }
-

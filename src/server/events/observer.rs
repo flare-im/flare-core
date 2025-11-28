@@ -160,6 +160,35 @@ impl DefaultServerMessageObserver {
                     let _ = manager.update_connection_active(&conn_id).await;
                 });
             }
+            Ok(SysType::Event) => {
+                // 将 System::Event 交由 ConnectionHandler 处理（与消息/通知同构）
+                let handler = Arc::clone(&self.handler);
+                let manager = Arc::clone(&self.manager);
+                let parser = self.parser.clone();
+                let conn_id = connection_id.to_string();
+                let frame_clone = frame.clone();
+
+                // 更新连接活跃时间
+                let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                let conn_id_update = conn_id.clone();
+                tokio::spawn(async move {
+                    let _ = manager_update.update_connection_active(&conn_id_update).await;
+                });
+
+                tokio::spawn(async move {
+                    if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
+                        // 发送回复（如果有）
+                        let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
+                        if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
+                            if let Ok(data) = parser.serialize(&response) {
+                                let conn_clone = Arc::clone(&conn);
+                                let mut c = conn_clone.lock().await;
+                                let _ = c.send(&data).await;
+                            }
+                        }
+                    }
+                });
+            }
             _ => {
                 debug!("[DefaultObserver] 未处理的系统命令类型: {}", sys_type);
             }
@@ -302,12 +331,13 @@ impl ConnectionObserver for DefaultServerMessageObserver {
         match event {
             ConnectionEvent::Message(data) => {
                 if let Ok(frame) = self.parser.parse(data) {
+                    // 先克隆 frame，避免生命周期问题
+                    let frame_clone = frame.clone();
                     if let Some(cmd) = &frame.command {
                         match &cmd.r#type {
                             Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) => {
                                 let sys_type = sys_cmd.r#type;
                                 let conn_id = self.connection_id.clone();
-                                let frame_clone = frame.clone();
                                 let observer = self.clone();
                                 
                                 tokio::spawn(async move {
@@ -318,7 +348,6 @@ impl ConnectionObserver for DefaultServerMessageObserver {
                             }
                             Some(crate::common::protocol::flare::core::commands::command::Type::Message(msg_cmd)) => {
                                 let conn_id = self.connection_id.clone();
-                                let frame_clone = frame.clone();
                                 let msg_cmd_clone = msg_cmd.clone();
                                 let observer = self.clone();
                                 
@@ -330,13 +359,45 @@ impl ConnectionObserver for DefaultServerMessageObserver {
                             }
                             Some(crate::common::protocol::flare::core::commands::command::Type::Notification(notif_cmd)) => {
                                 let conn_id = self.connection_id.clone();
-                                let frame_clone = frame.clone();
                                 let notif_cmd_clone = notif_cmd.clone();
                                 let observer = self.clone();
                                 
                                 tokio::spawn(async move {
                                     if let Err(e) = observer.handle_notification_command(&frame_clone, &notif_cmd_clone, &conn_id).await {
                                         error!("[DefaultObserver] 处理通知命令失败: {}", e);
+                                    }
+                                });
+                            }
+                            Some(crate::common::protocol::flare::core::commands::command::Type::Custom(custom_cmd)) => {
+                                // 处理自定义命令（如 SyncMessages、ListSessions 等）
+                                let handler = Arc::clone(&self.handler);
+                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
+                                let parser = self.parser.clone();
+                                let conn_id = self.connection_id.clone();
+                                let cmd_name = custom_cmd.name.clone();
+                                
+                                // 更新连接活跃时间
+                                let manager_update = Arc::clone(&manager);
+                                let conn_id_update = conn_id.clone();
+                                tokio::spawn(async move {
+                                    let _ = manager_update.update_connection_active(&conn_id_update).await;
+                                });
+                                
+                                // 处理自定义命令并发送响应
+                                tokio::spawn(async move {
+                                    if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
+                                        // 发送响应 Frame 回客户端
+                                        if let Some((conn, _)) = manager.get_connection(&conn_id).await {
+                                            if let Ok(data) = parser.serialize(&response) {
+                                                let conn_clone = Arc::clone(&conn);
+                                                let mut c = conn_clone.lock().await;
+                                                if let Err(e) = c.send(&data).await {
+                                                    error!("[DefaultObserver] 发送自定义命令响应失败: {}", e);
+                                                } else {
+                                                    debug!("[DefaultObserver] 自定义命令响应已发送: connection_id={}, command={}", conn_id, cmd_name);
+                                                }
+                                            }
+                                        }
                                     }
                                 });
                             }
@@ -444,4 +505,3 @@ impl ConnectionObserver for DefaultServerMessageObserver {
         }
     }
 }
-

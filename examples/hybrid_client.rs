@@ -50,11 +50,8 @@ impl ConnectionObserver for ChatObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                // 解析接收到的消息
-                if let Ok(frame) = flare_core::common::MessageParser::new(
-                    flare_core::common::protocol::SerializationFormat::Protobuf,
-                    flare_core::common::compression::CompressionAlgorithm::None,
-                ).parse(data) {
+                // 解析接收到的消息（默认使用JSON，parse()会自动检测实际格式）
+                if let Ok(frame) = flare_core::common::MessageParser::json().parse(data) {
                     if let Some(cmd) = &frame.command {
                         if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
                             let message = String::from_utf8_lossy(&msg_cmd.payload);
@@ -154,7 +151,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_protocol_race(vec![TransportProtocol::QUIC, TransportProtocol::WebSocket]) // QUIC 优先级更高
         .with_protocol_url(TransportProtocol::WebSocket, "ws://127.0.0.1:8080".to_string())
         .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-        .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
+        // 不指定格式，将使用服务端默认JSON（客户端可以在协商时指定格式）
+        // 可选：指定序列化格式（如果不指定，使用服务端默认JSON）
+        // .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
         .with_heartbeat(heartbeat_config)
         .with_connect_timeout(Duration::from_secs(10))
         .with_reconnect_interval(Duration::from_secs(3))

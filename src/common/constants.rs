@@ -33,7 +33,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["1.0.0"];
 pub const DEFAULT_COMPRESSION: &str = "none";
 
 /// 默认序列化格式
-pub const DEFAULT_SERIALIZATION_FORMAT: &str = "protobuf";
+pub const DEFAULT_SERIALIZATION_FORMAT: &str = "json";
 
 /// 元数据键名常量
 pub mod metadata_keys {

@@ -61,9 +61,9 @@ async fn main() -> Result<()> {
     info!("🚀 启动协商和设备管理聊天室服务器");
     info!("");
     info!("📋 服务器配置说明：");
-    info!("   - 默认序列化格式: Protobuf（可通过 with_default_format 修改）");
+    info!("   - 默认序列化格式: JSON（可通过 with_default_format 修改）");
     info!("   - 默认压缩方式: None（可通过 with_default_compression 修改）");
-    info!("   - 协商规则: 客户端强制模式时使用客户端格式，否则使用服务端默认");
+    info!("   - 协商规则: 客户端可以指定格式，也可以不指定（使用服务端默认JSON）");
     info!("");
 
     // ============================================================
@@ -120,10 +120,10 @@ async fn main() -> Result<()> {
         // ============================================================
         // 协商配置：设置服务端默认格式和压缩方式
         // ============================================================
-        // 默认序列化格式：Protobuf（如果不设置，默认就是 Protobuf）
-        // 如果某些客户端不支持 Protobuf，可以改为 JSON：
-        // .with_default_format(SerializationFormat::Json)
-        .with_default_format(SerializationFormat::Protobuf)
+        // 默认序列化格式：JSON（如果不设置，默认就是 JSON）
+        // 如果需要使用 Protobuf，可以改为：
+        // .with_default_format(SerializationFormat::Protobuf)
+        .with_default_format(SerializationFormat::Json)
         
         // 默认压缩方式：None（如果不设置，默认就是 None）
         // 可以改为 Gzip 或其他压缩算法：
@@ -168,10 +168,10 @@ async fn main() -> Result<()> {
     info!("   QUIC: quic://127.0.0.1:8081");
     info!("");
     info!("📋 协商机制说明：");
-    info!("   1. 服务端默认使用 Protobuf + None 压缩");
-    info!("   2. 客户端可以发送协商请求（format, compression）");
+    info!("   1. 服务端默认使用 JSON + None 压缩");
+    info!("   2. 客户端可以指定序列化格式，也可以不指定（使用服务端默认JSON）");
     info!("   3. 客户端强制模式时（force_format=true），服务端必须使用客户端格式");
-    info!("   4. 客户端非强制模式时，服务端使用自己的默认配置");
+    info!("   4. 客户端非强制模式时，优先使用客户端指定格式，否则使用服务端默认JSON");
     info!("");
     info!("📱 设备管理说明：");
     info!("   - 当前策略：平台互斥（PlatformExclusive）");
@@ -187,11 +187,14 @@ async fn main() -> Result<()> {
     info!("     * allow_all(): 允许所有设备同时在线");
     info!("");
     info!("💡 客户端连接示例：");
-    info!("   - 协商模式：客户端指定 format=Json，不设置 force_format");
-    info!("     结果：服务端使用默认 Protobuf（因为客户端未强制）");
+    info!("   - 不指定格式：客户端不指定 format，不设置 force_format");
+    info!("     结果：服务端使用默认 JSON");
+    info!("     日志：查看 [ServerCore] 📥 收到 CONNECT 消息 和 [ServerCore] ✅ 协商完成");
+    info!("   - 指定格式（非强制）：客户端指定 format=Protobuf，不设置 force_format");
+    info!("     结果：服务端使用客户端指定的 Protobuf（优先使用客户端格式）");
     info!("     日志：查看 [ServerCore] 📥 收到 CONNECT 消息 和 [ServerCore] ✅ 协商完成");
     info!("   - 强制模式：客户端指定 format=Json，设置 force_format=true");
-    info!("     结果：服务端使用 JSON（因为客户端强制）");
+    info!("     结果：服务端必须使用 JSON（因为客户端强制）");
     info!("     日志：查看 [ServerCore] 📥 收到 CONNECT 消息 和 [ServerCore] ✅ 协商完成");
     info!("");
     info!("📊 协商日志说明：");

@@ -3,17 +3,18 @@
 //! 只处理协议层，连接状态管理、心跳、消息路由等功能委托给 ClientCore
 
 use crate::client::transports::{Client, ClientCore};
+use crate::client::transports::common::{ClientConnectionHelper, ClientMessageObserver};
 use crate::client::config::ClientConfig;
-use crate::common::error::Result;
+use crate::common::error::{FlareError, Result};
 use crate::common::protocol::Frame;
-use crate::common::{generate_id};
+use crate::common::generate_id;
 use crate::transport::connection::Connection;
-use crate::transport::events::{ConnectionEvent, ConnectionObserver, ArcObserver};
+use crate::transport::events::{ConnectionEvent, ArcObserver};
 use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
 /// WebSocket 客户端
@@ -30,7 +31,10 @@ pub struct WebSocketClient {
 impl WebSocketClient {
     /// 创建新的 WebSocket 客户端
     pub fn new(config: ClientConfig) -> Self {
-        let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        let connection_id = config
+            .connection_id
+            .clone()
+            .unwrap_or_else(generate_id);
         let core = ClientCore::new(&config);
         
         Self {
@@ -51,7 +55,10 @@ impl WebSocketClient {
     
     /// 使用 ClientCore 创建（用于 HybridClient）
     pub fn with_core(config: ClientConfig, core: ClientCore) -> Self {
-        let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
+        let connection_id = config
+            .connection_id
+            .clone()
+            .unwrap_or_else(generate_id);
         Self {
             config,
             connection: None,
@@ -61,91 +68,115 @@ impl WebSocketClient {
         }
     }
 
-    async fn internal_connect(&mut self) -> Result<()> {
-        let url_str = &self.config.server_url;
-        
-        let ws_stream_result = timeout(
-            self.config.connect_timeout,
-            connect_async(url_str),
-        ).await;
-
-        let (ws_stream, _) = ws_stream_result
-            .map_err(|_| crate::common::error::FlareError::connection_timeout("Connection timeout".to_string()))?
-            .map_err(|e| crate::common::error::FlareError::connection_failed(e.to_string()))?;
-
-        let transport = WebSocketTransport::new(ws_stream);
-        let connection: Box<dyn Connection> = Box::new(transport);
+    /// 仅建立网络连接（不发送 CONNECT 消息）
+    /// 
+    /// 用于协议竞速：先建立网络连接，选择最快协议，然后再发送 CONNECT
+    pub async fn establish_network_connection(&mut self) -> Result<Arc<Mutex<Box<dyn Connection>>>> {
+        let connection = self.establish_websocket_connection().await?;
         let connection_arc = Arc::new(Mutex::new(connection));
-
-        // 创建消息观察者，委托给 ClientCore
-        let core_state_mgr = Arc::clone(&self.core.state_manager);
-        let core_parser = Arc::clone(&self.core.parser); // Arc 可以安全克隆
-        let core_observers = Arc::clone(&self.core.observers);
-        let core_clone = Arc::new(self.core.clone()); // 用于记录 PONG
-
-        let message_observer = Arc::new(ClientMessageObserver {
-            state_manager: core_state_mgr,
-            parser: core_parser,
-            observers: core_observers,
-            core: core_clone,
-        });
+        // 保存连接，以便后续 connect() 时使用
+        self.connection = Some(Arc::clone(&connection_arc));
+        Ok(connection_arc)
+    }
+    
+    /// 内部连接实现
+    async fn internal_connect(&mut self) -> Result<()> {
+        // 建立 WebSocket 连接
+        let connection_arc = self.establish_network_connection().await?;
         
-        {
-            let mut conn = connection_arc.lock().await;
-            conn.add_observer(message_observer);
-        }
-
-        self.connection = Some(connection_arc.clone());
+        // 设置连接和观察者（会发送 CONNECT 消息）
+        self.setup_connection_with_observer(connection_arc.clone()).await?;
         
-        // 使用 ClientCore 发送 CONNECT 消息进行协商
-        self.core.send_connect_message(connection_arc.clone()).await?;
-
-        // 启动心跳（通过 ClientCore）
-        self.core.start_heartbeat(connection_arc).await;
-
+        // 启动心跳
+        self.core.start_heartbeat(connection_arc.clone()).await;
+        
+        // 通知连接成功
         self.core.handle_connection_event(&ConnectionEvent::Connected);
         self.reconnect_attempts = 0;
         
         Ok(())
     }
-
-    async fn send_frame_internal(&self, frame: &Frame) -> Result<()> {
-        if !self.core.can_send() {
-            return Err(crate::common::error::FlareError::connection_failed(
-                "Cannot send: connection state is not ready".to_string()
-            ));
-        }
-
-        let parser = self.core.parser.lock().await;
-        let data = parser.serialize(frame)?;
-        if let Some(ref conn) = self.connection {
-            let mut c = conn.lock().await;
-            c.send(&data).await?;
-        } else {
-            return Err(crate::common::error::FlareError::connection_failed("Not connected".to_string()));
-        }
+    
+    /// 建立 WebSocket 连接
+    async fn establish_websocket_connection(
+        &self,
+    ) -> Result<Box<dyn Connection>> {
+        let url_str = &self.config.server_url;
+        
+        let ws_stream_result = timeout(
+            self.config.connect_timeout,
+            connect_async(url_str),
+        )
+        .await
+        .map_err(|_| {
+            FlareError::connection_timeout("Connection timeout".to_string())
+        })?;
+        
+        let (ws_stream, _) = ws_stream_result.map_err(|e| {
+            FlareError::connection_failed(e.to_string())
+        })?;
+        
+        let transport = WebSocketTransport::new(ws_stream);
+        Ok(Box::new(transport))
+    }
+    
+    /// 设置连接和观察者
+    async fn setup_connection_with_observer(
+        &mut self,
+        connection: Arc<Mutex<Box<dyn Connection>>>,
+    ) -> Result<()> {
+        // 创建消息观察者（使用 Arc 包装，共享同一个 core 实例）
+        // 注意：ClientCore::clone 现在会共享 client_connection，所以可以安全使用
+        let core_arc = Arc::new(self.core.clone());
+        let message_observer = Arc::new(ClientMessageObserver::new(core_arc));
+        
+        // 设置连接并发送 CONNECT 消息
+        ClientConnectionHelper::setup_connection_and_send_connect(
+            Arc::clone(&connection),
+            &mut self.core,
+            message_observer,
+        )
+        .await?;
+        
+        self.connection = Some(connection);
         Ok(())
     }
 
+    /// 发送 Frame（内部实现）
+    async fn send_frame_internal(&self, frame: &Frame) -> Result<()> {
+        ClientConnectionHelper::send_frame_internal(
+            &self.core,
+            self.connection.as_ref(),
+            frame,
+        )
+        .await
+    }
+
+    /// 尝试重连
     async fn try_reconnect(&mut self) -> Result<()> {
-        if let Some(max_attempts) = self.config.max_reconnect_attempts {
-            if self.reconnect_attempts >= max_attempts {
-                return Err(crate::common::error::FlareError::connection_failed(
-                    format!("Max reconnect attempts ({}) exceeded", max_attempts)
-                ));
+        // 检查重连次数限制
+        if let Some(max) = self.config.max_reconnect_attempts {
+            if self.reconnect_attempts >= max {
+                return Err(FlareError::connection_failed(format!(
+                    "Max reconnect attempts ({}) exceeded",
+                    max
+                )));
             }
         }
-
+        
         self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
-
-        sleep(self.config.reconnect_interval).await;
-
-        if let Some(ref conn) = self.connection.take() {
+        
+        // 等待重连间隔
+        tokio::time::sleep(self.config.reconnect_interval).await;
+        
+        // 关闭旧连接
+        if let Some(conn) = self.connection.take() {
             let mut c = conn.lock().await;
             let _ = c.close().await;
         }
-
+        
+        // 执行连接
         self.internal_connect().await
     }
     
@@ -155,74 +186,23 @@ impl WebSocketClient {
     }
 }
 
-// 消息观察者，委托给 ClientCore
-struct ClientMessageObserver {
-    state_manager: Arc<crate::client::connection::ConnectionStateManager>,
-    #[allow(dead_code)] // 保留用于未来扩展
-    parser: Arc<tokio::sync::Mutex<crate::common::MessageParser>>,
-    observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
-    core: Arc<ClientCore>,
-}
-
-impl ConnectionObserver for ClientMessageObserver {
-    fn on_event(&self, event: &ConnectionEvent) {
-        match event {
-            ConnectionEvent::Message(data) => {
-                // 直接调用 ClientCore::handle_message 处理消息
-                // 它会在内部处理 CONNECT_ACK, PONG, KICKED 等系统命令
-                let core = Arc::clone(&self.core);
-                let data_clone = data.clone();
-                tokio::spawn(async move {
-                    core.handle_message(data_clone).await;
-                });
-            }
-            ConnectionEvent::Connected => {
-                self.state_manager.set_connected();
-                if let Ok(observers) = self.observers.lock() {
-                    for observer in observers.iter() {
-                        observer.on_event(event);
-                    }
-                }
-            }
-            ConnectionEvent::Disconnected(_) => {
-                self.state_manager.set_disconnected();
-                if let Ok(observers) = self.observers.lock() {
-                    for observer in observers.iter() {
-                        observer.on_event(event);
-                    }
-                }
-            }
-            ConnectionEvent::Error(_) => {
-                self.state_manager.set_failed();
-                if let Ok(observers) = self.observers.lock() {
-                    for observer in observers.iter() {
-                        observer.on_event(event);
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl Client for WebSocketClient {
     async fn connect(&mut self) -> Result<()> {
         if !self.core.can_connect() {
-            return Err(crate::common::error::FlareError::protocol_error(
-                format!("Cannot connect: state is unavailable")
+            return Err(FlareError::protocol_error(
+                "Cannot connect: state is unavailable".to_string(),
             ));
         }
 
         self.core.state_manager.start_connecting();
         
         match self.internal_connect().await {
-            Ok(()) => {
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(e) => {
                 self.core.state_manager.set_failed();
                 // 如果允许重连，尝试重连
-                if self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
+                if ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts) {
                     self.try_reconnect().await
                 } else {
                     Err(e)
@@ -232,23 +212,18 @@ impl Client for WebSocketClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.core.state_manager.set_state(crate::client::connection::ConnectionState::Disconnecting);
-
-        // 停止心跳（通过 ClientCore）
-        self.core.stop_heartbeat();
-
-        if let Some(ref conn) = self.connection.take() {
-            let mut c = conn.lock().await;
-            c.close().await?;
-        }
-        
-        self.core.handle_connection_event(&ConnectionEvent::Disconnected("Client disconnected".to_string()));
-        Ok(())
+        ClientConnectionHelper::disconnect_internal(
+            self.connection.take(),
+            &mut self.core,
+        )
+        .await
     }
 
     async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // 如果未连接，尝试重连
-        if !self.is_connected() && self.config.max_reconnect_attempts.map(|n| n > 0).unwrap_or(true) {
+        if !self.is_connected()
+            && ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts)
+        {
             if let Err(e) = self.try_reconnect().await {
                 return Err(e);
             }
@@ -258,8 +233,10 @@ impl Client for WebSocketClient {
     }
 
     fn is_connected(&self) -> bool {
-        matches!(self.core.state(), crate::client::connection::ConnectionState::Connected)
-            && self.connection.is_some()
+        matches!(
+            self.core.state(),
+            crate::client::connection::ConnectionState::Connected
+        ) && self.connection.is_some()
     }
 
     fn add_observer(&mut self, observer: ArcObserver) {

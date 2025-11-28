@@ -20,7 +20,7 @@ pub use auth::{Authenticator, DefaultAuthenticator, AuthResult};
 pub use handle::{ServerHandle, DefaultServerHandle};
 pub use heartbeat::HeartbeatDetector;
 pub use transports::{Server, ConnectionHandler, QUICServer, HybridServer, WebSocketServer};
-pub use builder::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer};
+pub use builder::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer, FlareServerBuilder, FlareServer, MessageListener};
 
 // 重新导出错误类型，服务端使用 ServerError
 pub use crate::common::error::ServerError;

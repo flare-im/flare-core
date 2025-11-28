@@ -1,11 +1,24 @@
-//! 简单模式服务端构建器
+//! 简单模式服务端构建器（毛坯房）
 //! 
-//! 使用闭包定义消息处理逻辑
+//! 提供最小实现，没有任何"装修"，适合快速原型开发和小型应用
+//! 
+//! ## 特点
+//! - ✅ 最小依赖：只提供基本的消息处理（闭包）
+//! - ✅ 零配置：使用默认配置即可运行
+//! - ✅ 轻量级：不包含中间件、管道等高级功能
+//! - ✅ 快速上手：几行代码即可启动服务器
+//! 
+//! ## 适用场景
+//! - 快速原型开发
+//! - 小型应用
+//! - 学习和测试
+//! - 需要完全控制消息处理流程的场景
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::server::{ServerConfig, ConnectionHandler, HybridServer, Server};
+use crate::server::{ConnectionHandler, HybridServer};
 use crate::server::handle::ServerHandle;
+use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
 use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -151,93 +164,13 @@ impl ConnectionHandler for SimpleConnectionHandler {
     }
 }
 
-/// 服务器包装器，实现 Server trait
-struct ServerWrapper {
-    server: Arc<Mutex<HybridServer>>,
-}
-
-/// ServerWrapper 的 ServerHandle 适配器
-/// 让 ServerWrapper 可以作为 ServerHandle 使用
-struct ServerWrapperHandle {
-    server: Arc<Mutex<HybridServer>>,
-}
-
-#[async_trait]
-impl crate::server::handle::ServerHandle for ServerWrapperHandle {
-    async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        let s = self.server.lock().await;
-        crate::server::handle::ServerHandle::send_to(&*s, connection_id, frame).await
-    }
-    
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        let s = self.server.lock().await;
-        crate::server::handle::ServerHandle::send_to_user(&*s, user_id, frame).await
-    }
-    
-    async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        let s = self.server.lock().await;
-        crate::server::handle::ServerHandle::broadcast(&*s, frame).await
-    }
-    
-    async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        let s = self.server.lock().await;
-        crate::server::handle::ServerHandle::broadcast_except(&*s, frame, exclude_connection_id).await
-    }
-    
-    async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        let s = self.server.lock().await;
-        crate::server::handle::ServerHandle::disconnect(&*s, connection_id).await
-    }
-    
-    fn connection_count(&self) -> usize {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        tokio::task::block_in_place(|| {
-            let s = self.server.blocking_lock();
-            crate::server::handle::ServerHandle::connection_count(&*s)
-        })
-    }
-    
-    fn user_count(&self) -> usize {
-        // 通过 ServerHandle 调用（HybridServer 实现了 ServerHandle）
-        tokio::task::block_in_place(|| {
-            let s = self.server.blocking_lock();
-            crate::server::handle::ServerHandle::user_count(&*s)
-        })
-    }
-}
-
-#[async_trait]
-impl Server for ServerWrapper {
-    async fn start(&mut self) -> Result<()> {
-        let mut s = self.server.lock().await;
-        s.start().await
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        let mut s = self.server.lock().await;
-        s.stop().await
-    }
-
-    fn is_running(&self) -> bool {
-        tokio::task::block_in_place(|| {
-            let s = self.server.blocking_lock();
-            s.is_running()
-        })
-    }
-}
 
 /// 简化的服务器实例
 /// 
 /// 提供简化的接口，自动处理服务器引用
 pub struct SimpleServer {
-    server: Arc<Mutex<HybridServer>>,
+    wrapper: ServerWrapper,
     handler: Arc<SimpleConnectionHandler>,
-    server_wrapper: Arc<ServerWrapper>,
     handle: Arc<dyn ServerHandle>,
 }
 
@@ -246,30 +179,27 @@ impl SimpleServer {
     pub async fn start(&mut self) -> Result<()> {
         // 设置 ServerHandle
         self.handler.set_handle(Arc::clone(&self.handle)).await;
-
-        let mut s = self.server.lock().await;
-        s.start().await
+        self.wrapper.start().await
     }
 
     /// 停止服务器
     pub async fn stop(&mut self) -> Result<()> {
-        let mut s = self.server.lock().await;
-        s.stop().await
+        self.wrapper.stop().await
     }
 
     /// 检查服务器是否运行
     pub fn is_running(&self) -> bool {
-        self.server_wrapper.is_running()
+        self.wrapper.is_running()
     }
 
     /// 获取连接数量
     pub fn connection_count(&self) -> usize {
-        self.handle.connection_count()
+        self.wrapper.connection_count()
     }
 
     /// 获取用户数量
     pub fn user_count(&self) -> usize {
-        self.handle.user_count()
+        self.wrapper.user_count()
     }
 
     /// 获取 ServerHandle（用于消息发送和连接管理）
@@ -279,27 +209,32 @@ impl SimpleServer {
 
     /// 向指定连接发送消息
     pub async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()> {
-        ServerHandle::send_to(&*self.handle, connection_id, frame).await
+        self.wrapper.send_to(connection_id, frame).await
     }
 
     /// 向指定用户的所有连接发送消息
     pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        ServerHandle::send_to_user(&*self.handle, user_id, frame).await
+        self.wrapper.send_to_user(user_id, frame).await
     }
 
     /// 广播消息到所有连接
     pub async fn broadcast(&self, frame: &Frame) -> Result<()> {
-        ServerHandle::broadcast(&*self.handle, frame).await
+        self.wrapper.broadcast(frame).await
     }
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        ServerHandle::broadcast_except(&*self.handle, frame, exclude_connection_id).await
+        self.wrapper.broadcast_except(frame, exclude_connection_id).await
     }
 
     /// 断开指定连接
     pub async fn disconnect(&self, connection_id: &str) -> Result<()> {
-        ServerHandle::disconnect(&*self.handle, connection_id).await
+        self.wrapper.disconnect(connection_id).await
+    }
+    
+    /// 获取协议列表
+    pub fn protocols(&self) -> Vec<crate::common::config_types::TransportProtocol> {
+        self.wrapper.protocols()
     }
 }
 
@@ -307,11 +242,10 @@ impl SimpleServer {
 /// 
 /// 使用闭包定义消息处理逻辑
 pub struct ServerBuilder {
-    config: ServerConfig,
+    base: BaseServerBuilderConfig,
     message_handler: Option<MessageHandlerFn>,
     on_connect: Option<OnConnectFn>,
     on_disconnect: Option<OnDisconnectFn>,
-    authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
 }
 
 impl ServerBuilder {
@@ -321,11 +255,10 @@ impl ServerBuilder {
     /// - `bind_address`: 监听地址，例如 "0.0.0.0:8080"
     pub fn new(bind_address: impl Into<String>) -> Self {
         Self {
-            config: ServerConfig::new(bind_address.into()),
+            base: BaseServerBuilderConfig::new(bind_address),
             message_handler: None,
             on_connect: None,
             on_disconnect: None,
-            authenticator: None,
         }
     }
     
@@ -337,19 +270,19 @@ impl ServerBuilder {
     /// .with_authenticator(authenticator)
     /// ```
     pub fn with_authenticator(mut self, authenticator: Arc<dyn crate::server::auth::Authenticator>) -> Self {
-        self.authenticator = Some(authenticator);
+        self.base = self.base.with_authenticator(authenticator);
         self
     }
     
     /// 启用认证
     pub fn enable_auth(mut self) -> Self {
-        self.config = self.config.enable_auth();
+        self.base = self.base.enable_auth();
         self
     }
     
     /// 设置认证超时时间
     pub fn with_auth_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.config = self.config.with_auth_timeout(timeout);
+        self.base = self.base.with_auth_timeout(timeout);
         self
     }
 
@@ -397,43 +330,43 @@ impl ServerBuilder {
 
     /// 设置传输协议
     pub fn with_protocol(mut self, protocol: crate::common::config_types::TransportProtocol) -> Self {
-        self.config.transport = protocol;
+        self.base = self.base.with_protocol(protocol);
         self
     }
 
     /// 启用多协议监听
     pub fn with_protocols(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
-        self.config = self.config.with_protocols(protocols);
+        self.base = self.base.with_protocols(protocols);
         self
     }
 
     /// 设置最大连接数
     pub fn with_max_connections(mut self, max: usize) -> Self {
-        self.config = self.config.with_max_connections(max);
+        self.base = self.base.with_max_connections(max);
         self
     }
 
     /// 设置心跳配置
     pub fn with_heartbeat(mut self, heartbeat: crate::common::config_types::HeartbeatConfig) -> Self {
-        self.config = self.config.with_heartbeat(heartbeat);
+        self.base = self.base.with_heartbeat(heartbeat);
         self
     }
 
     /// 设置 TLS 配置
     pub fn with_tls(mut self, tls: crate::common::config_types::TlsConfig) -> Self {
-        self.config = self.config.with_tls(tls);
+        self.base = self.base.with_tls(tls);
         self
     }
 
     /// 设置默认序列化格式（用于协商，默认 Protobuf）
     pub fn with_default_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {
-        self.config = self.config.with_format(format);
+        self.base = self.base.with_default_format(format);
         self
     }
 
     /// 设置默认压缩算法（用于协商，默认 None）
     pub fn with_default_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
-        self.config = self.config.with_compression(compression);
+        self.base = self.base.with_default_compression(compression);
         self
     }
 
@@ -451,27 +384,25 @@ impl ServerBuilder {
 
         // 使用 with_connection_manager 以传递 authenticator
         let server = HybridServer::with_connection_manager(
-            self.config,
+            self.base.config,
             handler.clone() as Arc<dyn ConnectionHandler>,
             None,
             None,
             None,
-            self.authenticator,
+            self.base.authenticator,
         )?;
-        let server_arc = Arc::new(Mutex::new(server));
-        let server_wrapper = Arc::new(ServerWrapper {
-            server: Arc::clone(&server_arc),
-        });
         
-        // 创建 ServerHandle 适配器（转换为 trait object）
-        let handle: Arc<dyn ServerHandle> = Arc::new(ServerWrapperHandle {
-            server: server_arc.clone(),
-        }) as Arc<dyn ServerHandle>;
+        // 使用 ServerWrapper 统一管理
+        let wrapper = ServerWrapper::new(server);
+        
+        // 创建 ServerHandle（通过 ServerWrapper）
+        let handle = wrapper.get_server_handle().ok_or_else(|| {
+            crate::common::error::FlareError::general_error("Failed to create ServerHandle")
+        })?;
 
         Ok(SimpleServer {
-            server: server_arc,
+            wrapper,
             handler,
-            server_wrapper,
             handle,
         })
     }

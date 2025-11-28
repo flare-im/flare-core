@@ -43,9 +43,12 @@
 - **可配置** - 心跳间隔和超时时间可配置
 
 ### 🏗️ 灵活的构建模式
+- **Flare 模式** - 使用 `FlareClientBuilder`/`FlareServerBuilder`，只需实现简单的 `MessageListener` 接口，自动集成所有功能
+- **消息处理管道** - 统一的消息处理流程，支持中间件、自动序列化/压缩
 - **观察者模式** - 实现 `ConnectionHandler`/`ConnectionObserver` trait 处理消息
 - **简单模式** - 使用闭包定义消息处理逻辑
 - **事件处理器** - 支持细化的命令处理和事件观察
+- **中间件系统** - 支持日志、监控、验证等中间件
 
 ### 📦 模块化设计
 - **清晰的架构** - 协议层、核心层、业务层分离
@@ -212,7 +215,9 @@ async fn main() -> Result<()> {
 ### 服务端模块 (`server`)
 
 - **`HybridServer`** - 混合服务端，支持多协议监听
-- **`ServerBuilder`** / **`ObserverServerBuilder`** - 服务端构建器
+- **`FlareServerBuilder`** - Flare 服务端构建器（推荐，最简单）
+- **`ServerBuilder`** / **`ObserverServerBuilder`** - 服务端构建器（高级定制）
+- **`MessageListener`** - 消息监听器接口（消息管道模式）
 - **`ConnectionManager`** - 连接管理器
 - **`ServerCore`** - 服务端核心功能（连接管理、心跳检测、协商处理）
 - **`Authenticator`** - 认证器接口
@@ -222,16 +227,25 @@ async fn main() -> Result<()> {
 ### 客户端模块 (`client`)
 
 - **`HybridClient`** - 混合客户端，支持协议竞速
-- **`ClientBuilder`** / **`ObserverClientBuilder`** - 客户端构建器
+- **`FlareClientBuilder`** - Flare 客户端构建器（推荐，最简单）
+- **`ClientBuilder`** / **`ObserverClientBuilder`** - 客户端构建器（高级定制）
+- **`MessageListener`** - 消息监听器接口（消息管道模式）
 - **`ClientCore`** - 客户端核心功能（状态管理、心跳管理、消息路由）
 - **`ConnectionObserver`** - 连接观察者接口
 - **`ClientEventHandler`** - 事件处理器接口
 
 ### 公共模块 (`common`)
 
-- **`MessageParser`** - 消息解析器（支持 Protobuf 和 JSON）
+- **`MessageParser`** - 消息解析器（支持 Protobuf 和 JSON，默认JSON）
+- **`MessagePipeline`** - 消息处理管道（支持中间件、自动序列化/压缩）
+- **`MessageMiddleware`** - 消息处理中间件（日志、监控、验证等）
+- **`MessageProcessor`** - 消息处理器（业务逻辑处理）
+- **`MessageListener`** - 消息监听器接口（消息管道模式使用）
+- **`LoggingMiddleware`** - 日志中间件
+- **`MetricsMiddleware`** - 性能监控中间件
+- **`ValidationMiddleware`** - 验证中间件
 - **`CompressionAlgorithm`** - 压缩算法（None、Gzip、Zstd）
-- **`SerializationFormat`** - 序列化格式（Protobuf、JSON）
+- **`SerializationFormat`** - 序列化格式（Protobuf、JSON，默认JSON）
 - **`DeviceInfo`** - 设备信息
 - **`DeviceConflictStrategy`** - 设备冲突策略
 - **`FlareError`** - 统一错误类型
@@ -299,25 +313,39 @@ let server = ObserverServerBuilder::new("0.0.0.0:8080")
 ### 序列化协商
 
 ```rust
-// 服务端：设置默认格式
+// 服务端：设置默认格式（默认使用JSON）
 let server = ObserverServerBuilder::new("0.0.0.0:8080")
-    .with_default_format(SerializationFormat::Protobuf)
-    .with_default_compression(CompressionAlgorithm::Gzip)
+    .with_default_format(SerializationFormat::Json) // 默认JSON，可选Protobuf
+    .with_default_compression(CompressionAlgorithm::None) // 默认不压缩
     .build()?;
 
-// 客户端：设置首选格式（协商模式）
+// 客户端：不指定格式（使用服务端默认JSON）
 let client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
-    .with_format(SerializationFormat::Protobuf)
+    // 不调用 with_format()，将使用服务端默认JSON
+    .build_with_race()
+    .await?;
+
+// 客户端：指定格式（非强制，服务端优先使用客户端格式）
+let client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
+    .with_format(SerializationFormat::Protobuf) // 指定格式，服务端优先使用
     .with_compression(CompressionAlgorithm::Gzip)
     .build_with_race()
     .await?;
 
-// 客户端：强制指定格式（不协商）
+// 客户端：强制指定格式（服务端必须使用）
 let client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
     .force_format(SerializationFormat::Json) // 强制使用 JSON
     .build_with_race()
     .await?;
 ```
+
+**协商规则**：
+- **默认**：服务端默认使用 JSON + 不压缩
+- **客户端不指定**：使用服务端默认 JSON
+- **客户端指定（非强制）**：服务端优先使用客户端格式
+- **客户端强制**：服务端必须使用客户端格式
+- **连接成功后**：CONNECT_ACK 返回最终确定的格式、压缩方式、加密方式
+- **后续消息**：客户端和服务端都使用协商后的格式处理消息
 
 ### 协议竞速
 
@@ -489,12 +517,15 @@ cargo publish
 - ✨ 初始发布
 - 支持 WebSocket 和 QUIC 协议
 - 支持协议竞速
-- 支持序列化协商（Protobuf/JSON）
+- 支持序列化协商（默认JSON，支持Protobuf/JSON）
 - 支持压缩算法（None/Gzip/Zstd）
 - 支持多设备管理
 - 支持 Token 认证
 - 提供观察者模式和简单模式两种构建方式
 - 完善的事件处理机制
+- 消息处理管道（MessagePipeline）支持中间件
+- 统一的消息处理流程，自动序列化/压缩
+- 连接成功后返回完整协商结果（格式、压缩、加密）
 
 ---
 

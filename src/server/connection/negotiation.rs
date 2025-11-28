@@ -53,9 +53,15 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
             use crate::common::protocol::flare::core::commands::system_command::Type as SystemType;
             if sys_cmd.r#type == SystemType::Connect as i32 {
                 // 解析序列化格式（使用 TryFrom 替代已弃用的 from_i32）
+                // 如果客户端未指定格式（format=0或Unspecified），使用默认JSON
                 use std::convert::TryFrom;
-                result.serialization_format = SerializationFormat::try_from(sys_cmd.format)
-                    .unwrap_or(SerializationFormat::Json);
+                result.serialization_format = if sys_cmd.format == 0 {
+                    // 客户端未指定格式，使用默认JSON（服务端会在协商时决定最终格式）
+                    SerializationFormat::Json
+                } else {
+                    SerializationFormat::try_from(sys_cmd.format)
+                        .unwrap_or(SerializationFormat::Json)
+                };
                 
                 // 解析压缩算法（从 metadata 中）
                 if let Some(compression_bytes) = sys_cmd.metadata.get("compression") {
@@ -140,15 +146,44 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
 /// 
 /// # 返回
 /// CONNECT_ACK 命令
+/// 创建 CONNECT_ACK 消息
+/// 
+/// # 参数
+/// - `format`: 确认使用的序列化格式
+/// - `compression`: 确认使用的压缩算法
+/// - `encryption`: 确认使用的加密方式（目前为 "none"，为未来扩展预留）
+/// - `additional_metadata`: 额外的元数据（如设备冲突信息等）
+/// 
+/// # 返回
+/// CONNECT_ACK 命令
 pub fn create_connect_ack(
     format: SerializationFormat,
     compression: CompressionAlgorithm,
+    encryption: Option<&str>,
     additional_metadata: Option<HashMap<String, Vec<u8>>>,
 ) -> SystemCommand {
-    let mut metadata = HashMap::new();
+    // 验证压缩算法是否已注册
+    let mut compression_str = compression.as_str();
+    if !crate::common::compression::CompressionUtil::is_registered(compression_str) {
+        tracing::warn!(
+            "[Negotiation] 压缩算法 '{}' 未注册，将使用 'none'",
+            compression_str
+        );
+        // 如果未注册，回退到 none
+        compression_str = "none";
+    }
     
-    // 添加压缩算法信息
-    metadata.insert("compression".to_string(), compression.as_str().as_bytes().to_vec());
+    // 验证加密方式是否已注册（如果提供了）
+    let mut encryption_str = encryption.unwrap_or("none");
+    if encryption_str != "none" && !crate::common::encryption::EncryptionUtil::is_registered(encryption_str) {
+        tracing::warn!(
+            "[Negotiation] 加密方式 '{}' 未注册，将使用 'none'",
+            encryption_str
+        );
+        encryption_str = "none";
+    }
+    
+    let mut metadata = HashMap::new();
     
     // 添加额外的元数据
     if let Some(extra) = additional_metadata {
@@ -157,6 +192,11 @@ pub fn create_connect_ack(
         }
     }
     
-    crate::common::protocol::connect_ack(format, metadata)
+    crate::common::protocol::connect_ack(
+        format,
+        Some(compression_str),
+        Some(encryption_str),
+        metadata,
+    )
 }
 

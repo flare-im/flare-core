@@ -88,8 +88,9 @@ async fn main() -> Result<()> {
     info!("🚀 启动协商和设备管理客户端");
     info!("");
     info!("📋 协商模式说明：");
-    info!("   1. 协商模式（默认）：客户端指定首选格式，服务端决定最终格式");
-    info!("   2. 强制模式：客户端强制指定格式，服务端必须使用客户端格式");
+    info!("   1. 不指定格式：客户端不指定格式，使用服务端默认JSON");
+    info!("   2. 指定格式（非强制）：客户端指定格式，服务端优先使用客户端格式");
+    info!("   3. 强制模式：客户端强制指定格式，服务端必须使用客户端格式");
     info!("");
 
     // ============================================================
@@ -223,13 +224,17 @@ async fn main() -> Result<()> {
         .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
         
         // ============================================================
-        // 协商配置：客户端首选格式（用于协商模式）
+        // 协商配置：客户端序列化格式（可选）
         // ============================================================
-        // 场景1：协商模式 - 客户端首选 JSON，但服务端可能使用 Protobuf
-        .with_format(flare_core::common::protocol::SerializationFormat::Json)
-        .with_compression(flare_core::common::compression::CompressionAlgorithm::None)
+        // 场景1：不指定格式 - 使用服务端默认JSON
+        // 不调用 with_format()，将使用服务端默认JSON
         
-        // 场景2：强制模式 - 客户端强制使用 JSON（适用于不支持 Protobuf 的平台）
+        // 场景2：指定格式（非强制） - 客户端指定格式，服务端优先使用
+        // 取消下面的注释来指定格式：
+        // .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
+        // .with_compression(flare_core::common::compression::CompressionAlgorithm::None)
+        
+        // 场景3：强制模式 - 客户端强制使用指定格式（适用于不支持某些格式的平台）
         // 取消下面的注释来启用强制模式：
         // .force_format(flare_core::common::protocol::SerializationFormat::Json)
         // .force_compression(flare_core::common::compression::CompressionAlgorithm::None)
@@ -254,8 +259,9 @@ async fn main() -> Result<()> {
     info!("✅ 连接成功");
     info!("");
     info!("📋 协商结果：");
-    info!("   - 查看上面的日志，可以看到协商完成的最终格式和压缩方式");
-    info!("   - 如果使用协商模式，服务端可能使用 Protobuf（服务端默认）");
+    info!("   - 查看上面的日志，可以看到协商完成的最终格式、压缩方式和加密方式");
+    info!("   - 如果不指定格式，服务端使用默认JSON");
+    info!("   - 如果指定格式（非强制），服务端优先使用客户端格式");
     info!("   - 如果使用强制模式，服务端必须使用客户端指定的格式");
     info!("");
     info!("📊 协商日志说明：");

@@ -48,6 +48,8 @@ message SystemCommand {
   string message = 3;                  // 说明信息（ERROR、EVENT、CLOSE、AUTH_ACK）
   map<string, bytes> metadata = 4;     // 附加参数（CONNECT、AUTH等）
   bytes data = 5;                      // 数据载荷（EVENT、AUTH等）
+  string compression = 6;              // 压缩算法（仅 CONNECT_ACK，必须是已注册的算法）
+  string encryption = 7;               // 加密方式（仅 CONNECT_ACK，为未来扩展预留）
 }
 
 // ------------------------------------------------------------
