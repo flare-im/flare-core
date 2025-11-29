@@ -174,8 +174,16 @@ impl ClientCore {
         };
         
         // 处理系统命令（CONNECT_ACK, PONG, KICKED）
-        if self.handle_system_commands(&frame).await {
-            return; // 系统命令已处理，不继续
+        let is_system_command = self.handle_system_commands(&frame).await;
+        
+        // 关键修复：即使处理了系统命令，也要通知 observers
+        // 这样 MessagePipeline 和 MessageListener 也能收到 CONNECT_ACK 等系统命令
+        // 通知所有观察者（包括系统命令，让 MessageListener 也能处理）
+        self.notify_observers(&ConnectionEvent::Message(data));
+        
+        // 如果是系统命令，处理完并通知 observers 后直接返回
+        if is_system_command {
+            return;
         }
         
         // 处理业务命令（Message, Notification）
@@ -183,9 +191,6 @@ impl ClientCore {
         
         // 处理消息路由
         self.handle_message_routing(&frame).await;
-        
-        // 通知所有观察者
-        self.notify_observers(&ConnectionEvent::Message(data));
     }
     
     /// 解析消息（内部辅助函数）
