@@ -1,13 +1,13 @@
 //! QUIC 服务端实现
-//! 
+//!
 //! 专注于 QUIC 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
+use crate::common::error::Result;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
-use crate::common::error::Result;
-use crate::server::transports::{Server, ConnectionHandler};
-use crate::server::transports::server_core::ServerCore;
 use crate::server::transports::common::ServerConnectionHelper;
+use crate::server::transports::server_core::ServerCore;
+use crate::server::transports::{ConnectionHandler, Server};
 use crate::transport::connection::Connection;
 use crate::transport::quic::QUICTransport;
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 /// QUIC 服务端
-/// 
+///
 /// 专注于 QUIC 协议层面的连接处理
 pub struct QUICServer {
     config: ServerConfig,
@@ -33,7 +33,7 @@ impl QUICServer {
     pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
         Self::with_connection_manager(config, handler, None)
     }
-    
+
     /// 使用指定的连接管理器创建 QUIC 服务端
     pub fn with_connection_manager(
         config: ServerConfig,
@@ -42,13 +42,13 @@ impl QUICServer {
     ) -> Result<Self> {
         // 初始化 rustls CryptoProvider
         Self::init_rustls();
-        
+
         // 创建 ServerCore
         let core = Arc::new(ServerCore::new(&config, connection_manager));
-        
+
         // 创建 QUIC 端点
         let endpoint = Self::create_quic_endpoint(&config)?;
-        
+
         Ok(Self {
             config,
             core,
@@ -57,7 +57,7 @@ impl QUICServer {
             is_running: Arc::new(Mutex::new(false)),
         })
     }
-    
+
     /// 使用指定的 ServerCore 创建 QUIC 服务端（用于共享 ServerCore）
     pub fn with_shared_core(
         config: ServerConfig,
@@ -65,9 +65,9 @@ impl QUICServer {
         core: Arc<ServerCore>,
     ) -> Result<Self> {
         Self::init_rustls();
-        
+
         let endpoint = Self::create_quic_endpoint(&config)?;
-        
+
         Ok(Self {
             config,
             core,
@@ -76,11 +76,11 @@ impl QUICServer {
             is_running: Arc::new(Mutex::new(false)),
         })
     }
-    
+
     // ============================================================================
     // 内部辅助方法
     // ============================================================================
-    
+
     /// 初始化 rustls CryptoProvider（内部辅助方法）
     fn init_rustls() {
         use std::sync::Once;
@@ -89,55 +89,57 @@ impl QUICServer {
             let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
-    
+
     /// 创建 QUIC 端点（内部辅助方法）
     fn create_quic_endpoint(config: &ServerConfig) -> Result<Endpoint> {
         use crate::common::cert::{get_server_cert_der, get_server_key_der};
-        
+
         // 加载证书和私钥
-        let cert_der = get_server_cert_der()
-            .map_err(|e| crate::common::error::FlareError::protocol_error(
-                format!("加载服务器证书失败: {}", e)
-            ))?;
-        let key_der = get_server_key_der()
-            .map_err(|e| crate::common::error::FlareError::protocol_error(
-                format!("加载服务器私钥失败: {}", e)
-            ))?;
-        
+        let cert_der = get_server_cert_der().map_err(|e| {
+            crate::common::error::FlareError::protocol_error(format!("加载服务器证书失败: {}", e))
+        })?;
+        let key_der = get_server_key_der().map_err(|e| {
+            crate::common::error::FlareError::protocol_error(format!("加载服务器私钥失败: {}", e))
+        })?;
+
         debug!("[QUIC Server] 使用证书: certs/server.crt");
-        
+
         // 转换证书格式
         let cert = quinn::rustls::pki_types::CertificateDer::from(cert_der);
         let certs = vec![cert];
-        
+
         // 转换私钥格式
         if key_der.is_empty() {
             return Err(crate::common::error::FlareError::protocol_error(
-                "私钥为空".to_string()
+                "私钥为空".to_string(),
             ));
         }
-        
+
         let private_key = quinn::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            quinn::rustls::pki_types::PrivatePkcs8KeyDer::from(key_der)
+            quinn::rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
         );
-        
+
         // 构建服务端配置
-        let server_config = QuinnServerConfig::with_single_cert(certs, private_key)
-            .map_err(|e| crate::common::error::FlareError::protocol_error(
-                format!("创建 QUIC 服务端配置失败: {}", e)
-            ))?;
-        
+        let server_config =
+            QuinnServerConfig::with_single_cert(certs, private_key).map_err(|e| {
+                crate::common::error::FlareError::protocol_error(format!(
+                    "创建 QUIC 服务端配置失败: {}",
+                    e
+                ))
+            })?;
+
         // 解析地址
-        let addr = config.bind_address.parse::<SocketAddr>()
-            .map_err(|e| crate::common::error::FlareError::protocol_error(
-                format!("无效地址: {}", e)
-            ))?;
-        
+        let addr = config.bind_address.parse::<SocketAddr>().map_err(|e| {
+            crate::common::error::FlareError::protocol_error(format!("无效地址: {}", e))
+        })?;
+
         // 创建端点
-        Endpoint::server(server_config, addr)
-            .map_err(|e| crate::common::error::FlareError::connection_failed(
-                format!("创建 QUIC 端点失败: {}", e)
+        Endpoint::server(server_config, addr).map_err(|e| {
+            crate::common::error::FlareError::connection_failed(format!(
+                "创建 QUIC 端点失败: {}",
+                e
             ))
+        })
     }
 }
 
@@ -145,10 +147,10 @@ impl QUICServer {
 impl Server for QUICServer {
     async fn start(&mut self) -> Result<()> {
         *self.is_running.lock().await = true;
-        
+
         // 启动心跳检测
         self.core.start_heartbeat(&self.config);
-        
+
         let endpoint = self.endpoint.take().ok_or_else(|| {
             crate::common::error::FlareError::connection_failed("端点未初始化".to_string())
         })?;
@@ -169,7 +171,7 @@ impl Server for QUICServer {
                     let manager_clone = Arc::clone(&manager);
                     let config_clone = config.clone();
                     let core_clone = Arc::clone(&core);
-                    
+
                     tokio::spawn(async move {
                         match conn.await {
                             Ok(connecting) => {
@@ -180,7 +182,8 @@ impl Server for QUICServer {
                                     manager_clone,
                                     config_clone,
                                     core_clone,
-                                ).await;
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 debug!("[QUIC Server] QUIC 连接握手失败: {}", e);
@@ -193,19 +196,23 @@ impl Server for QUICServer {
                 }
             }
         });
-        
+
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        ServerConnectionHelper::stop_server(&self.core, &self.is_running).await
-            .map_err(|e| crate::common::error::FlareError::connection_failed(format!("停止服务器失败: {}", e)))
+        ServerConnectionHelper::stop_server(&self.core, &self.is_running)
+            .await
+            .map_err(|e| {
+                crate::common::error::FlareError::connection_failed(format!(
+                    "停止服务器失败: {}",
+                    e
+                ))
+            })
     }
 
     fn is_running(&self) -> bool {
-        tokio::task::block_in_place(|| {
-            *self.is_running.blocking_lock()
-        })
+        tokio::task::block_in_place(|| *self.is_running.blocking_lock())
     }
 }
 
@@ -240,7 +247,7 @@ async fn handle_quic_connection(
     // 创建传输层连接
     let transport = QUICTransport::new(send, recv);
     let connection: Box<dyn Connection> = Box::new(transport);
-    
+
     // 使用公共模块设置连接
     let connection_id = match ServerConnectionHelper::setup_new_connection(
         connection,
@@ -248,14 +255,16 @@ async fn handle_quic_connection(
         handler.clone(),
         &config,
         core.clone(),
-    ).await {
+    )
+    .await
+    {
         Ok(id) => id,
         Err(e) => {
             debug!("[QUIC Server] 设置连接失败: {}", e);
             return;
         }
     };
-    
+
     // 注意：on_connect 将在收到 CONNECT 消息并完成协商后调用（在观察者中处理）
     debug!("[QUIC Server] 连接已设置: connection_id={}", connection_id);
 }

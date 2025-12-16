@@ -1,9 +1,9 @@
 //! 共享配置类型
-//! 
+//!
 //! 定义客户端和服务端共用的配置类型
 
-use std::time::Duration;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// 传输协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -26,7 +26,7 @@ impl TransportProtocol {
             _ => None,
         }
     }
-    
+
     /// 转换为字符串
     pub fn as_str(&self) -> &'static str {
         match self {

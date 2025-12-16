@@ -1,39 +1,39 @@
 //! 证书转换器
-//! 
+//!
 //! 在不同格式之间转换证书和私钥
 
-use crate::common::error::Result;
 use crate::common::error::FlareError;
+use crate::common::error::Result;
 
 /// 将 PEM 格式的证书转换为 DER 格式
 pub fn pem_cert_to_der(pem_data: &[u8]) -> Result<Vec<u8>> {
     use rustls_pemfile::certs;
-    
+
     let mut reader = std::io::BufReader::new(pem_data);
     let mut certs_iter = certs(&mut reader);
-    
+
     match certs_iter.next() {
         Some(Ok(cert)) => Ok(cert.to_vec()),
-        Some(Err(e)) => Err(FlareError::protocol_error(
-            format!("Failed to parse PEM certificate: {}", e)
-        )),
+        Some(Err(e)) => Err(FlareError::protocol_error(format!(
+            "Failed to parse PEM certificate: {}",
+            e
+        ))),
         None => Err(FlareError::protocol_error(
-            "No certificates found in PEM data".to_string()
+            "No certificates found in PEM data".to_string(),
         )),
     }
 }
 
 /// 将 PEM 格式的私钥转换为 DER 格式
 pub fn pem_key_to_der(pem_data: &[u8]) -> Result<Vec<u8>> {
-    use rustls_pemfile::{read_one, Item};
-    
+    use rustls_pemfile::{Item, read_one};
+
     let mut reader = std::io::BufReader::new(pem_data);
-    
+
     loop {
         match read_one(&mut reader)
-            .map_err(|e| FlareError::protocol_error(
-                format!("Failed to parse PEM key: {}", e)
-            ))? {
+            .map_err(|e| FlareError::protocol_error(format!("Failed to parse PEM key: {}", e)))?
+        {
             Some(Item::Pkcs8Key(key)) => {
                 return Ok(key.secret_pkcs8_der().to_vec());
             }
@@ -45,9 +45,9 @@ pub fn pem_key_to_der(pem_data: &[u8]) -> Result<Vec<u8>> {
             None => break,
         }
     }
-    
+
     Err(FlareError::protocol_error(
-        "No private key found in PEM data".to_string()
+        "No private key found in PEM data".to_string(),
     ))
 }
 
@@ -62,7 +62,10 @@ pub fn der_cert_to_pem(der_data: &[u8]) -> String {
         .map(|chunk| String::from_utf8_lossy(chunk))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", formatted)
+    format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        formatted
+    )
 }
 
 /// 将 DER 格式的私钥转换为 PEM 格式
@@ -76,6 +79,8 @@ pub fn der_key_to_pem(der_data: &[u8]) -> String {
         .map(|chunk| String::from_utf8_lossy(chunk))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n", formatted)
+    format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        formatted
+    )
 }
-

@@ -61,7 +61,9 @@ impl Connection for TCPTransport {
             .shutdown()
             .await
             .map_err(|e| FlareError::connection_closed(e.to_string()))?;
-        self.notify_observers(&ConnectionEvent::Disconnected("Closed by client".to_string()));
+        self.notify_observers(&ConnectionEvent::Disconnected(
+            "Closed by client".to_string(),
+        ));
         Ok(())
     }
 

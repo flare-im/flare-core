@@ -1,14 +1,14 @@
 //! 观察者模式服务端构建器（基本装修）
-//! 
+//!
 //! 提供基本实现，用户可以自定义观察器和处理器
-//! 
+//!
 //! ## 特点
 //! - ✅ 自定义观察器：实现 `ConnectionHandler` trait 自定义消息处理
 //! - ✅ 设备管理：支持设备冲突策略和多端管理
 //! - ✅ 事件处理：支持自定义事件处理器
 //! - ✅ 连接管理：支持共享连接管理器
 //! - ✅ 灵活扩展：可以添加自定义的观察器和处理器
-//! 
+//!
 //! ## 适用场景
 //! - 需要自定义消息处理逻辑
 //! - 需要设备管理和多端控制
@@ -17,14 +17,14 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::server::{ConnectionHandler, HybridServer};
+use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
 use crate::server::connection::ConnectionManager;
 use crate::server::handle::ServerHandle;
-use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
+use crate::server::{ConnectionHandler, HybridServer};
 use std::sync::Arc;
 
 /// 观察者模式服务端构建器
-/// 
+///
 /// 使用实现了 ConnectionHandler trait 的处理器
 pub struct ObserverServerBuilder {
     base: BaseServerBuilderConfig,
@@ -45,39 +45,48 @@ impl ObserverServerBuilder {
             event_handler: None,
         }
     }
-    
+
     /// 设置认证器（如果启用认证，必须提供）
-    /// 
+    ///
     /// 如果设置了认证器，还需要在配置中启用认证：
     /// ```rust
     /// .enable_auth()
     /// .with_authenticator(authenticator)
     /// ```
-    pub fn with_authenticator(mut self, authenticator: Arc<dyn crate::server::auth::Authenticator>) -> Self {
+    pub fn with_authenticator(
+        mut self,
+        authenticator: Arc<dyn crate::server::auth::Authenticator>,
+    ) -> Self {
         self.base = self.base.with_authenticator(authenticator);
         self
     }
-    
+
     /// 启用认证
     pub fn enable_auth(mut self) -> Self {
         self.base = self.base.enable_auth();
         self
     }
-    
+
     /// 设置认证超时时间
     pub fn with_auth_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.base = self.base.with_auth_timeout(timeout);
         self
     }
-    
+
     /// 设置设备管理器（用于设备冲突管理）
-    pub fn with_device_manager(mut self, device_manager: Arc<crate::server::device::DeviceManager>) -> Self {
+    pub fn with_device_manager(
+        mut self,
+        device_manager: Arc<crate::server::device::DeviceManager>,
+    ) -> Self {
         self.device_manager = Some(device_manager);
         self
     }
 
     /// 设置事件处理器（可选，用于细化的命令处理）
-    pub fn with_event_handler(mut self, event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>) -> Self {
+    pub fn with_event_handler(
+        mut self,
+        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
+    ) -> Self {
         self.event_handler = Some(event_handler);
         self
     }
@@ -95,19 +104,29 @@ impl ObserverServerBuilder {
     }
 
     /// 设置传输协议
-    pub fn with_protocol(mut self, protocol: crate::common::config_types::TransportProtocol) -> Self {
+    pub fn with_protocol(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+    ) -> Self {
         self.base = self.base.with_protocol(protocol);
         self
     }
 
     /// 启用多协议监听
-    pub fn with_protocols(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
+    pub fn with_protocols(
+        mut self,
+        protocols: Vec<crate::common::config_types::TransportProtocol>,
+    ) -> Self {
         self.base = self.base.with_protocols(protocols);
         self
     }
 
     /// 为特定协议设置监听地址
-    pub fn with_protocol_address(mut self, protocol: crate::common::config_types::TransportProtocol, address: String) -> Self {
+    pub fn with_protocol_address(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+        address: String,
+    ) -> Self {
         self.base = self.base.with_protocol_address(protocol, address);
         self
     }
@@ -119,7 +138,10 @@ impl ObserverServerBuilder {
     }
 
     /// 设置心跳配置
-    pub fn with_heartbeat(mut self, heartbeat: crate::common::config_types::HeartbeatConfig) -> Self {
+    pub fn with_heartbeat(
+        mut self,
+        heartbeat: crate::common::config_types::HeartbeatConfig,
+    ) -> Self {
         self.base = self.base.with_heartbeat(heartbeat);
         self
     }
@@ -131,13 +153,19 @@ impl ObserverServerBuilder {
     }
 
     /// 设置默认序列化格式（用于协商，默认 Protobuf）
-    pub fn with_default_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {
+    pub fn with_default_format(
+        mut self,
+        format: crate::common::protocol::SerializationFormat,
+    ) -> Self {
         self.base = self.base.with_default_format(format);
         self
     }
 
     /// 设置默认压缩算法（用于协商，默认 None）
-    pub fn with_default_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+    pub fn with_default_compression(
+        mut self,
+        compression: crate::common::compression::CompressionAlgorithm,
+    ) -> Self {
         self.base = self.base.with_default_compression(compression);
         self
     }
@@ -213,7 +241,9 @@ impl ObserverServer {
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        self.wrapper.broadcast_except(frame, exclude_connection_id).await
+        self.wrapper
+            .broadcast_except(frame, exclude_connection_id)
+            .await
     }
 
     /// 断开指定连接
@@ -225,18 +255,19 @@ impl ObserverServer {
     pub fn protocols(&self) -> Vec<crate::common::config_types::TransportProtocol> {
         self.wrapper.protocols()
     }
-    
+
     /// 获取连接管理器（用于创建 DefaultServerHandle）
-    /// 
+    ///
     /// # 返回
     /// 返回 ConnectionManagerTrait
-    pub fn get_server_handle_components(&self) -> Option<Arc<dyn crate::server::connection::ConnectionManagerTrait>> {
+    pub fn get_server_handle_components(
+        &self,
+    ) -> Option<Arc<dyn crate::server::connection::ConnectionManagerTrait>> {
         self.wrapper.get_server_handle_components()
     }
-    
+
     /// 获取 ServerHandle（用于消息发送和连接管理）
     pub fn get_server_handle(&self) -> Option<Arc<dyn ServerHandle>> {
         self.wrapper.get_server_handle()
     }
 }
-

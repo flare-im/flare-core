@@ -1,16 +1,16 @@
 //! 服务端连接管理器抽象
-//! 
+//!
 //! 定义服务端连接管理的标准接口，支持用户自定义实现
 //! 默认实现使用 ConnectionManager
 
+use crate::common::MessageParser;
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::common::MessageParser;
 use crate::transport::connection::Connection;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// 连接信息（Trait 版本，用于跨异步边界传递）
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub struct ConnectionInfo {
 }
 
 /// 连接管理器抽象 trait
-/// 
+///
 /// 实现此 trait 以提供自定义的连接管理逻辑
 /// 例如：基于 Redis 的分布式连接管理、基于数据库的持久化等
 #[async_trait]
@@ -70,9 +70,13 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
 
     /// 更新连接的最后活跃时间
     async fn update_connection_active(&self, connection_id: &str) -> Result<()>;
-    
+
     /// 设置连接为已验证状态（认证通过后调用）
-    async fn set_connection_authenticated(&self, connection_id: &str, user_id: Option<String>) -> Result<()>;
+    async fn set_connection_authenticated(
+        &self,
+        connection_id: &str,
+        user_id: Option<String>,
+    ) -> Result<()>;
 
     /// 获取所有连接 ID
     async fn list_connections(&self) -> Vec<String>;
@@ -84,7 +88,7 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     async fn cleanup_timeout_connections(&self, timeout: Duration) -> Vec<String>;
 
     // ========== 底层发送方法（字节数组）==========
-    
+
     /// 向指定连接发送数据（字节数组）
     async fn send_to_connection(&self, connection_id: &str, data: &[u8]) -> Result<()>;
 
@@ -98,17 +102,17 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     async fn broadcast_except(&self, data: &[u8], exclude_connection_id: &str) -> Result<()>;
 
     // ========== Frame 级别发送方法（需要 MessageParser）==========
-    
+
     /// 向指定连接发送 Frame（自动序列化）
-    /// 
+    ///
     /// # 参数
     /// - `connection_id`: 连接 ID
     /// - `frame`: 要发送的 Frame
     /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则从连接的协商信息创建）
-    /// 
+    ///
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
-    /// 
+    ///
     /// # 注意
     /// 如果 parser 为 None，将从连接的 ConnectionInfo 中获取协商后的序列化格式和压缩算法创建 parser
     async fn send_frame_to(
@@ -135,29 +139,27 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
                         None
                     }
                 }).unwrap_or(false);
-                
+
                 if !is_system_command {
                     return Err(crate::common::error::FlareError::authentication_failed(
-                        format!("连接 {} 未验证，无法发送消息", connection_id)
+                        format!("连接 {} 未验证，无法发送消息", connection_id),
                     ));
                 }
             }
         } else {
             return Err(crate::common::error::FlareError::connection_failed(
-                format!("连接 {} 不存在", connection_id)
+                format!("连接 {} 不存在", connection_id),
             ));
         }
-        
+
         // 如果提供了 parser，使用它；否则从连接的协商信息创建 parser
         let data = if let Some(p) = parser {
             p.serialize(frame)?
         } else {
             // 从连接的协商信息创建 parser
             if let Some((_, info)) = self.get_connection(connection_id).await {
-                let connection_parser = MessageParser::new(
-                    info.serialization_format,
-                    info.compression,
-                );
+                let connection_parser =
+                    MessageParser::new(info.serialization_format, info.compression);
                 connection_parser.serialize(frame)?
             } else {
                 // 如果连接不存在，使用默认 JSON parser
@@ -170,12 +172,12 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     }
 
     /// 向指定用户的所有连接发送 Frame（自动序列化）
-    /// 
+    ///
     /// # 参数
     /// - `user_id`: 用户 ID
     /// - `frame`: 要发送的 Frame
     /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
-    /// 
+    ///
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
     async fn send_frame_to_user(
@@ -193,18 +195,14 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     }
 
     /// 广播 Frame 到所有连接（自动序列化）
-    /// 
+    ///
     /// # 参数
     /// - `frame`: 要广播的 Frame
     /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
-    /// 
+    ///
     /// # 返回
     /// 广播成功返回 `Ok(())`，失败返回错误
-    async fn broadcast_frame(
-        &self,
-        frame: &Frame,
-        parser: Option<&MessageParser>,
-    ) -> Result<()> {
+    async fn broadcast_frame(&self, frame: &Frame, parser: Option<&MessageParser>) -> Result<()> {
         let connection_ids = self.list_connections().await;
         for conn_id in connection_ids {
             // 为每个连接使用其协商的格式（如果 parser 为 None）
@@ -214,12 +212,12 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     }
 
     /// 广播 Frame 到所有连接，排除指定连接（自动序列化）
-    /// 
+    ///
     /// # 参数
     /// - `frame`: 要广播的 Frame
     /// - `exclude_connection_id`: 要排除的连接 ID
     /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
-    /// 
+    ///
     /// # 返回
     /// 广播成功返回 `Ok(())`，失败返回错误
     async fn broadcast_frame_except(
@@ -246,4 +244,4 @@ pub struct ConnectionStats {
     pub total_connections: usize,
     /// 总用户数
     pub total_users: usize,
-} 
+}

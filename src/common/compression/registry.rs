@@ -1,12 +1,12 @@
 //! 压缩器注册表
-//! 
+//!
 //! 管理压缩器的注册和查找，支持用户注册自定义压缩器
 
-use crate::common::error::Result;
+use super::algorithms::{CompressionAlgorithm, GzipCompressor, NoCompressor};
 use super::traits::Compressor;
-use super::algorithms::{CompressionAlgorithm, NoCompressor, GzipCompressor};
-use std::sync::Arc;
+use crate::common::error::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::RwLock;
 
 lazy_static::lazy_static! {
@@ -19,7 +19,7 @@ lazy_static::lazy_static! {
 }
 
 /// 压缩器注册表
-/// 
+///
 /// 管理压缩器的注册和查找
 pub struct CompressionRegistry {
     compressors: Arc<RwLock<HashMap<String, Arc<dyn Compressor>>>>,
@@ -40,20 +40,20 @@ impl CompressionRegistry {
     }
 
     /// 注册压缩器
-    /// 
+    ///
     /// # 参数
     /// - `name`: 压缩器名称（用于查找）
     /// - `compressor`: 压缩器实例
-    /// 
+    ///
     /// # 示例
-    /// 
+    ///
     /// ```rust
     /// use flare_core::common::compression::{CompressionRegistry, Compressor};
     /// use std::sync::Arc;
-    /// 
+    ///
     /// struct MyCompressor;
     /// impl Compressor for MyCompressor { /* ... */ }
-    /// 
+    ///
     /// let registry = CompressionRegistry::new();
     /// registry.register("my_custom", Arc::new(MyCompressor));
     /// ```
@@ -64,10 +64,10 @@ impl CompressionRegistry {
     }
 
     /// 查找压缩器
-    /// 
+    ///
     /// # 参数
     /// - `name`: 压缩器名称
-    /// 
+    ///
     /// # 返回
     /// 找到的压缩器，如果不存在则返回 None
     pub fn find(&self, name: &str) -> Option<Arc<dyn Compressor>> {
@@ -78,15 +78,18 @@ impl CompressionRegistry {
     }
 
     /// 根据算法类型查找压缩器
-    pub fn find_by_algorithm(&self, algorithm: CompressionAlgorithm) -> Option<Arc<dyn Compressor>> {
+    pub fn find_by_algorithm(
+        &self,
+        algorithm: CompressionAlgorithm,
+    ) -> Option<Arc<dyn Compressor>> {
         self.find(algorithm.as_str())
     }
 
     /// 检查压缩器是否已注册
-    /// 
+    ///
     /// # 参数
     /// - `name`: 压缩器名称
-    /// 
+    ///
     /// # 返回
     /// 如果已注册返回 `true`，否则返回 `false`
     pub fn is_registered(&self, name: &str) -> bool {
@@ -97,18 +100,15 @@ impl CompressionRegistry {
     }
 
     /// 尝试自动检测压缩算法
-    /// 
+    ///
     /// 遍历所有注册的压缩器，使用 `can_detect` 方法检测
     pub fn auto_detect(&self, data: &[u8]) -> Option<Arc<dyn Compressor>> {
-        self.compressors
-            .read()
-            .ok()
-            .and_then(|compressors| {
-                compressors
-                    .values()
-                    .find(|compressor| compressor.can_detect(data))
-                    .map(Arc::clone)
-            })
+        self.compressors.read().ok().and_then(|compressors| {
+            compressors
+                .values()
+                .find(|compressor| compressor.can_detect(data))
+                .map(Arc::clone)
+        })
     }
 
     /// 获取全局注册表实例
@@ -124,7 +124,7 @@ impl Default for CompressionRegistry {
 }
 
 /// 压缩工具类
-/// 
+///
 /// 提供便捷的压缩/解压方法，使用全局注册表
 pub struct CompressionUtil;
 
@@ -154,10 +154,10 @@ impl CompressionUtil {
     }
 
     /// 检查压缩器是否已注册
-    /// 
+    ///
     /// # 参数
     /// - `name`: 压缩器名称
-    /// 
+    ///
     /// # 返回
     /// 如果已注册返回 `true`，否则返回 `false`
     pub fn is_registered(name: &str) -> bool {
@@ -165,7 +165,7 @@ impl CompressionUtil {
     }
 
     /// 尝试自动检测压缩算法并解压
-    /// 
+    ///
     /// 首先尝试自动检测压缩算法，如果检测不到则作为无压缩处理
     pub fn auto_decompress(data: &[u8]) -> Result<(Vec<u8>, CompressionAlgorithm)> {
         // 尝试自动检测
@@ -179,16 +179,16 @@ impl CompressionUtil {
     }
 
     /// 注册自定义压缩器到全局注册表
-    /// 
+    ///
     /// # 示例
-    /// 
+    ///
     /// ```rust
     /// use flare_core::common::compression::{CompressionUtil, Compressor};
     /// use std::sync::Arc;
-    /// 
+    ///
     /// struct MyCompressor;
     /// impl Compressor for MyCompressor { /* ... */ }
-    /// 
+    ///
     /// CompressionUtil::register_custom(Arc::new(MyCompressor));
     /// ```
     pub fn register_custom(compressor: Arc<dyn Compressor>) {

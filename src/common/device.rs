@@ -1,8 +1,8 @@
 //! 设备平台和设备信息管理
-//! 
+//!
 //! 支持多端设备管理，包括平台类型、设备标识、冲突策略等
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// 设备平台类型
@@ -27,13 +27,27 @@ pub enum DevicePlatform {
 impl DevicePlatform {
     /// 从字符串转换为平台类型
     pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "web" => DevicePlatform::Web,
-            "pc" | "desktop" => DevicePlatform::PC,
-            "h5" | "mobile_web" => DevicePlatform::H5,
-            "android" => DevicePlatform::Android,
-            "ios" | "iphone" | "ipad" => DevicePlatform::IOS,
-            "harmonyos" | "harmony" | "openharmony" => DevicePlatform::HarmonyOS,
+        match s {
+            s if s.eq_ignore_ascii_case("web") => DevicePlatform::Web,
+            s if s.eq_ignore_ascii_case("pc") || s.eq_ignore_ascii_case("desktop") => {
+                DevicePlatform::PC
+            }
+            s if s.eq_ignore_ascii_case("h5") || s.eq_ignore_ascii_case("mobile_web") => {
+                DevicePlatform::H5
+            }
+            s if s.eq_ignore_ascii_case("android") => DevicePlatform::Android,
+            s if s.eq_ignore_ascii_case("ios")
+                || s.eq_ignore_ascii_case("iphone")
+                || s.eq_ignore_ascii_case("ipad") =>
+            {
+                DevicePlatform::IOS
+            }
+            s if s.eq_ignore_ascii_case("harmonyos")
+                || s.eq_ignore_ascii_case("harmony")
+                || s.eq_ignore_ascii_case("openharmony") =>
+            {
+                DevicePlatform::HarmonyOS
+            }
             other => DevicePlatform::Other(other.to_string()),
         }
     }
@@ -55,7 +69,10 @@ impl DevicePlatform {
     pub fn is_mobile(&self) -> bool {
         matches!(
             self,
-            DevicePlatform::H5 | DevicePlatform::Android | DevicePlatform::IOS | DevicePlatform::HarmonyOS
+            DevicePlatform::H5
+                | DevicePlatform::Android
+                | DevicePlatform::IOS
+                | DevicePlatform::HarmonyOS
         )
     }
 }
@@ -150,11 +167,11 @@ impl Default for DeviceConflictStrategy {
 
 impl DeviceConflictStrategy {
     /// 检查新设备是否可以与现有设备同时在线
-    /// 
+    ///
     /// # 参数
     /// - `new_device`: 新设备的平台类型
     /// - `existing_devices`: 现有设备的平台类型集合
-    /// 
+    ///
     /// # 返回
     /// - `Ok(())`: 可以同时在线
     /// - `Err(Vec<DevicePlatform>)`: 需要被踢掉的设备平台列表
@@ -165,75 +182,56 @@ impl DeviceConflictStrategy {
     ) -> Result<(), Vec<DevicePlatform>> {
         match self {
             DeviceConflictStrategy::AllowAll => Ok(()),
-            
+
             DeviceConflictStrategy::MobileExclusive => {
                 if new_device.is_mobile() {
-                    // 新设备是移动端，检查是否有其他移动端
-                    let mobile_conflicts: Vec<DevicePlatform> = existing_devices
-                        .iter()
-                        .filter(|p| p.is_mobile())
-                        .cloned()
-                        .collect();
+                    let mobile_conflicts = self.get_mobile_devices(existing_devices);
                     if !mobile_conflicts.is_empty() {
                         return Err(mobile_conflicts);
                     }
                 }
                 Ok(())
             }
-            
+
             DeviceConflictStrategy::PlatformExclusive => {
-                // 检查是否有相同平台
                 if existing_devices.contains(&new_device) {
                     return Err(vec![new_device]);
                 }
                 Ok(())
             }
-            
+
             DeviceConflictStrategy::FullyExclusive => {
                 if !existing_devices.is_empty() {
                     return Err(existing_devices.iter().cloned().collect());
                 }
                 Ok(())
             }
-            
+
             DeviceConflictStrategy::MobileAndPcCoexist => {
-                // 移动端和PC端共存策略：
-                // - 移动端之间互斥（Android、iOS、HarmonyOS、H5 互斥）
-                // - PC端之间互斥（Web、PC 互斥）
-                // - 但移动端和PC端可以同时在线
+                // 移动端和PC端共存策略
                 if new_device.is_mobile() {
-                    // 新设备是移动端，检查是否有其他移动端
-                    let mobile_conflicts: Vec<DevicePlatform> = existing_devices
-                        .iter()
-                        .filter(|p| p.is_mobile())
-                        .cloned()
-                        .collect();
+                    let mobile_conflicts = self.get_mobile_devices(existing_devices);
                     if !mobile_conflicts.is_empty() {
                         return Err(mobile_conflicts);
                     }
+                } else if matches!(new_device, DevicePlatform::Web | DevicePlatform::PC) {
+                    let pc_conflicts: Vec<DevicePlatform> = existing_devices
+                        .iter()
+                        .filter(|p| matches!(p, DevicePlatform::Web | DevicePlatform::PC))
+                        .cloned()
+                        .collect();
+                    if !pc_conflicts.is_empty() {
+                        return Err(pc_conflicts);
+                    }
                 } else {
-                    // 新设备是PC端（Web 或 PC），检查是否有其他PC端
-                    let is_pc = matches!(new_device, DevicePlatform::Web | DevicePlatform::PC);
-                    
-                    if is_pc {
-                        let pc_conflicts: Vec<DevicePlatform> = existing_devices
-                            .iter()
-                            .filter(|p| matches!(p, DevicePlatform::Web | DevicePlatform::PC))
-                            .cloned()
-                            .collect();
-                        if !pc_conflicts.is_empty() {
-                            return Err(pc_conflicts);
-                        }
-                    } else {
-                        // 其他平台（如 Other），检查是否有相同平台
-                        if existing_devices.contains(&new_device) {
-                            return Err(vec![new_device]);
-                        }
+                    // 其他平台（如 Other），检查是否有相同平台
+                    if existing_devices.contains(&new_device) {
+                        return Err(vec![new_device]);
                     }
                 }
                 Ok(())
             }
-            
+
             DeviceConflictStrategy::Custom {
                 allowed_combinations,
                 exclusive_groups,
@@ -241,7 +239,6 @@ impl DeviceConflictStrategy {
                 // 检查互斥组
                 for group in exclusive_groups {
                     if group.contains(&new_device) {
-                        // 新设备属于某个互斥组，检查是否有同组设备
                         let conflicts: Vec<DevicePlatform> = existing_devices
                             .iter()
                             .filter(|p| group.contains(p))
@@ -252,32 +249,29 @@ impl DeviceConflictStrategy {
                         }
                     }
                 }
-                
+
                 // 检查允许的组合
-                // 如果新设备和现有设备的所有组合都在 allowed_combinations 中，则允许
-                // 这里简化处理：如果新设备和任意现有设备不能组成允许的组合，则冲突
-                // 更复杂的逻辑需要检查所有可能的组合
                 let mut combined = existing_devices.clone();
-                combined.insert(new_device);
-                
-                // 检查是否所有平台都在某个允许的组合中
-                // 简化：如果 combined 的大小超过 1，且不在 allowed_combinations 中，则冲突
+                combined.insert(new_device.clone());
+
                 if combined.len() > 1 {
-                    // 检查是否存在包含所有这些平台的允许组合
-                    let is_allowed = allowed_combinations.iter().any(|allowed| {
-                        combined.is_subset(allowed)
-                    });
-                    
+                    let is_allowed = allowed_combinations
+                        .iter()
+                        .any(|allowed| combined.is_subset(allowed));
+
                     if !is_allowed {
-                        // 需要踢掉一些设备
-                        // 策略：保留新设备，踢掉所有现有设备（简化处理）
                         return Err(existing_devices.iter().cloned().collect());
                     }
                 }
-                
+
                 Ok(())
             }
         }
+    }
+
+    /// 获取所有移动端设备（辅助方法）
+    fn get_mobile_devices(&self, devices: &HashSet<DevicePlatform>) -> Vec<DevicePlatform> {
+        devices.iter().filter(|p| p.is_mobile()).cloned().collect()
     }
 }
 
@@ -313,7 +307,7 @@ impl DeviceConflictStrategyBuilder {
     }
 
     /// 设置移动端和PC端共存
-    /// 
+    ///
     /// 移动端之间互斥，PC端之间互斥，但移动端和PC端可以同时在线
     /// 例如：同一用户可以有 1 个移动端（Android/iOS/HarmonyOS/H5） + 1 个 PC（Web/PC）同时在线
     pub fn mobile_and_pc_coexist(mut self) -> Self {
@@ -355,12 +349,20 @@ mod tests {
         let strategy = DeviceConflictStrategy::MobileExclusive;
         let mut existing = HashSet::new();
         existing.insert(DevicePlatform::Android);
-        
+
         // 新设备是移动端，应该冲突
-        assert!(strategy.check_conflict(DevicePlatform::IOS, &existing).is_err());
-        
+        assert!(
+            strategy
+                .check_conflict(DevicePlatform::IOS, &existing)
+                .is_err()
+        );
+
         // 新设备是 PC，应该允许
-        assert!(strategy.check_conflict(DevicePlatform::PC, &existing).is_ok());
+        assert!(
+            strategy
+                .check_conflict(DevicePlatform::PC, &existing)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -368,12 +370,19 @@ mod tests {
         let strategy = DeviceConflictStrategy::PlatformExclusive;
         let mut existing = HashSet::new();
         existing.insert(DevicePlatform::Web);
-        
+
         // 相同平台应该冲突
-        assert!(strategy.check_conflict(DevicePlatform::Web, &existing).is_err());
-        
+        assert!(
+            strategy
+                .check_conflict(DevicePlatform::Web, &existing)
+                .is_err()
+        );
+
         // 不同平台应该允许
-        assert!(strategy.check_conflict(DevicePlatform::PC, &existing).is_ok());
+        assert!(
+            strategy
+                .check_conflict(DevicePlatform::PC, &existing)
+                .is_ok()
+        );
     }
 }
-

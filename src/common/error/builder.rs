@@ -23,21 +23,21 @@ impl ErrorBuilder {
             params: None,
         }
     }
-    
+
     /// 添加错误详情
     #[must_use]
     pub fn details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
     }
-    
+
     /// 添加错误参数
     #[must_use]
     pub fn params(mut self, params: HashMap<String, String>) -> Self {
         self.params = Some(params);
         self
     }
-    
+
     /// 添加单个参数
     #[must_use]
     pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -49,7 +49,7 @@ impl ErrorBuilder {
         }
         self
     }
-    
+
     /// 构建错误
     pub fn build(self) -> FlareError {
         FlareError::Localized {
@@ -60,7 +60,7 @@ impl ErrorBuilder {
             timestamp: chrono::Utc::now(),
         }
     }
-    
+
     /// 构建为 LocalizedError
     pub fn build_localized(self) -> LocalizedError {
         let mut localized = LocalizedError::new(self.code, self.reason);

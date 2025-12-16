@@ -1,9 +1,9 @@
 //! 内置压缩算法实现
-//! 
+//!
 //! 提供常用的压缩算法实现
 
-use crate::common::error::{FlareError, Result};
 use super::traits::Compressor;
+use crate::common::error::{FlareError, Result};
 
 /// 压缩算法类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -68,22 +68,22 @@ pub struct GzipCompressor;
 
 impl Compressor for GzipCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use std::io::Write;
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder
             .write_all(data)
             .map_err(|e| FlareError::encoding_error(format!("Gzip compression failed: {}", e)))?;
-        encoder
-            .finish()
-            .map_err(|e| FlareError::encoding_error(format!("Gzip compression finish failed: {}", e)))
+        encoder.finish().map_err(|e| {
+            FlareError::encoding_error(format!("Gzip compression finish failed: {}", e))
+        })
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use std::io::Read;
         use flate2::read::GzDecoder;
+        use std::io::Read;
 
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::new();
@@ -106,4 +106,3 @@ impl Compressor for GzipCompressor {
         data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b
     }
 }
-

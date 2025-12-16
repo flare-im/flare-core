@@ -1,11 +1,11 @@
 use crate::common::error::{FlareError, Result};
-use crate::common::protocol::{frame_with_system_command, pong, Reliability};
+use crate::common::protocol::{Reliability, frame_with_system_command, pong};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
+use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use prost::Message as ProstMessage;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -30,15 +30,15 @@ impl WebSocketTransport {
     pub fn new(stream: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
         Self::from_stream(stream)
     }
-    
+
     /// 从 WebSocketStream<TcpStream> 创建（在没有 TLS 时使用）
-    /// 
+    ///
     /// 使用单独的 Plain 类型，避免 unsafe transmute
     pub fn from_tcp_stream(stream: WebSocketStream<TcpStream>) -> Self {
         debug!("[DEBUG WebSocketTransport] from_tcp_stream 开始");
         let (sink_plain, receiver_plain) = stream.split();
         debug!("[DEBUG WebSocketTransport] from_tcp_stream: stream 已 split");
-        
+
         let observers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink_arc = Arc::new(Mutex::new(sink_plain));
         let last_active = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
@@ -50,7 +50,8 @@ impl WebSocketTransport {
         debug!("[DEBUG WebSocketTransport] from_tcp_stream: 准备 spawn receiver_task");
         tokio::spawn(async move {
             debug!("[DEBUG WebSocketTransport] receiver_task 开始 (Plain)");
-            Self::receiver_task_plain(receiver_plain, task_observers, task_sink, task_last_active).await;
+            Self::receiver_task_plain(receiver_plain, task_observers, task_sink, task_last_active)
+                .await;
             debug!("[DEBUG WebSocketTransport] receiver_task 结束 (Plain)");
         });
         debug!("[DEBUG WebSocketTransport] from_tcp_stream: receiver_task 已 spawn");
@@ -63,7 +64,7 @@ impl WebSocketTransport {
         debug!("[DEBUG WebSocketTransport] from_tcp_stream 完成");
         result
     }
-    
+
     fn from_stream(stream: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
         let (sink, receiver) = stream.split();
         let observers = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -73,7 +74,12 @@ impl WebSocketTransport {
         let task_observers = Arc::clone(&observers);
         let task_sink = Arc::clone(&sink_arc);
         let task_last_active = Arc::clone(&last_active);
-        tokio::spawn(Self::receiver_task(receiver, task_observers, task_sink, task_last_active));
+        tokio::spawn(Self::receiver_task(
+            receiver,
+            task_observers,
+            task_sink,
+            task_last_active,
+        ));
 
         Self {
             sink: WebSocketSink::Tls(sink_arc),
@@ -128,14 +134,16 @@ impl WebSocketTransport {
                     }
                     _ => None,
                 },
-                Err(e) => Some(ConnectionEvent::Error(
-                    FlareError::connection_failed(e.to_string())
-                )),
+                Err(e) => Some(ConnectionEvent::Error(FlareError::connection_failed(
+                    e.to_string(),
+                ))),
             };
 
             if let Some(event) = event {
-                let is_terminal =
-                    matches!(event, ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_));
+                let is_terminal = matches!(
+                    event,
+                    ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
+                );
 
                 Self::_notify_observers(&observers_arc, &event);
 
@@ -145,7 +153,7 @@ impl WebSocketTransport {
             }
         }
     }
-    
+
     async fn receiver_task_plain(
         mut receiver: SplitStream<WebSocketStream<TcpStream>>,
         observers_arc: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
@@ -192,14 +200,16 @@ impl WebSocketTransport {
                     }
                     _ => None,
                 },
-                Err(e) => Some(ConnectionEvent::Error(
-                    FlareError::connection_failed(e.to_string())
-                )),
+                Err(e) => Some(ConnectionEvent::Error(FlareError::connection_failed(
+                    e.to_string(),
+                ))),
             };
 
             if let Some(event) = event {
-                let is_terminal =
-                    matches!(event, ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_));
+                let is_terminal = matches!(
+                    event,
+                    ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
+                );
 
                 // 添加详细日志追踪消息处理
                 match &event {
@@ -227,21 +237,27 @@ impl WebSocketTransport {
     }
 
     // 私有辅助方法，用于通知所有观察者
-    fn _notify_observers(observers_arc: &Arc<std::sync::Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
+    fn _notify_observers(
+        observers_arc: &Arc<std::sync::Mutex<Vec<ArcObserver>>>,
+        event: &ConnectionEvent,
+    ) {
         let observers = match observers_arc.lock() {
             Ok(obs) => obs,
             Err(e) => {
-                warn!("[DEBUG WebSocketTransport] _notify_observers: 无法获取 observers 锁: {}", e);
+                warn!(
+                    "[DEBUG WebSocketTransport] _notify_observers: 无法获取 observers 锁: {}",
+                    e
+                );
                 return;
             }
         };
-        
+
         debug!(
             "[DEBUG WebSocketTransport] _notify_observers: observer_count={}, event={:?}",
             observers.len(),
             event
         );
-        
+
         for (idx, observer) in observers.iter().enumerate() {
             debug!(
                 "[DEBUG WebSocketTransport] _notify_observers: 调用 observer[{}].on_event",
@@ -266,7 +282,7 @@ impl WebSocketTransport {
             .map_err(|e| FlareError::connection_failed(e.to_string()))?;
         Ok(())
     }
-    
+
     /// 发送 WebSocket 协议层的 PONG 响应 (Plain)
     async fn send_pong_response_plain(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
@@ -283,13 +299,13 @@ impl WebSocketTransport {
     fn build_pong_frame() -> Result<Vec<u8>> {
         // 使用 builder 构建 PONG Frame
         let pong_frame = frame_with_system_command(pong(), Reliability::BestEffort);
-        
+
         // 序列化为 protobuf
         let mut buf = Vec::new();
         pong_frame
             .encode(&mut buf)
             .map_err(|e| FlareError::encoding_error(e.to_string()))?;
-        
+
         Ok(buf)
     }
 
@@ -299,29 +315,29 @@ impl WebSocketTransport {
     ) -> Result<()> {
         // 构建 PONG Frame
         let pong_data = Self::build_pong_frame()?;
-        
+
         // 通过 WebSocket 发送
         let mut sink = sink.lock().await;
         sink.send(Message::Binary(Bytes::from(pong_data)))
             .await
             .map_err(|e| FlareError::connection_failed(e.to_string()))?;
-        
+
         Ok(())
     }
-    
+
     /// 发送应用层的 PONG Frame 消息 (Plain)
     async fn send_pong_frame_plain(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
     ) -> Result<()> {
         // 构建 PONG Frame
         let pong_data = Self::build_pong_frame()?;
-        
+
         // 通过 WebSocket 发送
         let mut sink = sink.lock().await;
         sink.send(Message::Binary(Bytes::from(pong_data)))
             .await
             .map_err(|e| FlareError::connection_failed(e.to_string()))?;
-        
+
         Ok(())
     }
 }
@@ -349,7 +365,7 @@ impl Connection for WebSocketTransport {
 
         let message = Message::Binary(Bytes::from(data.to_vec()));
         debug!("[DEBUG WebSocketTransport] send: 消息已创建，准备发送");
-        
+
         match &mut self.sink {
             WebSocketSink::Tls(sink) => {
                 debug!("[DEBUG WebSocketTransport] send: 使用 TLS sink");
@@ -389,7 +405,9 @@ impl Connection for WebSocketTransport {
                     .map_err(|e| FlareError::connection_failed(e.to_string()))?;
             }
         }
-        self.notify_observers(&ConnectionEvent::Disconnected("Closed by client".to_string()));
+        self.notify_observers(&ConnectionEvent::Disconnected(
+            "Closed by client".to_string(),
+        ));
         Ok(())
     }
 

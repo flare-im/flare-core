@@ -54,7 +54,9 @@ impl TransportFactory {
             (TransportType::TCP, StreamWrapper::TCP(tcp_stream)) => {
                 Ok(Box::new(TCPTransport::new(tcp_stream)))
             }
-            _ => Err(FlareError::protocol_error("Mismatched transport type and stream")),
+            _ => Err(FlareError::protocol_error(
+                "Mismatched transport type and stream",
+            )),
         }
     }
 }

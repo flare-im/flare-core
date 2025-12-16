@@ -1,12 +1,12 @@
 //! 连接协商模块
-//! 
+//!
 //! 处理连接建立时的序列化格式、压缩算法和设备信息协商
 
-use crate::common::device::DeviceInfo;
-use crate::common::protocol::{Frame, SystemCommand};
-use crate::common::protocol::flare::core::commands::system_command::SerializationFormat;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::device::DeviceInfo;
 use crate::common::error::Result;
+use crate::common::protocol::flare::core::commands::system_command::SerializationFormat;
+use crate::common::protocol::{Frame, SystemCommand};
 use std::collections::HashMap;
 
 /// 连接协商结果
@@ -38,18 +38,21 @@ impl NegotiationResult {
 }
 
 /// 解析 CONNECT 消息，提取客户端协商信息
-/// 
+///
 /// # 参数
 /// - `frame`: CONNECT 消息的 Frame
-/// 
+///
 /// # 返回
 /// 协商结果，包含序列化格式、压缩算法、设备信息等
 pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
     let mut result = NegotiationResult::default();
-    
+
     // 检查是否是 CONNECT 命令
     if let Some(cmd) = &frame.command {
-        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+        if let Some(crate::common::protocol::flare::core::commands::command::Type::System(
+            sys_cmd,
+        )) = &cmd.r#type
+        {
             use crate::common::protocol::flare::core::commands::system_command::Type as SystemType;
             if sys_cmd.r#type == SystemType::Connect as i32 {
                 // 解析序列化格式（使用 TryFrom 替代已弃用的 from_i32）
@@ -62,7 +65,7 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
                     SerializationFormat::try_from(sys_cmd.format)
                         .unwrap_or(SerializationFormat::Json)
                 };
-                
+
                 // 解析压缩算法（从 metadata 中）
                 if let Some(compression_bytes) = sys_cmd.metadata.get("compression") {
                     if let Ok(compression_str) = String::from_utf8(compression_bytes.clone()) {
@@ -70,12 +73,14 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
                             .unwrap_or(CompressionAlgorithm::None);
                     }
                 }
-                
+
                 // 解析设备信息（从 metadata 中）
                 if let Some(device_id_bytes) = sys_cmd.metadata.get("device_id") {
                     if let Ok(device_id) = String::from_utf8(device_id_bytes.clone()) {
                         // 解析平台类型
-                        let platform = if let Some(platform_bytes) = sys_cmd.metadata.get("platform") {
+                        let platform = if let Some(platform_bytes) =
+                            sys_cmd.metadata.get("platform")
+                        {
                             if let Ok(platform_str) = String::from_utf8(platform_bytes.clone()) {
                                 crate::common::device::DevicePlatform::from_str(&platform_str)
                             } else {
@@ -84,9 +89,9 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
                         } else {
                             crate::common::device::DevicePlatform::Other("unknown".to_string())
                         };
-                        
+
                         let mut device_info = DeviceInfo::new(device_id, platform);
-                        
+
                         // 解析可选的设备信息
                         if let Some(model_bytes) = sys_cmd.metadata.get("model") {
                             if let Ok(model) = String::from_utf8(model_bytes.clone()) {
@@ -99,31 +104,42 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
                             }
                         }
                         if let Some(system_version_bytes) = sys_cmd.metadata.get("system_version") {
-                            if let Ok(system_version) = String::from_utf8(system_version_bytes.clone()) {
+                            if let Ok(system_version) =
+                                String::from_utf8(system_version_bytes.clone())
+                            {
                                 device_info = device_info.with_system_version(system_version);
                             }
                         }
-                        
+
                         // 解析其他元数据
                         for (key, value) in &sys_cmd.metadata {
-                            if !matches!(key.as_str(), "compression" | "device_id" | "platform" | "model" | "app_version" | "system_version" | "user_id") {
+                            if !matches!(
+                                key.as_str(),
+                                "compression"
+                                    | "device_id"
+                                    | "platform"
+                                    | "model"
+                                    | "app_version"
+                                    | "system_version"
+                                    | "user_id"
+                            ) {
                                 if let Ok(value_str) = String::from_utf8(value.clone()) {
                                     device_info = device_info.with_metadata(key.clone(), value_str);
                                 }
                             }
                         }
-                        
+
                         result.device_info = Some(device_info);
                     }
                 }
-                
+
                 // 解析用户 ID（如果客户端在 CONNECT 中提供，用于预认证）
                 if let Some(user_id_bytes) = sys_cmd.metadata.get("user_id") {
                     if let Ok(user_id) = String::from_utf8(user_id_bytes.clone()) {
                         result.user_id = Some(user_id);
                     }
                 }
-                
+
                 // 解析是否强制指定格式（客户端强制模式）
                 if let Some(force_bytes) = sys_cmd.metadata.get("force_format") {
                     if let Ok(force_str) = String::from_utf8(force_bytes.clone()) {
@@ -133,27 +149,27 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
             }
         }
     }
-    
+
     Ok(result)
 }
 
 /// 创建 CONNECT_ACK 响应
-/// 
+///
 /// # 参数
 /// - `format`: 确认使用的序列化格式
 /// - `compression`: 确认使用的压缩算法
 /// - `additional_metadata`: 额外的元数据（如设备冲突信息等）
-/// 
+///
 /// # 返回
 /// CONNECT_ACK 命令
 /// 创建 CONNECT_ACK 消息
-/// 
+///
 /// # 参数
 /// - `format`: 确认使用的序列化格式
 /// - `compression`: 确认使用的压缩算法
 /// - `encryption`: 确认使用的加密方式（目前为 "none"，为未来扩展预留）
 /// - `additional_metadata`: 额外的元数据（如设备冲突信息等）
-/// 
+///
 /// # 返回
 /// CONNECT_ACK 命令
 pub fn create_connect_ack(
@@ -172,26 +188,28 @@ pub fn create_connect_ack(
         // 如果未注册，回退到 none
         compression_str = "none";
     }
-    
+
     // 验证加密方式是否已注册（如果提供了）
     let mut encryption_str = encryption.unwrap_or("none");
-    if encryption_str != "none" && !crate::common::encryption::EncryptionUtil::is_registered(encryption_str) {
+    if encryption_str != "none"
+        && !crate::common::encryption::EncryptionUtil::is_registered(encryption_str)
+    {
         tracing::warn!(
             "[Negotiation] 加密方式 '{}' 未注册，将使用 'none'",
             encryption_str
         );
         encryption_str = "none";
     }
-    
+
     let mut metadata = HashMap::new();
-    
+
     // 添加额外的元数据
     if let Some(extra) = additional_metadata {
         for (key, value) in extra {
             metadata.insert(key, value);
         }
     }
-    
+
     crate::common::protocol::connect_ack(
         format,
         Some(compression_str),
@@ -199,4 +217,3 @@ pub fn create_connect_ack(
         metadata,
     )
 }
-

@@ -1,13 +1,13 @@
 //! 简单模式服务端构建器（毛坯房）
-//! 
+//!
 //! 提供最小实现，没有任何"装修"，适合快速原型开发和小型应用
-//! 
+//!
 //! ## 特点
 //! - ✅ 最小依赖：只提供基本的消息处理（闭包）
 //! - ✅ 零配置：使用默认配置即可运行
 //! - ✅ 轻量级：不包含中间件、管道等高级功能
 //! - ✅ 快速上手：几行代码即可启动服务器
-//! 
+//!
 //! ## 适用场景
 //! - 快速原型开发
 //! - 小型应用
@@ -16,15 +16,15 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::server::{ConnectionHandler, HybridServer};
-use crate::server::handle::ServerHandle;
 use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
-use std::sync::Arc;
+use crate::server::handle::ServerHandle;
+use crate::server::{ConnectionHandler, HybridServer};
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// 消息处理上下文
-/// 
+///
 /// 提供给消息处理函数的上下文，包含连接信息和服务器操作处理器
 pub struct MessageContext {
     /// 连接 ID
@@ -59,7 +59,9 @@ impl MessageContext {
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        self.handle.broadcast_except(frame, exclude_connection_id).await
+        self.handle
+            .broadcast_except(frame, exclude_connection_id)
+            .await
     }
 
     /// 断开指定连接
@@ -79,13 +81,37 @@ impl MessageContext {
 }
 
 /// 消息处理函数类型
-pub type MessageHandlerFn = Box<dyn for<'a> Fn(&'a Frame, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + 'a>> + Send + Sync>;
+pub type MessageHandlerFn = Box<
+    dyn for<'a> Fn(
+            &'a Frame,
+            &'a MessageContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + 'a>,
+        > + Send
+        + Sync,
+>;
 
 /// 连接事件处理函数类型
-pub type OnConnectFn = Box<dyn for<'a> Fn(&'a str, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> + Send + Sync>;
+pub type OnConnectFn = Box<
+    dyn for<'a> Fn(
+            &'a str,
+            &'a MessageContext,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        + Send
+        + Sync,
+>;
 
 /// 断开连接事件处理函数类型
-pub type OnDisconnectFn = Box<dyn for<'a> Fn(&'a str, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> + Send + Sync>;
+pub type OnDisconnectFn = Box<
+    dyn for<'a> Fn(
+            &'a str,
+            &'a MessageContext,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        + Send
+        + Sync,
+>;
 
 /// 简化的连接处理器
 struct SimpleConnectionHandler {
@@ -96,7 +122,6 @@ struct SimpleConnectionHandler {
 }
 
 impl SimpleConnectionHandler {
-
     async fn set_handle(&self, handle: Arc<dyn ServerHandle>) {
         *self.handle.lock().await = Some(handle);
     }
@@ -115,7 +140,9 @@ impl ConnectionHandler for SimpleConnectionHandler {
         } else {
             // 如果没有 handle，创建一个空的（使用 ServerCore 的默认实现）
             // 这里暂时返回错误，实际上应该在 build 时设置 handle
-            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
+            return Err(crate::common::error::FlareError::general_error(
+                "Server handle is not available",
+            ));
         };
 
         if let Some(ref handler) = self.message_handler {
@@ -134,7 +161,9 @@ impl ConnectionHandler for SimpleConnectionHandler {
         let context = if let Some(ref handle) = handle {
             MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
+            return Err(crate::common::error::FlareError::general_error(
+                "Server handle is not available",
+            ));
         };
 
         if let Some(ref handler) = self.on_connect {
@@ -153,7 +182,9 @@ impl ConnectionHandler for SimpleConnectionHandler {
         let context = if let Some(ref handle) = handle {
             MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            return Err(crate::common::error::FlareError::general_error("Server handle is not available"));
+            return Err(crate::common::error::FlareError::general_error(
+                "Server handle is not available",
+            ));
         };
 
         if let Some(ref handler) = self.on_disconnect {
@@ -164,9 +195,8 @@ impl ConnectionHandler for SimpleConnectionHandler {
     }
 }
 
-
 /// 简化的服务器实例
-/// 
+///
 /// 提供简化的接口，自动处理服务器引用
 pub struct SimpleServer {
     wrapper: ServerWrapper,
@@ -224,14 +254,16 @@ impl SimpleServer {
 
     /// 广播消息到所有连接，排除指定连接
     pub async fn broadcast_except(&self, frame: &Frame, exclude_connection_id: &str) -> Result<()> {
-        self.wrapper.broadcast_except(frame, exclude_connection_id).await
+        self.wrapper
+            .broadcast_except(frame, exclude_connection_id)
+            .await
     }
 
     /// 断开指定连接
     pub async fn disconnect(&self, connection_id: &str) -> Result<()> {
         self.wrapper.disconnect(connection_id).await
     }
-    
+
     /// 获取协议列表
     pub fn protocols(&self) -> Vec<crate::common::config_types::TransportProtocol> {
         self.wrapper.protocols()
@@ -239,7 +271,7 @@ impl SimpleServer {
 }
 
 /// 简单模式服务端构建器
-/// 
+///
 /// 使用闭包定义消息处理逻辑
 pub struct ServerBuilder {
     base: BaseServerBuilderConfig,
@@ -250,7 +282,7 @@ pub struct ServerBuilder {
 
 impl ServerBuilder {
     /// 创建新的服务端构建器
-    /// 
+    ///
     /// # 参数
     /// - `bind_address`: 监听地址，例如 "0.0.0.0:8080"
     pub fn new(bind_address: impl Into<String>) -> Self {
@@ -261,25 +293,28 @@ impl ServerBuilder {
             on_disconnect: None,
         }
     }
-    
+
     /// 设置认证器（如果启用认证，必须提供）
-    /// 
+    ///
     /// 如果设置了认证器，还需要在配置中启用认证：
     /// ```rust
     /// .enable_auth()
     /// .with_authenticator(authenticator)
     /// ```
-    pub fn with_authenticator(mut self, authenticator: Arc<dyn crate::server::auth::Authenticator>) -> Self {
+    pub fn with_authenticator(
+        mut self,
+        authenticator: Arc<dyn crate::server::auth::Authenticator>,
+    ) -> Self {
         self.base = self.base.with_authenticator(authenticator);
         self
     }
-    
+
     /// 启用认证
     pub fn enable_auth(mut self) -> Self {
         self.base = self.base.enable_auth();
         self
     }
-    
+
     /// 设置认证超时时间
     pub fn with_auth_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.base = self.base.with_auth_timeout(timeout);
@@ -287,55 +322,76 @@ impl ServerBuilder {
     }
 
     /// 设置消息处理函数
-    /// 
+    ///
     /// # 参数
     /// - `handler`: 消息处理函数，接收 Frame 和 MessageContext，返回 Option<Frame>（可选回复）
     pub fn on_message<F>(mut self, handler: F) -> Self
     where
-        F: for<'a> Fn(&'a Frame, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + 'a>> + Send + Sync + 'static,
+        F: for<'a> Fn(
+                &'a Frame,
+                &'a MessageContext,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + 'a>,
+            > + Send
+            + Sync
+            + 'static,
     {
-        self.message_handler = Some(Box::new(move |frame, ctx| {
-            handler(frame, ctx)
-        }));
+        self.message_handler = Some(Box::new(move |frame, ctx| handler(frame, ctx)));
         self
     }
 
     /// 设置连接建立事件处理函数
-    /// 
+    ///
     /// # 参数
     /// - `handler`: 连接建立处理函数，接收 connection_id 和 MessageContext
     pub fn on_connect<F>(mut self, handler: F) -> Self
     where
-        F: for<'a> Fn(&'a str, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> + Send + Sync + 'static,
+        F: for<'a> Fn(
+                &'a str,
+                &'a MessageContext,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>,
+            > + Send
+            + Sync
+            + 'static,
     {
-        self.on_connect = Some(Box::new(move |conn_id, ctx| {
-            handler(conn_id, ctx)
-        }));
+        self.on_connect = Some(Box::new(move |conn_id, ctx| handler(conn_id, ctx)));
         self
     }
 
     /// 设置连接断开事件处理函数
-    /// 
+    ///
     /// # 参数
     /// - `handler`: 连接断开处理函数，接收 connection_id 和 MessageContext
     pub fn on_disconnect<F>(mut self, handler: F) -> Self
     where
-        F: for<'a> Fn(&'a str, &'a MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> + Send + Sync + 'static,
+        F: for<'a> Fn(
+                &'a str,
+                &'a MessageContext,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>,
+            > + Send
+            + Sync
+            + 'static,
     {
-        self.on_disconnect = Some(Box::new(move |conn_id, ctx| {
-            handler(conn_id, ctx)
-        }));
+        self.on_disconnect = Some(Box::new(move |conn_id, ctx| handler(conn_id, ctx)));
         self
     }
 
     /// 设置传输协议
-    pub fn with_protocol(mut self, protocol: crate::common::config_types::TransportProtocol) -> Self {
+    pub fn with_protocol(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+    ) -> Self {
         self.base = self.base.with_protocol(protocol);
         self
     }
 
     /// 启用多协议监听
-    pub fn with_protocols(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
+    pub fn with_protocols(
+        mut self,
+        protocols: Vec<crate::common::config_types::TransportProtocol>,
+    ) -> Self {
         self.base = self.base.with_protocols(protocols);
         self
     }
@@ -347,7 +403,10 @@ impl ServerBuilder {
     }
 
     /// 设置心跳配置
-    pub fn with_heartbeat(mut self, heartbeat: crate::common::config_types::HeartbeatConfig) -> Self {
+    pub fn with_heartbeat(
+        mut self,
+        heartbeat: crate::common::config_types::HeartbeatConfig,
+    ) -> Self {
         self.base = self.base.with_heartbeat(heartbeat);
         self
     }
@@ -359,19 +418,25 @@ impl ServerBuilder {
     }
 
     /// 设置默认序列化格式（用于协商，默认 Protobuf）
-    pub fn with_default_format(mut self, format: crate::common::protocol::SerializationFormat) -> Self {
+    pub fn with_default_format(
+        mut self,
+        format: crate::common::protocol::SerializationFormat,
+    ) -> Self {
         self.base = self.base.with_default_format(format);
         self
     }
 
     /// 设置默认压缩算法（用于协商，默认 None）
-    pub fn with_default_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+    pub fn with_default_compression(
+        mut self,
+        compression: crate::common::compression::CompressionAlgorithm,
+    ) -> Self {
         self.base = self.base.with_default_compression(compression);
         self
     }
 
     /// 构建服务端
-    /// 
+    ///
     /// # 返回
     /// 返回配置好的 SimpleServer 实例
     pub fn build(self) -> Result<SimpleServer> {
@@ -391,10 +456,10 @@ impl ServerBuilder {
             None,
             self.base.authenticator,
         )?;
-        
+
         // 使用 ServerWrapper 统一管理
         let wrapper = ServerWrapper::new(server);
-        
+
         // 创建 ServerHandle（通过 ServerWrapper）
         let handle = wrapper.get_server_handle().ok_or_else(|| {
             crate::common::error::FlareError::general_error("Failed to create ServerHandle")
@@ -407,4 +472,3 @@ impl ServerBuilder {
         })
     }
 }
-

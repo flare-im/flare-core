@@ -1,10 +1,10 @@
 //! 内置序列化格式实现
-//! 
+//!
 //! 提供常用的序列化格式实现
 
+use super::traits::Serializer;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::{Frame, SerializationFormat};
-use super::traits::Serializer;
 
 /// Protobuf 序列化器
 pub struct ProtobufSerializer;
@@ -68,4 +68,3 @@ impl Serializer for JsonSerializer {
         first == b'{' || first == b'['
     }
 }
-

@@ -1,9 +1,9 @@
 //! 内置加密算法实现
-//! 
+//!
 //! 提供常用的加密算法实现
 
-use crate::common::error::{FlareError, Result};
 use super::traits::Encryptor;
+use crate::common::error::{FlareError, Result};
 
 /// 加密算法类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -55,10 +55,10 @@ impl Encryptor for NoEncryptor {
 }
 
 /// AES-256-GCM 加密器
-/// 
+///
 /// 使用 AES-256-GCM 算法进行加密，每次加密使用随机生成的 12 字节 nonce
 /// 加密后的数据格式: [nonce (12 bytes)][ciphertext]
-/// 
+///
 /// # 安全说明
 /// - 每次加密都会生成新的随机 nonce，确保相同明文产生不同密文
 /// - 密钥必须严格保密，建议使用安全的密钥派生函数（如 PBKDF2）从密码生成
@@ -69,45 +69,44 @@ pub struct Aes256GcmEncryptor {
 
 impl Aes256GcmEncryptor {
     /// 创建新的 AES-256-GCM 加密器
-    /// 
+    ///
     /// # 参数
     /// - `key`: 32 字节的密钥
-    /// 
+    ///
     /// # 错误
     /// 如果密钥长度不是 32 字节，返回错误
     pub fn new(key: &[u8]) -> Result<Self> {
         if key.len() != 32 {
-            return Err(FlareError::protocol_error(
-                format!("AES-256-GCM requires a 32-byte key, got {} bytes", key.len())
-            ));
+            return Err(FlareError::protocol_error(format!(
+                "AES-256-GCM requires a 32-byte key, got {} bytes",
+                key.len()
+            )));
         }
-        
+
         let mut key_array = [0u8; 32];
         key_array.copy_from_slice(key);
-        
-        Ok(Self {
-            key: key_array,
-        })
+
+        Ok(Self { key: key_array })
     }
-    
+
     /// 从密码派生密钥（使用 PBKDF2）
-    /// 
+    ///
     /// # 参数
     /// - `password`: 密码
     /// - `salt`: 盐值（可选，如果不提供则使用默认盐值）
-    /// 
+    ///
     /// # 返回
     /// 加密器实例
     pub fn from_password(password: &[u8], salt: Option<&[u8]>) -> Result<Self> {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         let mut hasher = Sha256::new();
         hasher.update(password);
         if let Some(s) = salt {
             hasher.update(s);
         }
         let key = hasher.finalize();
-        
+
         Self::new(&key)
     }
 }
@@ -115,22 +114,23 @@ impl Aes256GcmEncryptor {
 impl Encryptor for Aes256GcmEncryptor {
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::{
-            aead::{Aead, AeadCore, KeyInit, OsRng},
             Aes256Gcm as AesGcm,
-            Nonce,
+            aead::{Aead, AeadCore, KeyInit, OsRng},
         };
-        
+
         // 创建加密器
-        let cipher = AesGcm::new_from_slice(&self.key)
-            .map_err(|e| FlareError::encoding_error(format!("Failed to create AES-GCM cipher: {}", e)))?;
-        
+        let cipher = AesGcm::new_from_slice(&self.key).map_err(|e| {
+            FlareError::encoding_error(format!("Failed to create AES-GCM cipher: {}", e))
+        })?;
+
         // 生成随机 nonce（12 字节）
         let nonce = AesGcm::generate_nonce(&mut OsRng);
-        
+
         // 加密数据
-        let ciphertext = cipher.encrypt(&nonce, data)
+        let ciphertext = cipher
+            .encrypt(&nonce, data)
             .map_err(|e| FlareError::encoding_error(format!("AES-GCM encryption failed: {}", e)))?;
-        
+
         // 组合 nonce 和 ciphertext: [nonce (12 bytes)][ciphertext]
         // nonce 是 GenericArray<u8, U12>，转换为数组
         // 使用 into() 将 GenericArray 转换为数组
@@ -138,44 +138,45 @@ impl Encryptor for Aes256GcmEncryptor {
         let mut result = Vec::with_capacity(12 + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
-        
+
         Ok(result)
     }
 
     fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::{
+            Aes256Gcm as AesGcm, Nonce,
             aead::{Aead, KeyInit},
-            Aes256Gcm as AesGcm,
-            Nonce,
         };
-        
+
         // 检查数据长度（至少需要 12 字节 nonce）
         if data.len() < 12 {
-            return Err(FlareError::deserialization_error(
-                format!("Encrypted data too short: expected at least 12 bytes, got {}", data.len())
-            ));
+            return Err(FlareError::deserialization_error(format!(
+                "Encrypted data too short: expected at least 12 bytes, got {}",
+                data.len()
+            )));
         }
-        
+
         // 提取 nonce 和 ciphertext
         let (nonce_bytes, ciphertext) = data.split_at(12);
-        
+
         // 将 nonce_bytes 转换为固定大小数组
-        let nonce_array: [u8; 12] = nonce_bytes.try_into()
-            .map_err(|_| FlareError::deserialization_error(
-                "Failed to convert nonce bytes to array".to_string()
-            ))?;
-        
+        let nonce_array: [u8; 12] = nonce_bytes.try_into().map_err(|_| {
+            FlareError::deserialization_error("Failed to convert nonce bytes to array".to_string())
+        })?;
+
         // 创建 Nonce（使用 From trait）
         let nonce = Nonce::from(nonce_array);
-        
+
         // 创建解密器
-        let cipher = AesGcm::new_from_slice(&self.key)
-            .map_err(|e| FlareError::encoding_error(format!("Failed to create AES-GCM cipher: {}", e)))?;
-        
+        let cipher = AesGcm::new_from_slice(&self.key).map_err(|e| {
+            FlareError::encoding_error(format!("Failed to create AES-GCM cipher: {}", e))
+        })?;
+
         // 解密数据
-        let plaintext = cipher.decrypt(&nonce, ciphertext)
-            .map_err(|e| FlareError::deserialization_error(format!("AES-GCM decryption failed: {}", e)))?;
-        
+        let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|e| {
+            FlareError::deserialization_error(format!("AES-GCM decryption failed: {}", e))
+        })?;
+
         Ok(plaintext)
     }
 
@@ -187,4 +188,3 @@ impl Encryptor for Aes256GcmEncryptor {
         "aes256gcm"
     }
 }
-

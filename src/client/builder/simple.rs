@@ -1,24 +1,24 @@
 //! 简单模式客户端构建器（毛坯房）
-//! 
+//!
 //! 提供最小实现，没有任何"装修"，适合快速原型开发和小型应用
-//! 
+//!
 //! ## 特点
 //! - ✅ 最小依赖：只提供基本的消息处理（闭包）
 //! - ✅ 零配置：使用默认配置即可运行
 //! - ✅ 轻量级：不包含中间件、管道等高级功能
 //! - ✅ 快速上手：几行代码即可启动客户端
-//! 
+//!
 //! ## 适用场景
 //! - 快速原型开发
 //! - 小型应用
 //! - 学习和测试
 //! - 需要完全控制消息处理流程的场景
 
+use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
+use crate::client::{Client, HybridClient};
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::client::{HybridClient, Client};
 use crate::transport::events::{ConnectionEvent, ConnectionObserver};
-use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use std::sync::Arc;
 
 /// 客户端消息处理函数类型
@@ -41,7 +41,9 @@ impl ConnectionObserver for SimpleClientObserver {
                 if let Ok(frame) = crate::common::MessageParser::new(
                     crate::common::protocol::SerializationFormat::Protobuf,
                     crate::common::compression::CompressionAlgorithm::None,
-                ).parse(data) {
+                )
+                .parse(data)
+                {
                     if let Some(ref handler) = self.message_handler {
                         if let Err(e) = handler(&frame) {
                             tracing::error!("消息处理错误: {:?}", e);
@@ -72,7 +74,7 @@ impl SimpleClient {
             let mut client = self.wrapper.client().lock().await;
             client.add_observer(self.observer.clone() as Arc<dyn ConnectionObserver>);
         }
-        
+
         // 然后连接
         self.wrapper.connect().await
     }
@@ -88,7 +90,11 @@ impl SimpleClient {
     }
 
     /// 发送并等待响应（按 message_id 匹配）
-    pub async fn send_frame_and_wait(&mut self, frame: &Frame, timeout: std::time::Duration) -> Result<Frame> {
+    pub async fn send_frame_and_wait(
+        &mut self,
+        frame: &Frame,
+        timeout: std::time::Duration,
+    ) -> Result<Frame> {
         self.wrapper.send_frame_and_wait(frame, timeout).await
     }
 
@@ -109,7 +115,7 @@ impl SimpleClient {
 }
 
 /// 简单模式客户端构建器
-/// 
+///
 /// 使用闭包定义消息处理逻辑
 pub struct ClientBuilder {
     base: BaseClientBuilderConfig,
@@ -119,7 +125,7 @@ pub struct ClientBuilder {
 
 impl ClientBuilder {
     /// 创建新的客户端构建器
-    /// 
+    ///
     /// # 参数
     /// - `server_url`: 服务器地址，例如 "ws://127.0.0.1:8080" 或 "quic://127.0.0.1:8080"
     pub fn new(server_url: impl Into<String>) -> Self {
@@ -131,7 +137,7 @@ impl ClientBuilder {
     }
 
     /// 设置消息处理函数
-    /// 
+    ///
     /// # 参数
     /// - `handler`: 消息处理函数，接收 Frame
     pub fn on_message<F>(mut self, handler: F) -> Self
@@ -143,7 +149,7 @@ impl ClientBuilder {
     }
 
     /// 设置事件处理函数
-    /// 
+    ///
     /// # 参数
     /// - `handler`: 事件处理函数，接收 ConnectionEvent
     pub fn on_event<F>(mut self, handler: F) -> Self
@@ -155,21 +161,31 @@ impl ClientBuilder {
     }
 
     /// 设置传输协议
-    pub fn with_protocol(mut self, protocol: crate::common::config_types::TransportProtocol) -> Self {
+    pub fn with_protocol(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+    ) -> Self {
         self.base = self.base.with_protocol(protocol);
         self
     }
 
     /// 启用多协议竞速
-    /// 
+    ///
     /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
-    pub fn with_protocol_race(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
+    pub fn with_protocol_race(
+        mut self,
+        protocols: Vec<crate::common::config_types::TransportProtocol>,
+    ) -> Self {
         self.base = self.base.with_protocol_race(protocols);
         self
     }
 
     /// 为特定协议设置服务器地址
-    pub fn with_protocol_url(mut self, protocol: crate::common::config_types::TransportProtocol, url: String) -> Self {
+    pub fn with_protocol_url(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+        url: String,
+    ) -> Self {
         self.base = self.base.with_protocol_url(protocol, url);
         self
     }
@@ -179,7 +195,7 @@ impl ClientBuilder {
         self.base = self.base.with_user_id(user_id);
         self
     }
-    
+
     /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
     pub fn with_token(mut self, token: String) -> Self {
         self.base = self.base.with_token(token);
@@ -193,13 +209,19 @@ impl ClientBuilder {
     }
 
     /// 设置压缩算法
-    pub fn with_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+    pub fn with_compression(
+        mut self,
+        compression: crate::common::compression::CompressionAlgorithm,
+    ) -> Self {
         self.base = self.base.with_compression(compression);
         self
     }
 
     /// 设置心跳配置
-    pub fn with_heartbeat(mut self, heartbeat: crate::common::config_types::HeartbeatConfig) -> Self {
+    pub fn with_heartbeat(
+        mut self,
+        heartbeat: crate::common::config_types::HeartbeatConfig,
+    ) -> Self {
         self.base = self.base.with_heartbeat(heartbeat);
         self
     }
@@ -227,9 +249,9 @@ impl ClientBuilder {
         self.base = self.base.with_max_reconnect_attempts(max);
         self
     }
-    
+
     /// 启用消息路由
-    /// 
+    ///
     /// 启用后，可以通过 ClientCore 的 router 方法注册消息处理器
     pub fn enable_router(mut self) -> Self {
         self.base = self.base.enable_router();
@@ -237,7 +259,7 @@ impl ClientBuilder {
     }
 
     /// 构建客户端
-    /// 
+    ///
     /// # 返回
     /// 返回配置好的 SimpleClient 实例
     pub fn build(self) -> Result<SimpleClient> {
@@ -249,10 +271,6 @@ impl ClientBuilder {
         let client = HybridClient::new(self.base.config)?;
         let wrapper = ClientWrapper::new(client);
 
-        Ok(SimpleClient {
-            wrapper,
-            observer,
-        })
+        Ok(SimpleClient { wrapper, observer })
     }
 }
-

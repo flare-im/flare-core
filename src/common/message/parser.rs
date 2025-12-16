@@ -1,11 +1,11 @@
 //! 消息解析模块
-//! 
+//!
 //! 负责将原始字节数据解析为 Frame 消息
 //! 使用压缩器和序列化器模块的标准接口，支持自动检测和扩展
 
+use crate::common::compression::{CompressionAlgorithm, CompressionUtil};
 use crate::common::error::Result;
 use crate::common::protocol::{Frame, SerializationFormat};
-use crate::common::compression::{CompressionUtil, CompressionAlgorithm};
 use crate::common::serializer::SerializationUtil;
 
 /// 消息解析器
@@ -45,12 +45,12 @@ impl MessageParser {
     }
 
     /// 解析消息（自动检测格式和压缩）
-    /// 
+    ///
     /// 首先尝试自动检测压缩，然后自动检测序列化格式并解析
     pub fn parse(&self, data: &[u8]) -> Result<Frame> {
         // 解压缩数据
         let decompressed = self.decompress_data(data)?;
-        
+
         // 尝试自动检测并解析
         self.parse_decompressed(&decompressed)
     }
@@ -61,10 +61,12 @@ impl MessageParser {
         let decompressed = self.decompress_data(data)?;
 
         // 使用指定的序列化器
-        let serializer = SerializationUtil::get_serializer(format)
-            .ok_or_else(|| crate::common::error::FlareError::deserialization_error(
-                format!("Serializer not found for format: {:?}", format)
-            ))?;
+        let serializer = SerializationUtil::get_serializer(format).ok_or_else(|| {
+            crate::common::error::FlareError::deserialization_error(format!(
+                "Serializer not found for format: {:?}",
+                format
+            ))
+        })?;
 
         serializer.deserialize(&decompressed)
     }
@@ -82,10 +84,12 @@ impl MessageParser {
         compression: CompressionAlgorithm,
     ) -> Result<Vec<u8>> {
         // 使用指定的序列化器
-        let serializer = SerializationUtil::get_serializer(format)
-            .ok_or_else(|| crate::common::error::FlareError::encoding_error(
-                format!("Serializer not found for format: {:?}", format)
-            ))?;
+        let serializer = SerializationUtil::get_serializer(format).ok_or_else(|| {
+            crate::common::error::FlareError::encoding_error(format!(
+                "Serializer not found for format: {:?}",
+                format
+            ))
+        })?;
 
         // 序列化
         let data = serializer.serialize(frame)?;
@@ -96,7 +100,8 @@ impl MessageParser {
 
     /// 从 Frame 的 metadata 中读取压缩算法
     pub fn get_compression_from_frame(frame: &Frame) -> CompressionAlgorithm {
-        frame.metadata
+        frame
+            .metadata
             .get("compression")
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|s| CompressionAlgorithm::from_str(s))
@@ -105,33 +110,36 @@ impl MessageParser {
 
     /// 从 Frame 的 metadata 中读取序列化格式
     pub fn get_format_from_frame(frame: &Frame) -> Option<SerializationFormat> {
-        frame.metadata
+        frame
+            .metadata
             .get("format")
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|s| {
-                match s.to_lowercase().as_str() {
-                    "protobuf" => Some(SerializationFormat::Protobuf),
-                    "json" => Some(SerializationFormat::Json),
-                    _ => None,
+                if s.eq_ignore_ascii_case("protobuf") {
+                    Some(SerializationFormat::Protobuf)
+                } else if s.eq_ignore_ascii_case("json") {
+                    Some(SerializationFormat::Json)
+                } else {
+                    None
                 }
             })
     }
-    
+
     // ============================================================================
     // 内部辅助方法
     // ============================================================================
-    
+
     /// 解压缩数据（内部辅助方法）
     fn decompress_data(&self, data: &[u8]) -> Result<Vec<u8>> {
         let (decompressed, _algorithm) = CompressionUtil::auto_decompress(data)?;
         Ok(decompressed)
     }
-    
+
     /// 解析已解压缩的数据（内部辅助方法）
     fn parse_decompressed(&self, decompressed: &[u8]) -> Result<Frame> {
         // 尝试自动检测序列化格式
         let detected_serializers = SerializationUtil::auto_detect(decompressed);
-        
+
         // 尝试每个检测到的序列化器
         for serializer in detected_serializers {
             if let Ok(frame) = serializer.deserialize(decompressed) {
@@ -142,20 +150,20 @@ impl MessageParser {
         // 如果自动检测失败，尝试所有已注册的序列化器
         self.try_all_serializers(decompressed)
     }
-    
+
     /// 尝试所有已注册的序列化器（内部辅助方法）
     fn try_all_serializers(&self, data: &[u8]) -> Result<Frame> {
-        for format in [SerializationFormat::Protobuf, SerializationFormat::Json] {
-            if let Some(serializer) = SerializationUtil::get_serializer(format) {
-                if let Ok(frame) = serializer.deserialize(data) {
-                    return Ok(frame);
-                }
-            }
-        }
-
-        Err(crate::common::error::FlareError::deserialization_error(
-            "Failed to parse message: no compatible serializer found".to_string(),
-        ))
+        [SerializationFormat::Protobuf, SerializationFormat::Json]
+            .iter()
+            .find_map(|&format| {
+                SerializationUtil::get_serializer(format)
+                    .and_then(|serializer| serializer.deserialize(data).ok())
+            })
+            .ok_or_else(|| {
+                crate::common::error::FlareError::deserialization_error(
+                    "Failed to parse message: no compatible serializer found".to_string(),
+                )
+            })
     }
 }
 
@@ -169,10 +177,12 @@ mod tests {
         let parser = MessageParser::protobuf();
         let frame = FrameBuilder::new()
             .with_command(crate::common::protocol::Command {
-                r#type: Some(crate::common::protocol::flare::core::commands::command::Type::System(ping())),
+                r#type: Some(
+                    crate::common::protocol::flare::core::commands::command::Type::System(ping()),
+                ),
             })
             .build();
-        
+
         let data = parser.serialize(&frame).unwrap();
         let parsed = parser.parse(&data).unwrap();
         assert_eq!(parsed.message_id, frame.message_id);
@@ -183,10 +193,12 @@ mod tests {
         let parser = MessageParser::json();
         let frame = FrameBuilder::new()
             .with_command(crate::common::protocol::Command {
-                r#type: Some(crate::common::protocol::flare::core::commands::command::Type::System(ping())),
+                r#type: Some(
+                    crate::common::protocol::flare::core::commands::command::Type::System(ping()),
+                ),
             })
             .build();
-        
+
         let data = parser.serialize(&frame).unwrap();
         let parsed = parser.parse(&data).unwrap();
         assert_eq!(parsed.message_id, frame.message_id);

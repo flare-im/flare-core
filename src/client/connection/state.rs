@@ -1,5 +1,5 @@
 //! 连接状态管理模块
-//! 
+//!
 //! 定义连接状态枚举和状态转换逻辑
 
 use std::sync::{Arc, Mutex};
@@ -30,12 +30,18 @@ impl ConnectionState {
 
     /// 检查是否可以连接
     pub fn can_connect(&self) -> bool {
-        matches!(self, ConnectionState::Disconnected | ConnectionState::Failed)
+        matches!(
+            self,
+            ConnectionState::Disconnected | ConnectionState::Failed
+        )
     }
 
     /// 检查是否正在连接过程中
     pub fn is_connecting(&self) -> bool {
-        matches!(self, ConnectionState::Connecting | ConnectionState::Reconnecting)
+        matches!(
+            self,
+            ConnectionState::Connecting | ConnectionState::Reconnecting
+        )
     }
 }
 
@@ -75,7 +81,10 @@ impl ConnectionStateManager {
     }
 
     pub fn get_state(&self) -> ConnectionState {
-        self.state.lock().map(|s| *s).unwrap_or(ConnectionState::Disconnected)
+        self.state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(ConnectionState::Disconnected)
     }
 
     pub fn start_connecting(&self) {
@@ -114,16 +123,17 @@ impl ConnectionStateManager {
     }
 
     pub fn state_changed_at(&self) -> Instant {
-        self.state_changed_at.lock().map(|t| *t).unwrap_or_else(|_| Instant::now())
+        self.state_changed_at
+            .lock()
+            .map(|t| *t)
+            .unwrap_or_else(|_| Instant::now())
     }
 
     pub fn connect_duration(&self) -> Option<std::time::Duration> {
         self.connect_started_at
             .lock()
             .ok()
-            .and_then(|started_at| {
-                started_at.map(|start| start.elapsed())
-            })
+            .and_then(|started_at| started_at.map(|start| start.elapsed()))
     }
 }
 
@@ -132,4 +142,3 @@ impl Default for ConnectionStateManager {
         Self::new()
     }
 }
-

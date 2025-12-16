@@ -1,9 +1,9 @@
 //! 服务端配置模块
 
-use crate::common::config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
-use crate::common::protocol::SerializationFormat;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
 use crate::common::device::DeviceConflictStrategy;
+use crate::common::protocol::SerializationFormat;
 use std::time::Duration;
 
 /// 服务端配置
@@ -55,7 +55,7 @@ impl Default for ServerConfig {
             tls: TlsConfig::none(),
             max_message_size: 10 * 1024 * 1024, // 10MB
             device_conflict_strategy: DeviceConflictStrategy::default(),
-            auth_enabled: false, // 默认不启用认证
+            auth_enabled: false,                   // 默认不启用认证
             auth_timeout: Duration::from_secs(30), // 默认认证超时 30 秒
         }
     }
@@ -69,43 +69,43 @@ impl ServerConfig {
             ..Default::default()
         }
     }
-    
+
     /// 使用 WebSocket 协议
     pub fn websocket(mut self) -> Self {
         self.transport = TransportProtocol::WebSocket;
         self
     }
-    
+
     /// 使用 QUIC 协议
     pub fn quic(mut self) -> Self {
         self.transport = TransportProtocol::QUIC;
         self
     }
-    
+
     /// 设置默认序列化格式
     pub fn with_format(mut self, format: SerializationFormat) -> Self {
         self.default_serialization_format = format;
         self
     }
-    
+
     /// 设置默认压缩算法
     pub fn with_compression(mut self, compression: CompressionAlgorithm) -> Self {
         self.default_compression = compression;
         self
     }
-    
+
     /// 设置最大连接数
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
     }
-    
+
     /// 启用多协议监听
     pub fn with_protocols(mut self, protocols: Vec<TransportProtocol>) -> Self {
         self.transports = Some(protocols);
         self
     }
-    
+
     /// 为特定协议设置监听地址
     pub fn with_protocol_address(mut self, protocol: TransportProtocol, address: String) -> Self {
         if self.protocol_addresses.is_none() {
@@ -116,13 +116,16 @@ impl ServerConfig {
         }
         self
     }
-    
+
     /// 批量设置协议地址映射
-    pub fn with_protocol_addresses(mut self, addresses: std::collections::HashMap<TransportProtocol, String>) -> Self {
+    pub fn with_protocol_addresses(
+        mut self,
+        addresses: std::collections::HashMap<TransportProtocol, String>,
+    ) -> Self {
         self.protocol_addresses = Some(addresses);
         self
     }
-    
+
     /// 获取指定协议的地址
     pub fn get_protocol_address(&self, protocol: &TransportProtocol) -> String {
         if let Some(ref addresses) = self.protocol_addresses {
@@ -150,7 +153,7 @@ impl ServerConfig {
         self.connection_timeout = timeout;
         self
     }
-    
+
     /// 获取要使用的协议列表
     pub fn get_protocols(&self) -> Vec<TransportProtocol> {
         if let Some(ref protocols) = self.transports {
@@ -160,29 +163,28 @@ impl ServerConfig {
         }
     }
 
-    
     /// 设置设备冲突策略
     pub fn with_device_conflict_strategy(mut self, strategy: DeviceConflictStrategy) -> Self {
         self.device_conflict_strategy = strategy;
         self
     }
-    
+
     /// 启用认证
-    /// 
+    ///
     /// 启用后，所有连接必须通过 token 验证才能收发消息
     pub fn enable_auth(mut self) -> Self {
         self.auth_enabled = true;
         self
     }
-    
+
     /// 禁用认证（默认）
     pub fn disable_auth(mut self) -> Self {
         self.auth_enabled = false;
         self
     }
-    
+
     /// 设置认证超时时间
-    /// 
+    ///
     /// 连接建立后，如果在此时间内未完成认证，连接将被关闭
     /// 默认值为 30 秒
     pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {

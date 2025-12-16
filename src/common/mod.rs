@@ -1,5 +1,5 @@
 //! Flare Core 公共模块
-//! 
+//!
 //! 提供核心功能的公共实现，包括：
 //! - 错误处理：统一的错误类型和处理机制
 //! - 协议定义：消息协议和命令定义
@@ -26,21 +26,24 @@ pub mod utils;
 
 // 重新导出常用类型和函数，方便使用
 
-pub use compression::{Compressor, CompressionAlgorithm, CompressionUtil};
-pub use config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
+pub use compression::{CompressionAlgorithm, CompressionUtil, Compressor};
+pub use config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
 pub use constants::*;
-pub use device::{DevicePlatform, DeviceInfo, DeviceConflictStrategy, DeviceConflictStrategyBuilder};
-pub use encryption::{Encryptor, EncryptionAlgorithm, EncryptionUtil};
-pub use error::{FlareError, Result, ClientError, ServerError, ErrorCode, ErrorBuilder};
-pub use message::{
-    MessageParser, MessageHandler, MessageEvent,
-    MessagePipeline, MessageContext, MessageMiddleware, MessageProcessor,
-    ArcMessageMiddleware, ArcMessageProcessor,
-    FunctionProcessor, DelegateProcessor,
-    LoggingMiddleware, MetricsMiddleware, ValidationMiddleware, LogLevel,
+pub use device::{
+    DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceInfo, DevicePlatform,
 };
-pub use message_observer::{MessageObserver, ArcMessageObserver};
-pub use protocol::{Frame, Command, SystemCommand, MessageCommand, NotificationCommand, CustomCommand, Reliability, SerializationFormat};
-pub use serializer::{Serializer, SerializationUtil};
+pub use encryption::{EncryptionAlgorithm, EncryptionUtil, Encryptor};
+pub use error::{ClientError, ErrorBuilder, ErrorCode, FlareError, Result, ServerError};
+pub use message::{
+    ArcMessageMiddleware, ArcMessageProcessor, DelegateProcessor, FunctionProcessor, LogLevel,
+    LoggingMiddleware, MessageContext, MessageEvent, MessageHandler, MessageMiddleware,
+    MessageParser, MessagePipeline, MessageProcessor, MetricsMiddleware, ValidationMiddleware,
+};
+pub use message_observer::{ArcMessageObserver, MessageObserver};
+pub use protocol::{
+    Command, CustomCommand, Frame, MessageCommand, NotificationCommand, Reliability,
+    SerializationFormat, SystemCommand,
+};
+pub use serializer::{SerializationUtil, Serializer};
 pub use session_id::*;
 pub use utils::*;

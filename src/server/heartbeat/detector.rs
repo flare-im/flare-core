@@ -1,5 +1,5 @@
 //! 服务端心跳检测器
-//! 
+//!
 //! 定期检查连接的最后活跃时间，清理超时连接
 //! 服务端不需要主动发送心跳，只需要检测客户端的心跳和消息
 
@@ -7,10 +7,10 @@ use crate::server::connection::ConnectionManagerTrait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::{info, warn};
+use tracing::info;
 
 /// 心跳检测器
-/// 
+///
 /// 定期检查连接的最后活跃时间，清理超时连接
 pub struct HeartbeatDetector {
     connection_manager: Arc<dyn ConnectionManagerTrait>,
@@ -21,7 +21,7 @@ pub struct HeartbeatDetector {
 
 impl HeartbeatDetector {
     /// 创建新的心跳检测器
-    /// 
+    ///
     /// # 参数
     /// - `connection_manager`: 连接管理器
     /// - `timeout`: 连接超时时间（没有心跳或消息的时间）
@@ -40,7 +40,7 @@ impl HeartbeatDetector {
     }
 
     /// 启动心跳检测
-    /// 
+    ///
     /// 定期检查所有连接的最后活跃时间，清理超时连接
     pub fn start(&mut self) {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -64,13 +64,6 @@ impl HeartbeatDetector {
                                 timeout_connections.len(),
                                 timeout_connections
                             );
-                            
-                            // 断开所有超时连接
-                            for connection_id in timeout_connections {
-                                if let Err(e) = connection_manager.remove_connection(&connection_id).await {
-                                    warn!("Failed to remove timeout connection {}: {:?}", connection_id, e);
-                                }
-                            }
                         }
                     }
                     _ = rx.recv() => {

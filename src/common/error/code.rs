@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// 错误代码枚举 - 用于国际化
-/// 
+///
 /// 错误代码按类别分组，每个类别占用1000个代码范围：
 /// - 1000-1999: 连接相关错误
 /// - 2000-2999: 认证相关错误
@@ -29,7 +29,7 @@ pub enum ErrorCode {
     ConnectionLimitExceeded = 1004,
     NotConnected = 1005,
     ConnectionReconnecting = 1006,
-    
+
     // ============================================================
     // 认证相关错误 (2000-2999)
     // ============================================================
@@ -40,7 +40,7 @@ pub enum ErrorCode {
     PermissionDenied = 2004,
     TokenInvalid = 2005,
     TokenExpired = 2006,
-    
+
     // ============================================================
     // 协议相关错误 (3000-3999)
     // ============================================================
@@ -50,7 +50,7 @@ pub enum ErrorCode {
     MessageFormatError = 3003,
     MessageTooLarge = 3004,
     InvalidCommand = 3005,
-    
+
     // ============================================================
     // 消息相关错误 (4000-4999)
     // ============================================================
@@ -60,7 +60,7 @@ pub enum ErrorCode {
     MessageExpired = 4003,
     MessageRateLimitExceeded = 4004,
     MessageDecodeFailed = 4005,
-    
+
     // ============================================================
     // 用户相关错误 (5000-5999)
     // ============================================================
@@ -69,7 +69,7 @@ pub enum ErrorCode {
     UserBlocked = 5002,
     UserQuotaExceeded = 5003,
     UserSessionLimitExceeded = 5004,
-    
+
     // ============================================================
     // 系统相关错误 (6000-6999)
     // ============================================================
@@ -78,7 +78,7 @@ pub enum ErrorCode {
     ResourceExhausted = 6002,
     ConfigurationError = 6003,
     DatabaseError = 6004,
-    
+
     // ============================================================
     // 网络相关错误 (7000-7999)
     // ============================================================
@@ -86,14 +86,14 @@ pub enum ErrorCode {
     NetworkTimeout = 7001,
     NetworkUnreachable = 7002,
     NetworkConnectionLost = 7003,
-    
+
     // ============================================================
     // 序列化相关错误 (8000-8999)
     // ============================================================
     SerializationError = 8000,
     DeserializationError = 8001,
     EncodingError = 8002,
-    
+
     // ============================================================
     // 通用错误 (9000-9999)
     // ============================================================
@@ -117,7 +117,7 @@ impl ErrorCode {
     pub fn as_u32(&self) -> u32 {
         *self as u32
     }
-    
+
     /// 从数字值创建错误代码
     pub fn from_u32(code: u32) -> Option<Self> {
         match code {
@@ -173,7 +173,7 @@ impl ErrorCode {
             _ => None,
         }
     }
-    
+
     /// 获取错误代码的英文标识符
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -228,7 +228,7 @@ impl ErrorCode {
             ErrorCode::UnknownError => "UNKNOWN_ERROR",
         }
     }
-    
+
     /// 获取错误代码的类别（用于错误分类）
     pub fn category(&self) -> ErrorCategory {
         let code = self.as_u32();
@@ -244,7 +244,7 @@ impl ErrorCode {
             _ => ErrorCategory::General,
         }
     }
-    
+
     /// 判断是否为可重试的错误
     pub fn is_retryable(&self) -> bool {
         matches!(

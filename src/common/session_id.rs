@@ -222,7 +222,7 @@ impl SessionType {
             SessionType::Temp => "6",
         }
     }
-    
+
     /// 从数字前缀解析会话类型
     pub fn from_prefix(prefix: &str) -> Result<Self> {
         match prefix {
@@ -282,7 +282,7 @@ pub fn generate_single_chat_session_id(user1: &str, user2: &str) -> String {
 
     // 取前 10 字节（80 bit）
     let truncated = &hash[..10];
-    
+
     // Base32 编码（Crockford）
     let opaque_id = base32::encode(base32::Alphabet::Crockford, truncated);
 
@@ -305,21 +305,21 @@ pub fn generate_single_chat_session_id(user1: &str, user2: &str) -> String {
 /// 格式化的会话ID：`2A{16字符Base32编码}`
 pub fn generate_group_session_id(group_id: &str) -> String {
     use sha2::{Digest, Sha256};
-    
+
     // 输入：GROUP:v1:{group_id}
     let input = format!("GROUP:v1:{}", group_id);
-    
+
     // 计算 SHA256 哈希
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    
+
     // 取前 10 字节（80 bit）
     let truncated = &hash[..10];
-    
+
     // Base32 编码
     let opaque_id = base32::encode(base32::Alphabet::Crockford, truncated);
-    
+
     // 格式：2A{opaque_id}
     format!("2A{}", opaque_id)
 }
@@ -340,21 +340,21 @@ pub fn generate_group_session_id(group_id: &str) -> String {
 /// 格式化的会话ID：`3A{16字符Base32编码}`
 pub fn generate_ai_session_id(user_id: &str, ai_scope: &str) -> String {
     use sha2::{Digest, Sha256};
-    
+
     // 输入：AI:v1:{user_id}:{ai_scope}
     let input = format!("AI:v1:{}:{}", user_id, ai_scope);
-    
+
     // 计算 SHA256 哈希
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    
+
     // 取前 10 字节（80 bit）
     let truncated = &hash[..10];
-    
+
     // Base32 编码
     let opaque_id = base32::encode(base32::Alphabet::Crockford, truncated);
-    
+
     // 格式：3A{opaque_id}
     format!("3A{}", opaque_id)
 }
@@ -375,21 +375,21 @@ pub fn generate_ai_session_id(user_id: &str, ai_scope: &str) -> String {
 /// 格式化的会话ID：`5A{16字符Base32编码}`
 pub fn generate_customer_session_id(customer_id: &str, channel: &str) -> String {
     use sha2::{Digest, Sha256};
-    
+
     // 输入：CS:v1:{customer_id}:{channel}
     let input = format!("CS:v1:{}:{}", customer_id, channel);
-    
+
     // 计算 SHA256 哈希
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    
+
     // 取前 10 字节（80 bit）
     let truncated = &hash[..10];
-    
+
     // Base32 编码
     let opaque_id = base32::encode(base32::Alphabet::Crockford, truncated);
-    
+
     // 格式：5A{opaque_id}
     format!("5A{}", opaque_id)
 }
@@ -410,22 +410,22 @@ pub fn generate_customer_session_id(customer_id: &str, channel: &str) -> String 
 /// 格式化的会话ID：`4A{16字符Base32编码}`
 pub fn generate_system_session_id(system_id: &str, scope: Option<String>) -> String {
     use sha2::{Digest, Sha256};
-    
+
     // 输入：SYS:v1:{system_id}:{scope}
     let scope_str = scope.unwrap_or_default();
     let input = format!("SYS:v1:{}:{}", system_id, scope_str);
-    
+
     // 计算 SHA256 哈希
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    
+
     // 取前 10 字节（80 bit）
     let truncated = &hash[..10];
-    
+
     // Base32 编码
     let opaque_id = base32::encode(base32::Alphabet::Crockford, truncated);
-    
+
     // 格式：4A{opaque_id}
     format!("4A{}", opaque_id)
 }
@@ -504,20 +504,23 @@ pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
     // CID格式：TypePrefix(1) + Version(1) + OpaqueID
     if session_id.len() < 3 {
         return Err(anyhow::anyhow!("Session ID too short, expected CID format"));
-        }
+    }
 
     let prefix = &session_id[..1];
     let version = &session_id[1..2];
-    
+
     // 验证版本号（当前只支持 A）
     if version != "A" {
-        return Err(anyhow::anyhow!("Unsupported CID version: {}, expected 'A'", version));
-        }
-        
+        return Err(anyhow::anyhow!(
+            "Unsupported CID version: {}, expected 'A'",
+            version
+        ));
+    }
+
     // 验证类型前缀并获取会话类型
-        let session_type = SessionType::from_prefix(prefix)
+    let session_type = SessionType::from_prefix(prefix)
         .with_context(|| format!("Invalid CID type prefix: {}", prefix))?;
-        
+
     // 验证 OpaqueID 长度
     let opaque_id = &session_id[2..];
     match session_type {
@@ -546,9 +549,9 @@ pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
                     "Invalid CID opaque ID: contains invalid Base32 characters"
                     ));
                 }
-            }
+        }
     }
-    
+
     Ok(session_type)
 }
 
@@ -636,38 +639,36 @@ mod tests {
         let id3 = generate_ai_session_id("user_001", "claude:sonnet");
         assert_ne!(id1, id3);
     }
-    
+
     #[test]
     fn test_customer_session_id_generation() {
         let id1 = generate_customer_session_id("customer_001", "channel_001");
         assert!(id1.starts_with("5A"));
         assert_eq!(id1.len(), 18); // "5A" + 16字符Base32
     }
-    
+
     #[test]
     fn test_system_session_id_generation() {
         let id1 = generate_system_session_id("system_notification", None);
         assert!(id1.starts_with("4A"));
         assert_eq!(id1.len(), 18); // "4A" + 16字符Base32
-        
+
         let id2 = generate_system_session_id("system_announcement", Some("scope1".to_string()));
         assert!(id2.starts_with("4A"));
         assert_eq!(id2.len(), 18);
         assert_ne!(id1, id2);
     }
-    
+
     #[test]
     fn test_temp_session_id_generation() {
         let id1 = generate_temp_session_id();
         let id2 = generate_temp_session_id();
-        
+
         assert!(id1.starts_with("6A"));
         assert!(id2.starts_with("6A"));
         // 应该生成不同的ID
         assert_ne!(id1, id2);
     }
-
-
 
     #[test]
     fn test_validate_session_id() {
@@ -688,12 +689,16 @@ mod tests {
         let ai_id = generate_ai_session_id("user_001", "gpt-4");
         assert!(validate_session_id(&ai_id).is_ok());
         assert_eq!(validate_session_id(&ai_id).unwrap(), SessionType::Ai);
-        
+
         // 有效的系统通知ID
-        let system_id = generate_system_session_id("system_notification", Some("1734567890".to_string()));
+        let system_id =
+            generate_system_session_id("system_notification", Some("1734567890".to_string()));
         assert!(validate_session_id(&system_id).is_ok());
-        assert_eq!(validate_session_id(&system_id).unwrap(), SessionType::System);
-        
+        assert_eq!(
+            validate_session_id(&system_id).unwrap(),
+            SessionType::System
+        );
+
         // 有效的临时会话ID
         let temp_id = generate_temp_session_id();
         assert!(validate_session_id(&temp_id).is_ok());

@@ -1,5 +1,5 @@
 //! 消息处理器实现
-//! 
+//!
 //! 提供常用的消息处理器实现
 
 use super::pipeline::{MessageContext, MessageProcessor};
@@ -9,11 +9,18 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// 函数式消息处理器
-/// 
+///
 /// 使用闭包处理消息，适合简单场景
 pub struct FunctionProcessor {
     name: String,
-    handler: Arc<dyn Fn(&MessageContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send>> + Send + Sync>,
+    handler: Arc<
+        dyn Fn(
+                &MessageContext,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send>>
+            + Send
+            + Sync,
+    >,
 }
 
 impl FunctionProcessor {
@@ -35,18 +42,26 @@ impl MessageProcessor for FunctionProcessor {
     async fn process(&self, ctx: &MessageContext) -> Result<Option<Frame>> {
         (self.handler)(ctx).await
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
 }
 
 /// 委托处理器
-/// 
+///
 /// 将消息委托给其他处理器（如 ConnectionHandler）
 pub struct DelegateProcessor {
     name: String,
-    handler: Arc<dyn Fn(&Frame, Option<&str>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send>> + Send + Sync>,
+    handler: Arc<
+        dyn Fn(
+                &Frame,
+                Option<&str>,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send>>
+            + Send
+            + Sync,
+    >,
 }
 
 impl DelegateProcessor {
@@ -68,9 +83,8 @@ impl MessageProcessor for DelegateProcessor {
     async fn process(&self, ctx: &MessageContext) -> Result<Option<Frame>> {
         (self.handler)(&ctx.frame, ctx.connection_id.as_deref()).await
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
 }
-

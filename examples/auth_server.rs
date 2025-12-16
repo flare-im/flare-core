@@ -1,46 +1,48 @@
 //! 认证聊天室服务器示例
-//! 
+//!
 //! 演示如何使用 token 认证功能
-//! 
+//!
 //! ## 认证机制说明
-//! 
+//!
 //! 1. **启用认证**：
 //!    - 通过 `enable_auth()` 启用认证功能
 //!    - 通过 `with_authenticator()` 设置自定义认证器
-//! 
+//!
 //! 2. **认证流程**：
 //!    - 客户端连接后，发送 CONNECT 消息，其中包含 `token` 元数据
 //!    - 服务端验证 token，验证通过后标记连接为已验证
 //!    - 只有已验证的连接才能收发业务消息
-//! 
+//!
 //! 3. **认证超时**：
 //!    - 通过 `with_auth_timeout()` 设置认证超时时间
 //!    - 如果连接在超时时间内未完成认证，连接将被关闭
-//! 
+//!
 //! ## 启动命令
-//! 
+//!
 //! ```bash
 //! RUST_LOG=debug cargo run --example auth_server
 //! ```
-//! 
+//!
 //! ## 配置说明
-//! 
+//!
 //! - `enable_auth()`: 启用认证功能
 //! - `with_authenticator()`: 设置认证器（自定义验证逻辑）
 //! - `with_auth_timeout()`: 设置认证超时时间（默认 30 秒）
 
-use flare_core::server::*;
-use flare_core::common::*;
-use flare_core::common::protocol::{Frame, MessageCommand, frame_with_message_command, generate_message_id, Reliability};
+use async_trait::async_trait;
 use flare_core::common::protocol::flare::core::commands::command::Type as CommandType;
+use flare_core::common::protocol::{
+    Frame, MessageCommand, Reliability, frame_with_message_command, generate_message_id,
+};
+use flare_core::common::*;
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
-use flare_core::server::handle::{ServerHandle, DefaultServerHandle};
 use flare_core::server::events::handler::ServerEventHandler;
+use flare_core::server::handle::{DefaultServerHandle, ServerHandle};
+use flare_core::server::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::collections::HashMap;
-use tracing::{info, error, debug, warn};
-use async_trait::async_trait;
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,20 +90,16 @@ async fn main() -> Result<()> {
     let mut server = ObserverServerBuilder::new("0.0.0.0:8080")
         // 设置连接处理器（必须）
         .with_handler(handler.clone() as Arc<dyn ConnectionHandler>)
-        
         // 设置连接管理器（可选，用于共享连接状态）
         .with_connection_manager(connection_manager)
-        
         // ============================================================
         // 认证配置：启用认证并设置认证器
         // ============================================================
-        .enable_auth()  // 启用认证
-        .with_authenticator(authenticator)  // 设置认证器
-        .with_auth_timeout(std::time::Duration::from_secs(30))  // 设置认证超时时间
-        
+        .enable_auth() // 启用认证
+        .with_authenticator(authenticator) // 设置认证器
+        .with_auth_timeout(std::time::Duration::from_secs(30)) // 设置认证超时时间
         // 设置事件处理器（用于打印收到的消息）
         .with_event_handler(event_handler)
-        
         // ============================================================
         // 协议配置：支持多协议监听
         // ============================================================
@@ -117,23 +115,23 @@ async fn main() -> Result<()> {
             flare_core::common::config_types::TransportProtocol::QUIC,
             "0.0.0.0:8081".to_string(),
         )
-        
         // ============================================================
         // 其他配置
         // ============================================================
         .with_max_connections(2000)
-        
         .build()?;
 
     // ============================================================
     // 6. 获取 ServerHandle 和 ConnectionManager 并设置到处理器
     // ============================================================
-    let (server_handle, manager_trait) = if let Some(manager_trait) = server.get_server_handle_components() {
-        let handle: Arc<dyn ServerHandle> = Arc::new(DefaultServerHandle::new(manager_trait.clone()));
-        (handle, manager_trait)
-    } else {
-        return Err("无法获取连接管理器".into());
-    };
+    let (server_handle, manager_trait) =
+        if let Some(manager_trait) = server.get_server_handle_components() {
+            let handle: Arc<dyn ServerHandle> =
+                Arc::new(DefaultServerHandle::new(manager_trait.clone()));
+            (handle, manager_trait)
+        } else {
+            return Err("无法获取连接管理器".into());
+        };
     handler.set_server_handle(server_handle).await;
     handler.set_connection_manager(manager_trait).await;
 
@@ -141,7 +139,7 @@ async fn main() -> Result<()> {
     // 7. 启动服务器
     // ============================================================
     server.start().await?;
-    
+
     info!("✅ 服务器已启动");
     info!("   WebSocket: ws://127.0.0.1:8080");
     info!("   QUIC: quic://127.0.0.1:8081");
@@ -188,7 +186,7 @@ impl Authenticator for SimpleAuthenticator {
             "[SimpleAuthenticator] 验证 token: connection_id={}, token={}",
             connection_id, token
         );
-        
+
         // 只接受 token='12345'
         if token == "12345" {
             info!(
@@ -229,7 +227,7 @@ impl ServerEventHandler for DebugEventHandler {
         );
         Ok(None)
     }
-    
+
     /// 处理通知命令：打印收到的通知
     async fn handle_notification_command(
         &self,
@@ -247,7 +245,7 @@ impl ServerEventHandler for DebugEventHandler {
         );
         Ok(None)
     }
-    
+
     /// 处理 CONNECT 系统命令：打印连接信息
     async fn handle_connect(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
         debug!(
@@ -256,7 +254,7 @@ impl ServerEventHandler for DebugEventHandler {
         );
         Ok(None)
     }
-    
+
     /// 处理 PING 系统命令：打印心跳信息
     async fn handle_ping(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
         debug!(
@@ -265,7 +263,7 @@ impl ServerEventHandler for DebugEventHandler {
         );
         Ok(None)
     }
-    
+
     /// 处理 PONG 系统命令：打印心跳响应
     async fn handle_pong(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
         debug!(
@@ -274,14 +272,13 @@ impl ServerEventHandler for DebugEventHandler {
         );
         Ok(None)
     }
-    
+
     /// 处理连接断开事件：打印断开信息
     async fn on_disconnect(&self, connection_id: &str, reason: Option<&str>) -> Result<()> {
         if let Some(reason) = reason {
             debug!(
                 "[EventHandler] 🔌 连接断开: connection_id={}, reason={}",
-                connection_id,
-                reason
+                connection_id, reason
             );
         } else {
             debug!(
@@ -291,13 +288,12 @@ impl ServerEventHandler for DebugEventHandler {
         }
         Ok(())
     }
-    
+
     /// 处理连接错误事件：打印错误信息
     async fn on_error(&self, connection_id: &str, error: &str) -> Result<()> {
         error!(
             "[EventHandler] ❌ 连接错误: connection_id={}, error={}",
-            connection_id,
-            error
+            connection_id, error
         );
         Ok(())
     }
@@ -314,7 +310,7 @@ impl AuthChatRoomHandler {
     async fn set_server_handle(&self, handle: Arc<dyn ServerHandle>) {
         *self.server_handle.lock().await = Some(handle);
     }
-    
+
     async fn set_connection_manager(&self, manager: Arc<dyn ConnectionManagerTrait>) {
         *self.connection_manager.lock().await = Some(manager);
     }
@@ -327,19 +323,23 @@ impl ConnectionHandler for AuthChatRoomHandler {
         if let Some(cmd) = &frame.command {
             if let Some(CommandType::Message(msg_cmd)) = &cmd.r#type {
                 let message_type = msg_cmd.r#type;
-                
+
                 // SEND 消息：处理聊天消息
-                if message_type == 0 { // SEND
-                    let username = self.usernames.lock().await
+                if message_type == 0 {
+                    // SEND
+                    let username = self
+                        .usernames
+                        .lock()
+                        .await
                         .get(connection_id)
                         .cloned()
                         .unwrap_or_else(|| "匿名".to_string());
-                    
+
                     // 解析消息内容
                     let message_text = String::from_utf8_lossy(&msg_cmd.payload);
-                    
+
                     info!("💬 [{}]: {}", username, message_text);
-                    
+
                     // 广播消息给所有用户（排除发送者）
                     let broadcast_cmd = MessageCommand {
                         r#type: 0, // SEND
@@ -348,28 +348,29 @@ impl ConnectionHandler for AuthChatRoomHandler {
                         metadata: std::collections::HashMap::new(),
                         seq: 0,
                     };
-                    
-                    let broadcast_frame = frame_with_message_command(
-                        broadcast_cmd,
-                        Reliability::AtLeastOnce,
-                    );
-                    
+
+                    let broadcast_frame =
+                        frame_with_message_command(broadcast_cmd, Reliability::AtLeastOnce);
+
                     // 使用 ServerHandle 广播消息（自动使用每个连接的协商格式）
                     if let Some(ref handle) = *self.server_handle.lock().await {
-                        if let Err(e) = handle.broadcast_except(&broadcast_frame, connection_id).await {
+                        if let Err(e) = handle
+                            .broadcast_except(&broadcast_frame, connection_id)
+                            .await
+                        {
                             error!("广播消息失败: {}", e);
                         }
                     }
                 }
             }
         }
-        
+
         Ok(None)
     }
 
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
         info!("✅ 新连接: {}", connection_id);
-        
+
         // 从连接管理器获取连接信息，使用认证后的用户ID
         let username = if let Some(ref manager) = *self.connection_manager.lock().await {
             match manager.get_connection(connection_id).await {
@@ -377,7 +378,7 @@ impl ConnectionHandler for AuthChatRoomHandler {
                     // 优先使用认证后的用户ID
                     if let Some(ref user_id) = conn_info.user_id {
                         debug!("[AuthServer] 从连接信息获取用户ID: {}", user_id);
-                        
+
                         // 检查连接是否已验证
                         if !conn_info.authenticated {
                             warn!(
@@ -386,7 +387,7 @@ impl ConnectionHandler for AuthChatRoomHandler {
                             );
                             return Ok(()); // 未验证的连接不处理
                         }
-                        
+
                         user_id.clone()
                     } else {
                         debug!("[AuthServer] 连接信息中没有用户ID，使用连接ID");
@@ -402,11 +403,14 @@ impl ConnectionHandler for AuthChatRoomHandler {
             error!("[AuthServer] 连接管理器未设置");
             format!("用户_{}", &connection_id[..8.min(connection_id.len())])
         };
-        
-        self.usernames.lock().await.insert(connection_id.to_string(), username.clone());
-        
+
+        self.usernames
+            .lock()
+            .await
+            .insert(connection_id.to_string(), username.clone());
+
         info!("📝 用户ID: {} (连接ID: {})", username, connection_id);
-        
+
         // 发送欢迎消息
         let welcome_cmd = MessageCommand {
             r#type: 0, // SEND
@@ -415,30 +419,29 @@ impl ConnectionHandler for AuthChatRoomHandler {
             metadata: std::collections::HashMap::new(),
             seq: 0,
         };
-        
-        let welcome_frame = frame_with_message_command(
-            welcome_cmd,
-            Reliability::AtLeastOnce,
-        );
-        
+
+        let welcome_frame = frame_with_message_command(welcome_cmd, Reliability::AtLeastOnce);
+
         // 使用 ServerHandle 发送消息（自动使用连接的协商格式）
         if let Some(ref handle) = *self.server_handle.lock().await {
             if let Err(e) = handle.send_to(connection_id, &welcome_frame).await {
                 error!("发送欢迎消息失败: {}", e);
             }
         }
-        
+
         Ok(())
     }
 
     async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
-        let username = self.usernames.lock().await
+        let username = self
+            .usernames
+            .lock()
+            .await
             .remove(connection_id)
             .unwrap_or_else(|| "未知用户".to_string());
-        
+
         info!("❌ 用户断开: {} ({})", username, connection_id);
-        
+
         Ok(())
     }
 }
-

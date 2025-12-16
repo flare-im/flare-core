@@ -1,5 +1,5 @@
 //! 常量定义模块
-//! 
+//!
 //! 定义项目中使用的各种常量，包括默认值、超时时间、限制等
 
 /// 默认连接超时时间（秒）
@@ -58,10 +58,10 @@ pub mod metadata_keys {
 /// 可靠性等级常量
 pub mod reliability {
     use crate::common::protocol::Reliability;
-    
+
     /// 默认可靠性等级
     pub const DEFAULT: Reliability = Reliability::BestEffort;
-    
+
     /// 关键消息推荐使用的可靠性等级
     pub const CRITICAL: Reliability = Reliability::ExactlyOnce;
 }
@@ -81,4 +81,3 @@ pub mod error_messages {
     /// 服务不可用
     pub const SERVICE_UNAVAILABLE: &str = "Service unavailable";
 }
-

@@ -1,5 +1,5 @@
 //! 消息处理中间件
-//! 
+//!
 //! 提供常用的中间件实现
 
 use super::pipeline::{MessageContext, MessageMiddleware};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// 日志中间件
-/// 
+///
 /// 记录所有消息的日志
 pub struct LoggingMiddleware {
     name: String,
@@ -32,7 +32,7 @@ impl LoggingMiddleware {
             log_level: LogLevel::Info,
         }
     }
-    
+
     /// 设置日志级别
     pub fn with_level(mut self, level: LogLevel) -> Self {
         self.log_level = level;
@@ -68,18 +68,18 @@ impl MessageMiddleware for LoggingMiddleware {
         }
         Ok(None)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn priority(&self) -> u32 {
         10 // 高优先级，最先执行
     }
 }
 
 /// 性能监控中间件
-/// 
+///
 /// 记录消息处理耗时
 pub struct MetricsMiddleware {
     name: String,
@@ -88,9 +88,7 @@ pub struct MetricsMiddleware {
 impl MetricsMiddleware {
     /// 创建新的性能监控中间件
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-        }
+        Self { name: name.into() }
     }
 }
 
@@ -99,17 +97,22 @@ impl MessageMiddleware for MetricsMiddleware {
     async fn before(&self, ctx: &MessageContext) -> Result<Option<Frame>> {
         // 记录开始时间
         let start = std::time::Instant::now();
-        ctx.set_metadata("start_time".to_string(), start.elapsed().as_nanos().to_le_bytes().to_vec()).await;
+        ctx.set_metadata(
+            "start_time".to_string(),
+            start.elapsed().as_nanos().to_le_bytes().to_vec(),
+        )
+        .await;
         Ok(None)
     }
-    
+
     async fn after(&self, ctx: &MessageContext, response: Option<Frame>) -> Result<Option<Frame>> {
         // 计算处理耗时
         if let Some(start_bytes) = ctx.get_metadata("start_time").await {
             let start_nanos = u128::from_le_bytes(start_bytes.try_into().unwrap_or([0; 16]));
-            let start = std::time::Instant::now() - std::time::Duration::from_nanos(start_nanos as u64);
+            let start =
+                std::time::Instant::now() - std::time::Duration::from_nanos(start_nanos as u64);
             let duration = start.elapsed();
-            
+
             debug!(
                 connection_id = ?ctx.connection_id,
                 message_id = %ctx.frame.message_id,
@@ -119,18 +122,18 @@ impl MessageMiddleware for MetricsMiddleware {
         }
         Ok(response)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn priority(&self) -> u32 {
         20
     }
 }
 
 /// 验证中间件
-/// 
+///
 /// 验证消息格式和内容
 pub struct ValidationMiddleware {
     name: String,
@@ -156,13 +159,12 @@ impl MessageMiddleware for ValidationMiddleware {
         (self.validator)(&ctx.frame)?;
         Ok(None)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn priority(&self) -> u32 {
         5 // 最高优先级，最先验证
     }
 }
-

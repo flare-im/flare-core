@@ -1,9 +1,9 @@
 //! 客户端配置模块
 
-use crate::common::config_types::{TransportProtocol, TlsConfig, HeartbeatConfig};
-use crate::common::protocol::SerializationFormat;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
 use crate::common::device::DeviceInfo;
+use crate::common::protocol::SerializationFormat;
 use std::time::Duration;
 
 /// 客户端配置
@@ -90,52 +90,52 @@ impl ClientConfig {
             ..Default::default()
         }
     }
-    
+
     /// 使用 WebSocket 协议
     pub fn websocket(mut self) -> Self {
         self.transport = TransportProtocol::WebSocket;
         self
     }
-    
+
     /// 使用 QUIC 协议
     pub fn quic(mut self) -> Self {
         self.transport = TransportProtocol::QUIC;
         self
     }
-    
+
     /// 设置序列化格式
     pub fn with_format(mut self, format: SerializationFormat) -> Self {
         self.serialization_format = format;
         self
     }
-    
+
     /// 设置压缩算法
     pub fn with_compression(mut self, compression: CompressionAlgorithm) -> Self {
         self.compression = compression;
         self
     }
-    
+
     /// 设置用户 ID
     pub fn with_user_id(mut self, user_id: String) -> Self {
         self.user_id = Some(user_id);
         self
     }
-    
+
     /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
     pub fn with_token(mut self, token: String) -> Self {
         self.token = Some(token);
         self
     }
-    
+
     /// 启用多协议竞速
-    /// 
+    ///
     /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
     /// 例如：with_protocol_race(vec![QUIC, WebSocket]) 表示 QUIC 优先级高于 WebSocket
     pub fn with_protocol_race(mut self, protocols: Vec<TransportProtocol>) -> Self {
         self.transports = Some(protocols);
         self
     }
-    
+
     /// 为特定协议设置服务器地址
     pub fn with_protocol_url(mut self, protocol: TransportProtocol, url: String) -> Self {
         if self.protocol_urls.is_none() {
@@ -146,13 +146,16 @@ impl ClientConfig {
         }
         self
     }
-    
+
     /// 批量设置协议地址映射
-    pub fn with_protocol_urls(mut self, urls: std::collections::HashMap<TransportProtocol, String>) -> Self {
+    pub fn with_protocol_urls(
+        mut self,
+        urls: std::collections::HashMap<TransportProtocol, String>,
+    ) -> Self {
         self.protocol_urls = Some(urls);
         self
     }
-    
+
     /// 获取指定协议的地址
     pub fn get_protocol_url(&self, protocol: &TransportProtocol) -> String {
         if let Some(ref urls) = self.protocol_urls {
@@ -162,7 +165,7 @@ impl ClientConfig {
         }
         self.server_url.clone()
     }
-    
+
     /// 设置竞速超时时间
     pub fn with_race_timeout(mut self, timeout: Duration) -> Self {
         self.race_timeout = Some(timeout);
@@ -198,51 +201,52 @@ impl ClientConfig {
         self.max_reconnect_attempts = max;
         self
     }
-    
+
     /// 启用消息路由
     pub fn enable_router(mut self) -> Self {
         self.enable_router = true;
         self
     }
-    
+
     /// 设置设备信息（用于协商和设备管理）
     pub fn with_device_info(mut self, device_info: DeviceInfo) -> Self {
         self.device_info = Some(device_info);
         self
     }
-    
+
     /// 强制指定序列化格式（不进行协商，直接使用此格式）
-    /// 
+    ///
     /// 适用于某些端不支持 protobuf 等格式的场景
     /// 如果设置了强制格式，客户端将直接使用此格式，服务端必须接受
     pub fn force_format(mut self, format: SerializationFormat) -> Self {
         self.force_serialization_format = Some(format);
         self
     }
-    
+
     /// 强制指定压缩算法（不进行协商，直接使用此算法）
-    /// 
+    ///
     /// 如果设置了强制压缩，客户端将直接使用此算法，服务端必须接受
     pub fn force_compression(mut self, compression: CompressionAlgorithm) -> Self {
         self.force_compression = Some(compression);
         self
     }
-    
+
     /// 检查是否强制指定了格式（不进行协商）
     pub fn is_force_format(&self) -> bool {
         self.force_serialization_format.is_some() || self.force_compression.is_some()
     }
-    
+
     /// 获取实际使用的序列化格式（强制格式优先，否则使用首选格式）
     pub fn get_serialization_format(&self) -> SerializationFormat {
-        self.force_serialization_format.unwrap_or(self.serialization_format)
+        self.force_serialization_format
+            .unwrap_or(self.serialization_format)
     }
-    
+
     /// 获取实际使用的压缩算法（强制算法优先，否则使用首选算法）
     pub fn get_compression(&self) -> CompressionAlgorithm {
         self.force_compression.unwrap_or(self.compression)
     }
-    
+
     /// 获取要使用的协议列表
     pub fn get_protocols(&self) -> Vec<TransportProtocol> {
         if let Some(ref protocols) = self.transports {
@@ -251,10 +255,9 @@ impl ClientConfig {
             vec![self.transport]
         }
     }
-    
+
     /// 是否启用协议竞速
     pub fn is_race_mode(&self) -> bool {
         self.transports.is_some() && self.transports.as_ref().unwrap().len() > 1
     }
-
 }

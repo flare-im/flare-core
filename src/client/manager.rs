@@ -1,24 +1,24 @@
 //! 客户端连接管理器
-//! 
+//!
 //! 统一管理客户端连接、心跳、重连等生命周期
 //! 提供自动重连、心跳管理、连接状态监控等功能
 
-use crate::client::transports::Client;
 use crate::client::config::ClientConfig;
 use crate::client::connection::ConnectionStateManager;
-use crate::common::error::Result;
 use crate::client::heartbeat::HeartbeatManager;
+use crate::client::transports::Client;
 use crate::common::MessageParser;
+use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 /// 客户端连接管理器
-/// 
+///
 /// 管理客户端连接的生命周期，包括：
 /// - 自动连接和重连
 /// - 心跳管理
@@ -46,13 +46,13 @@ pub struct ClientConnectionManager {
 
 impl ClientConnectionManager {
     /// 创建新的客户端连接管理器
-    /// 
+    ///
     /// # 参数
     /// - `client`: 客户端实例（可以是 WebSocketClient、QUICClient 等）
     /// - `config`: 客户端配置
     pub fn new(client: Box<dyn Client>, config: ClientConfig) -> Self {
         let parser = MessageParser::new(config.serialization_format, config.compression);
-        
+
         Self {
             config,
             client: Arc::new(Mutex::new(client)),
@@ -66,13 +66,13 @@ impl ClientConnectionManager {
     }
 
     /// 连接到服务器
-    /// 
+    ///
     /// 自动处理连接、心跳启动等
     pub async fn connect(&self) -> Result<()> {
         info!("Connecting to server: {}", self.config.server_url);
-        
+
         let mut client = self.client.lock().await;
-        
+
         // 检查是否已连接
         if client.is_connected() {
             debug!("Already connected, skipping connect");
@@ -80,27 +80,30 @@ impl ClientConnectionManager {
         }
 
         // 设置状态为连接中
-        self.state_manager.set_state(crate::client::connection::ConnectionState::Connecting);
+        self.state_manager
+            .set_state(crate::client::connection::ConnectionState::Connecting);
 
         // 执行连接
         match client.connect().await {
             Ok(()) => {
                 info!("Successfully connected to server");
-                self.state_manager.set_state(crate::client::connection::ConnectionState::Connected);
-                
+                self.state_manager
+                    .set_state(crate::client::connection::ConnectionState::Connected);
+
                 // 启动心跳（如果启用）
                 if self.config.heartbeat.enabled {
                     self.start_heartbeat().await?;
                 }
-                
+
                 // 通知观察者
                 self.notify_observers(&ConnectionEvent::Connected);
-                
+
                 Ok(())
             }
             Err(e) => {
                 error!("Failed to connect: {}", e);
-                self.state_manager.set_state(crate::client::connection::ConnectionState::Disconnected);
+                self.state_manager
+                    .set_state(crate::client::connection::ConnectionState::Disconnected);
                 Err(e)
             }
         }
@@ -109,20 +112,21 @@ impl ClientConnectionManager {
     /// 断开连接
     pub async fn disconnect(&self) -> Result<()> {
         info!("Disconnecting from server");
-        
+
         // 停止重连
         self.stop_reconnect().await;
-        
+
         // 停止心跳
         self.stop_heartbeat().await;
-        
+
         // 断开连接
         let mut client = self.client.lock().await;
         let result = client.disconnect().await;
-        
-        self.state_manager.set_state(crate::client::connection::ConnectionState::Disconnected);
+
+        self.state_manager
+            .set_state(crate::client::connection::ConnectionState::Disconnected);
         self.notify_observers(&ConnectionEvent::Disconnected(String::new()));
-        
+
         result
     }
 
@@ -130,7 +134,7 @@ impl ClientConnectionManager {
     pub async fn send_frame(&self, frame: &Frame) -> Result<()> {
         if !self.state_manager.get_state().can_send() {
             return Err(crate::common::error::FlareError::connection_failed(
-                "Not connected".to_string()
+                "Not connected".to_string(),
             ));
         }
 
@@ -144,9 +148,10 @@ impl ClientConnectionManager {
             return Ok(());
         }
 
-        debug!("Starting heartbeat: interval={:?}, timeout={:?}",
-               self.config.heartbeat.interval,
-               self.config.heartbeat.timeout);
+        debug!(
+            "Starting heartbeat: interval={:?}, timeout={:?}",
+            self.config.heartbeat.interval, self.config.heartbeat.timeout
+        );
 
         let heartbeat = HeartbeatManager::new(
             self.config.heartbeat.interval,
@@ -157,10 +162,10 @@ impl ClientConnectionManager {
         // 这里我们需要一个不同的设计
         // 暂时跳过，因为心跳应该在 Client 实现内部管理
         // 或者我们需要扩展 Client trait
-        
+
         let mut hb_mgr = self.heartbeat_manager.lock().await;
         *hb_mgr = Some(heartbeat);
-        
+
         Ok(())
     }
 
@@ -195,7 +200,11 @@ impl ClientConnectionManager {
                 // 检查连接状态
                 let should_reconnect = {
                     let client_guard = client.lock().await;
-                    !client_guard.is_connected() && matches!(state_mgr.get_state(), crate::client::connection::ConnectionState::Disconnected)
+                    !client_guard.is_connected()
+                        && matches!(
+                            state_mgr.get_state(),
+                            crate::client::connection::ConnectionState::Disconnected
+                        )
                 };
 
                 if !should_reconnect {
@@ -222,7 +231,7 @@ impl ClientConnectionManager {
                     Ok(()) => {
                         info!("Reconnected successfully");
                         state_mgr.set_state(crate::client::connection::ConnectionState::Connected);
-                        
+
                         // 重新启动心跳
                         if heartbeat_cfg.enabled {
                             let _hb_mgr = heartbeat_mgr.lock().await;
@@ -243,8 +252,12 @@ impl ClientConnectionManager {
                         break;
                     }
                     Err(e) => {
-                        warn!("Reconnect failed: {}, retrying in {:?}", e, config.reconnect_interval);
-                        state_mgr.set_state(crate::client::connection::ConnectionState::Disconnected);
+                        warn!(
+                            "Reconnect failed: {}, retrying in {:?}",
+                            e, config.reconnect_interval
+                        );
+                        state_mgr
+                            .set_state(crate::client::connection::ConnectionState::Disconnected);
                         sleep(config.reconnect_interval).await;
                     }
                 }
@@ -265,7 +278,7 @@ impl ClientConnectionManager {
         if let Some(handle) = handle_guard.take() {
             handle.abort();
         }
-        
+
         *self.is_reconnecting.lock().await = false;
     }
 

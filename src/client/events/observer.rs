@@ -1,17 +1,17 @@
 //! 默认客户端消息观察者
-//! 
+//!
 //! 提供通用的客户端消息和事件处理逻辑
 
-use crate::client::transports::ClientCore;
 use crate::client::connection::ConnectionStateManager;
-use crate::transport::events::{ConnectionEvent, ConnectionObserver};
 use crate::client::events::handler::ClientEventHandler;
+use crate::client::transports::ClientCore;
 use crate::common::MessageParser;
+use crate::transport::events::{ConnectionEvent, ConnectionObserver};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
 /// 默认客户端消息观察者
-/// 
+///
 /// 处理常见的系统命令（CONNECT_ACK, PONG, KICKED）和连接事件
 /// 其他命令类型可以委托给可选的 `ClientEventHandler`
 pub struct DefaultClientMessageObserver {
@@ -65,10 +65,15 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                         return;
                     }
                 };
-                
+
                 // 检查是否是系统命令（CONNECT_ACK, PONG, KICKED 等）
                 if let Some(cmd) = &frame.command {
-                    if let Some(crate::common::protocol::flare::core::commands::command::Type::System(_sys_cmd)) = &cmd.r#type {
+                    if let Some(
+                        crate::common::protocol::flare::core::commands::command::Type::System(
+                            _sys_cmd,
+                        ),
+                    ) = &cmd.r#type
+                    {
                         // CONNECT_ACK, PONG, KICKED 等系统命令由 ClientCore 处理
                         // 这里只需要转发给 ClientCore
                         let core = Arc::clone(&self.core);
@@ -79,7 +84,7 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                         return;
                     }
                 }
-                
+
                 // 其他命令（Message, Notification, Custom）也由 ClientCore 处理
                 // ClientCore 会调用 event_handler 和 message_router
                 let core = Arc::clone(&self.core);
@@ -91,7 +96,7 @@ impl ConnectionObserver for DefaultClientMessageObserver {
             ConnectionEvent::Connected => {
                 debug!("[DefaultClientObserver] Connection established");
                 self.state_manager.set_connected();
-                
+
                 // 通知事件处理器
                 if let Some(ref handler) = self.event_handler {
                     let handler_clone = Arc::clone(handler);
@@ -102,9 +107,12 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                 }
             }
             ConnectionEvent::Disconnected(reason) => {
-                debug!("[DefaultClientObserver] Connection disconnected: {}", reason);
+                debug!(
+                    "[DefaultClientObserver] Connection disconnected: {}",
+                    reason
+                );
                 self.state_manager.set_disconnected();
-                
+
                 // 通知事件处理器
                 if let Some(ref handler) = self.event_handler {
                     let handler_clone = Arc::clone(handler);
@@ -112,12 +120,12 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                     tokio::spawn(async move {
                         let _ = handler_clone.handle_connection_event(&event).await;
                     });
-    }
-}
+                }
+            }
             ConnectionEvent::Error(e) => {
                 error!("[DefaultClientObserver] Connection error: {:?}", e);
                 self.state_manager.set_failed();
-                
+
                 // 通知事件处理器
                 if let Some(ref handler) = self.event_handler {
                     let handler_clone = Arc::clone(handler);

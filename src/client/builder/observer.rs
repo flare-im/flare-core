@@ -1,28 +1,27 @@
 //! 观察者模式客户端构建器（基本装修）
-//! 
+//!
 //! 提供基本实现，用户可以自定义观察器和处理器
-//! 
+//!
 //! ## 特点
 //! - ✅ 自定义观察器：实现 `ConnectionObserver` trait 自定义消息处理
 //! - ✅ 事件处理：支持自定义事件处理器
 //! - ✅ 消息路由：支持消息路由功能
 //! - ✅ 灵活扩展：可以添加自定义的观察器和处理器
-//! 
+//!
 //! ## 适用场景
 //! - 需要自定义消息处理逻辑
 //! - 需要事件驱动的架构
 //! - 需要消息路由功能
 
+use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
+use crate::client::{Client, HybridClient};
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::client::{HybridClient, Client};
 use crate::transport::events::ConnectionObserver;
-use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// 观察者模式客户端构建器
-/// 
+///
 /// 使用实现了 ConnectionObserver trait 的观察者
 pub struct ObserverClientBuilder {
     base: BaseClientBuilderConfig,
@@ -39,9 +38,12 @@ impl ObserverClientBuilder {
             event_handler: None,
         }
     }
-    
+
     /// 设置事件处理器（可选，用于自定义业务逻辑）
-    pub fn with_event_handler(mut self, event_handler: Arc<dyn crate::client::events::handler::ClientEventHandler>) -> Self {
+    pub fn with_event_handler(
+        mut self,
+        event_handler: Arc<dyn crate::client::events::handler::ClientEventHandler>,
+    ) -> Self {
         self.event_handler = Some(event_handler);
         self
     }
@@ -53,21 +55,31 @@ impl ObserverClientBuilder {
     }
 
     /// 设置传输协议
-    pub fn with_protocol(mut self, protocol: crate::common::config_types::TransportProtocol) -> Self {
+    pub fn with_protocol(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+    ) -> Self {
         self.base = self.base.with_protocol(protocol);
         self
     }
 
     /// 启用多协议竞速
-    /// 
+    ///
     /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
-    pub fn with_protocol_race(mut self, protocols: Vec<crate::common::config_types::TransportProtocol>) -> Self {
+    pub fn with_protocol_race(
+        mut self,
+        protocols: Vec<crate::common::config_types::TransportProtocol>,
+    ) -> Self {
         self.base = self.base.with_protocol_race(protocols);
         self
     }
 
     /// 为特定协议设置服务器地址
-    pub fn with_protocol_url(mut self, protocol: crate::common::config_types::TransportProtocol, url: String) -> Self {
+    pub fn with_protocol_url(
+        mut self,
+        protocol: crate::common::config_types::TransportProtocol,
+        url: String,
+    ) -> Self {
         self.base = self.base.with_protocol_url(protocol, url);
         self
     }
@@ -85,13 +97,19 @@ impl ObserverClientBuilder {
     }
 
     /// 设置压缩算法
-    pub fn with_compression(mut self, compression: crate::common::compression::CompressionAlgorithm) -> Self {
+    pub fn with_compression(
+        mut self,
+        compression: crate::common::compression::CompressionAlgorithm,
+    ) -> Self {
         self.base = self.base.with_compression(compression);
         self
     }
 
     /// 设置心跳配置
-    pub fn with_heartbeat(mut self, heartbeat: crate::common::config_types::HeartbeatConfig) -> Self {
+    pub fn with_heartbeat(
+        mut self,
+        heartbeat: crate::common::config_types::HeartbeatConfig,
+    ) -> Self {
         self.base = self.base.with_heartbeat(heartbeat);
         self
     }
@@ -119,21 +137,21 @@ impl ObserverClientBuilder {
         self.base = self.base.with_max_reconnect_attempts(max);
         self
     }
-    
+
     /// 启用消息路由
-    /// 
+    ///
     /// 启用后，可以通过 ClientCore 的 router 方法注册消息处理器
     pub fn enable_router(mut self) -> Self {
         self.base = self.base.enable_router();
         self
     }
-    
+
     /// 设置设备信息（用于协商和设备管理）
     pub fn with_device_info(mut self, device_info: crate::common::device::DeviceInfo) -> Self {
         self.base = self.base.with_device_info(device_info);
         self
     }
-    
+
     /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
     pub fn with_token(mut self, token: String) -> Self {
         self.base = self.base.with_token(token);
@@ -148,13 +166,13 @@ impl ObserverClientBuilder {
 
         let client = HybridClient::connect_with_race(self.base.config).await?;
         let wrapper = ClientWrapper::new(client);
-        
+
         // 设置事件处理器（如果提供）
         if let Some(event_handler) = self.event_handler {
             let mut client = wrapper.client().lock().await;
             client.core_mut().set_event_handler(Some(event_handler));
         }
-        
+
         // 添加观察者
         {
             let observer_clone = Arc::clone(&observer);
@@ -175,12 +193,12 @@ impl ObserverClientBuilder {
         })?;
 
         let mut client = HybridClient::new(self.base.config)?;
-        
+
         // 设置事件处理器（如果提供）
         if let Some(event_handler) = self.event_handler {
             client.core_mut().set_event_handler(Some(event_handler));
         }
-        
+
         let wrapper = ClientWrapper::new(client);
 
         Ok(ObserverClient {
@@ -204,7 +222,7 @@ impl ObserverClient {
             let mut client = self.wrapper.client().lock().await;
             client.add_observer(observer);
         }
-        
+
         // 然后连接
         self.wrapper.connect().await
     }
@@ -220,7 +238,11 @@ impl ObserverClient {
     }
 
     /// 发送并等待响应（按 message_id 匹配）
-    pub async fn send_frame_and_wait(&mut self, frame: &Frame, timeout: std::time::Duration) -> Result<Frame> {
+    pub async fn send_frame_and_wait(
+        &mut self,
+        frame: &Frame,
+        timeout: std::time::Duration,
+    ) -> Result<Frame> {
         self.wrapper.send_frame_and_wait(frame, timeout).await
     }
 
@@ -239,4 +261,3 @@ impl ObserverClient {
         self.wrapper.active_protocol()
     }
 }
-

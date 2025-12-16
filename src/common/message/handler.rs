@@ -1,15 +1,14 @@
 //! 消息处理器模块
-//! 
+//!
 //! 使用观察者模式处理不同类型的消息
 
 use crate::common::error::Result;
-use crate::common::protocol::{
-    Frame, SystemCommand, MessageCommand, NotificationCommand, CustomCommand,
-};
 use crate::common::protocol::flare::core::commands::{
+    message_command::Type as MessageType, notification_command::Type as NotificationType,
     system_command::Type as SystemType,
-    message_command::Type as MessageType,
-    notification_command::Type as NotificationType,
+};
+use crate::common::protocol::{
+    CustomCommand, Frame, MessageCommand, NotificationCommand, SystemCommand,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -45,23 +44,38 @@ pub enum MessageEvent {
 }
 
 /// 消息观察者 trait
-/// 
+///
 /// 实现此 trait 以处理不同类型的消息事件
 pub trait MessageObserver: Send + Sync {
     /// 处理系统命令
-    fn on_system_command(&self, frame: &Frame, command: &SystemCommand, command_type: SystemType) -> Result<()> {
+    fn on_system_command(
+        &self,
+        frame: &Frame,
+        command: &SystemCommand,
+        command_type: SystemType,
+    ) -> Result<()> {
         let _ = (frame, command, command_type);
         Ok(())
     }
 
     /// 处理消息命令
-    fn on_message_command(&self, frame: &Frame, command: &MessageCommand, command_type: MessageType) -> Result<()> {
+    fn on_message_command(
+        &self,
+        frame: &Frame,
+        command: &MessageCommand,
+        command_type: MessageType,
+    ) -> Result<()> {
         let _ = (frame, command, command_type);
         Ok(())
     }
 
     /// 处理通知命令
-    fn on_notification_command(&self, frame: &Frame, command: &NotificationCommand, command_type: NotificationType) -> Result<()> {
+    fn on_notification_command(
+        &self,
+        frame: &Frame,
+        command: &NotificationCommand,
+        command_type: NotificationType,
+    ) -> Result<()> {
         let _ = (frame, command, command_type);
         Ok(())
     }
@@ -83,7 +97,7 @@ pub trait MessageObserver: Send + Sync {
 pub type ArcMessageObserver = Arc<dyn MessageObserver>;
 
 /// 消息处理器
-/// 
+///
 /// 使用观察者模式处理消息，支持注册多个观察者
 pub struct MessageHandler {
     observers: Arc<Mutex<Vec<ArcMessageObserver>>>,
@@ -112,17 +126,21 @@ impl MessageHandler {
     }
 
     /// 处理消息 Frame
-    /// 
+    ///
     /// 解析 Frame 并分发到相应的观察者
     pub fn handle_frame(&self, frame: Frame) -> Result<MessageEvent> {
         let event = Self::parse_frame_to_event(frame.clone())?;
-        
+
         let observers = self.observers.lock().map_err(|_| {
             crate::common::error::FlareError::general_error("Failed to lock observers")
         })?;
 
         match &event {
-            MessageEvent::System { frame, command, command_type } => {
+            MessageEvent::System {
+                frame,
+                command,
+                command_type,
+            } => {
                 for observer in observers.iter() {
                     if let Err(e) = observer.on_system_command(frame, command, *command_type) {
                         // 记录错误但继续处理其他观察者
@@ -130,16 +148,25 @@ impl MessageHandler {
                     }
                 }
             }
-            MessageEvent::Message { frame, command, command_type } => {
+            MessageEvent::Message {
+                frame,
+                command,
+                command_type,
+            } => {
                 for observer in observers.iter() {
                     if let Err(e) = observer.on_message_command(frame, command, *command_type) {
                         eprintln!("Observer error handling message command: {:?}", e);
                     }
                 }
             }
-            MessageEvent::Notification { frame, command, command_type } => {
+            MessageEvent::Notification {
+                frame,
+                command,
+                command_type,
+            } => {
                 for observer in observers.iter() {
-                    if let Err(e) = observer.on_notification_command(frame, command, *command_type) {
+                    if let Err(e) = observer.on_notification_command(frame, command, *command_type)
+                    {
                         eprintln!("Observer error handling notification command: {:?}", e);
                     }
                 }
@@ -170,7 +197,9 @@ impl MessageHandler {
         })?;
 
         match &command.r#type {
-            Some(crate::common::protocol::flare::core::commands::command::Type::System(system_cmd)) => {
+            Some(crate::common::protocol::flare::core::commands::command::Type::System(
+                system_cmd,
+            )) => {
                 // 直接从 i32 转换为枚举（使用 unsafe，因为 prost 生成的枚举是 repr(i32)）
                 let command_type = match system_cmd.r#type {
                     0 => SystemType::Unspecified,
@@ -183,7 +212,11 @@ impl MessageHandler {
                     7 => SystemType::Event,
                     8 => SystemType::Auth,
                     9 => SystemType::AuthAck,
-                    _ => return Err(crate::common::error::FlareError::protocol_error("Invalid system command type")),
+                    _ => {
+                        return Err(crate::common::error::FlareError::protocol_error(
+                            "Invalid system command type",
+                        ));
+                    }
                 };
                 Ok(MessageEvent::System {
                     frame: frame.clone(),
@@ -191,12 +224,18 @@ impl MessageHandler {
                     command_type,
                 })
             }
-            Some(crate::common::protocol::flare::core::commands::command::Type::Message(msg_cmd)) => {
+            Some(crate::common::protocol::flare::core::commands::command::Type::Message(
+                msg_cmd,
+            )) => {
                 let command_type = match msg_cmd.r#type {
                     0 => MessageType::Send,
                     1 => MessageType::Ack,
                     2 => MessageType::Data,
-                    _ => return Err(crate::common::error::FlareError::protocol_error("Invalid message command type")),
+                    _ => {
+                        return Err(crate::common::error::FlareError::protocol_error(
+                            "Invalid message command type",
+                        ));
+                    }
                 };
                 Ok(MessageEvent::Message {
                     frame: frame.clone(),
@@ -204,14 +243,20 @@ impl MessageHandler {
                     command_type,
                 })
             }
-            Some(crate::common::protocol::flare::core::commands::command::Type::Notification(notif_cmd)) => {
+            Some(crate::common::protocol::flare::core::commands::command::Type::Notification(
+                notif_cmd,
+            )) => {
                 let command_type = match notif_cmd.r#type {
                     0 => NotificationType::System,
                     1 => NotificationType::Broadcast,
                     2 => NotificationType::Alert,
                     3 => NotificationType::User,
                     4 => NotificationType::Connection,
-                    _ => return Err(crate::common::error::FlareError::protocol_error("Invalid notification command type")),
+                    _ => {
+                        return Err(crate::common::error::FlareError::protocol_error(
+                            "Invalid notification command type",
+                        ));
+                    }
                 };
                 Ok(MessageEvent::Notification {
                     frame: frame.clone(),
@@ -219,12 +264,12 @@ impl MessageHandler {
                     command_type,
                 })
             }
-            Some(crate::common::protocol::flare::core::commands::command::Type::Custom(custom_cmd)) => {
-                Ok(MessageEvent::Custom {
-                    frame: frame.clone(),
-                    command: custom_cmd.clone(),
-                })
-            }
+            Some(crate::common::protocol::flare::core::commands::command::Type::Custom(
+                custom_cmd,
+            )) => Ok(MessageEvent::Custom {
+                frame: frame.clone(),
+                command: custom_cmd.clone(),
+            }),
             None => Ok(MessageEvent::Unknown(frame)),
         }
     }
@@ -244,14 +289,19 @@ impl Default for MessageHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::{FrameBuilder, ping, Command};
+    use crate::common::protocol::{Command, FrameBuilder, ping};
 
     struct TestObserver {
         system_count: Arc<Mutex<usize>>,
     }
 
     impl MessageObserver for TestObserver {
-        fn on_system_command(&self, _frame: &Frame, _command: &SystemCommand, _command_type: SystemType) -> Result<()> {
+        fn on_system_command(
+            &self,
+            _frame: &Frame,
+            _command: &SystemCommand,
+            _command_type: SystemType,
+        ) -> Result<()> {
             let mut count = self.system_count.lock().unwrap();
             *count += 1;
             Ok(())
@@ -282,4 +332,3 @@ mod tests {
         }
     }
 }
-

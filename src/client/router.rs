@@ -1,5 +1,5 @@
 //! 客户端消息路由
-//! 
+//!
 //! 根据消息类型将消息路由到不同的处理器
 //! 支持自定义路由规则和处理器
 
@@ -14,17 +14,17 @@ use tracing::{debug, warn};
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
     /// 处理消息
-    /// 
+    ///
     /// # 参数
     /// - `frame`: 接收到的消息帧
-    /// 
+    ///
     /// # 返回
     /// 如果需要回复，返回 `Some(Frame)`，否则返回 `None`
     async fn handle(&self, frame: &Frame) -> Result<Option<Frame>>;
 }
 
 /// 消息路由
-/// 
+///
 /// 根据消息类型将消息路由到不同的处理器
 pub struct MessageRouter {
     /// 路由规则：消息类型 -> 处理器
@@ -43,7 +43,7 @@ impl MessageRouter {
     }
 
     /// 注册处理器
-    /// 
+    ///
     /// # 参数
     /// - `route`: 路由键（例如 "system.ping", "message.chat" 等）
     /// - `handler`: 消息处理器
@@ -61,15 +61,18 @@ impl MessageRouter {
     }
 
     /// 路由消息
-    /// 
+    ///
     /// # 参数
     /// - `frame`: 要路由的消息帧
-    /// 
+    ///
     /// # 返回
     /// 所有处理器的回复（如果有）
     pub async fn route(&self, frame: &Frame) -> Result<Vec<Frame>> {
         let route_key = Self::extract_route_key(frame);
-        debug!("Routing message: route={}, frame_id={}", route_key, frame.message_id);
+        debug!(
+            "Routing message: route={}, frame_id={}",
+            route_key, frame.message_id
+        );
 
         let mut replies = Vec::new();
 
@@ -207,7 +210,14 @@ impl MessageHandler for SimpleHandler {
 
 /// 异步消息处理器实现
 pub struct AsyncHandler {
-    handler: Arc<dyn Fn(&Frame) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + '_>> + Send + Sync>,
+    handler: Arc<
+        dyn Fn(
+                &Frame,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Option<Frame>>> + Send + '_>,
+            > + Send
+            + Sync,
+    >,
 }
 
 impl AsyncHandler {

@@ -1,17 +1,15 @@
 //! 快速构建命令和 Frame 消息的辅助模块
 //! 提供便捷方法创建各种类型的命令，自动生成消息 ID 和时间戳
 
-use super::flare::core::{
-    commands::{
-        Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand,
-    },
-    Reliability, Frame,
-};
 use super::flare::core::commands::{
     command::Type as CommandType,
     message_command::Type as MessageType,
     notification_command::Type as NotificationType,
     system_command::{SerializationFormat, Type as SystemType},
+};
+use super::flare::core::{
+    Frame, Reliability,
+    commands::{Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand},
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,10 +40,7 @@ pub fn current_timestamp() -> u64 {
 // ============================================================================
 
 /// 创建基础 SystemCommand（内部辅助函数）
-fn create_base_system_command(
-    r#type: SystemType,
-    format: SerializationFormat,
-) -> SystemCommand {
+fn create_base_system_command(r#type: SystemType, format: SerializationFormat) -> SystemCommand {
     SystemCommand {
         r#type: r#type as i32,
         format: format as i32,
@@ -235,10 +230,7 @@ pub fn close(message: Option<String>, metadata: Option<HashMap<String, Vec<u8>>>
 }
 
 /// 创建 ERROR 命令
-pub fn error(
-    message: String,
-    metadata: Option<HashMap<String, Vec<u8>>>,
-) -> SystemCommand {
+pub fn error(message: String, metadata: Option<HashMap<String, Vec<u8>>>) -> SystemCommand {
     create_system_command_with_message(
         SystemType::Error,
         SerializationFormat::Protobuf,
@@ -263,10 +255,7 @@ pub fn event(
 }
 
 /// 创建 AUTH 命令
-pub fn auth(
-    metadata: HashMap<String, Vec<u8>>,
-    data: Option<Vec<u8>>,
-) -> SystemCommand {
+pub fn auth(metadata: HashMap<String, Vec<u8>>, data: Option<Vec<u8>>) -> SystemCommand {
     SystemCommand {
         r#type: SystemType::Auth as i32,
         format: SerializationFormat::Protobuf as i32,
@@ -292,20 +281,20 @@ pub fn auth_ack(
 }
 
 /// 创建 KICKED 命令（被踢下线）
-/// 
+///
 /// # 参数
 /// - `reason`: 被踢的原因（必需）
 /// - `metadata`: 可选的元数据（如设备信息、冲突连接ID等）
-/// 
+///
 /// # 示例
 /// ```rust
 /// use flare_core::common::protocol::builder::kicked;
 /// use flare_core::common::protocol::frame_with_system_command;
 /// use std::collections::HashMap;
-/// 
+///
 /// let mut metadata = HashMap::new();
 /// metadata.insert("conflict_device".to_string(), "device-123".as_bytes().to_vec());
-/// 
+///
 /// let kick_cmd = kicked("设备冲突：同一平台已有其他设备在线", Some(metadata));
 /// let frame = frame_with_system_command(kick_cmd, Reliability::AtLeastOnce);
 /// ```
@@ -417,10 +406,7 @@ pub fn custom_command(
 // ============================================================================
 
 /// 创建包含命令的 Frame（内部辅助函数）
-fn create_frame_with_command(
-    command_type: CommandType,
-    reliability: Reliability,
-) -> Frame {
+fn create_frame_with_command(command_type: CommandType, reliability: Reliability) -> Frame {
     FrameBuilder::new()
         .with_command(Command {
             r#type: Some(command_type),
@@ -430,19 +416,33 @@ fn create_frame_with_command(
 }
 
 /// 创建包含系统命令的 Frame
-pub fn frame_with_system_command(
-    system_command: SystemCommand,
-    reliability: Reliability,
-) -> Frame {
+pub fn frame_with_system_command(system_command: SystemCommand, reliability: Reliability) -> Frame {
     create_frame_with_command(CommandType::System(system_command), reliability)
 }
 
 /// 创建包含消息命令的 Frame
+/// 
+/// 注意：Frame 的 message_id 会使用 MessageCommand.message_id，以确保客户端和服务端能正确匹配响应
+/// 如果 MessageCommand.message_id 为空，则自动生成一个并更新 MessageCommand
 pub fn frame_with_message_command(
-    message_command: MessageCommand,
+    mut message_command: MessageCommand,
     reliability: Reliability,
 ) -> Frame {
-    create_frame_with_command(CommandType::Message(message_command), reliability)
+    // 如果 message_id 为空，自动生成一个并更新 MessageCommand
+    if message_command.message_id.is_empty() {
+        message_command.message_id = generate_message_id();
+    }
+    
+    // 使用 MessageCommand.message_id 作为 Frame 的 message_id，确保两者一致
+    let message_id = message_command.message_id.clone();
+    
+    FrameBuilder::new()
+        .with_command(Command {
+            r#type: Some(CommandType::Message(message_command)),
+        })
+        .with_message_id(message_id)
+        .with_reliability(reliability)
+        .build()
 }
 
 /// 创建包含通知命令的 Frame
@@ -454,10 +454,7 @@ pub fn frame_with_notification_command(
 }
 
 /// 创建包含自定义命令的 Frame
-pub fn frame_with_custom_command(
-    custom_command: CustomCommand,
-    reliability: Reliability,
-) -> Frame {
+pub fn frame_with_custom_command(custom_command: CustomCommand, reliability: Reliability) -> Frame {
     create_frame_with_command(CommandType::Custom(custom_command), reliability)
 }
 
@@ -469,7 +466,7 @@ mod tests {
     fn test_ping_pong() {
         let ping_cmd = ping();
         assert_eq!(ping_cmd.r#type, SystemType::Ping as i32);
-        
+
         let pong_cmd = pong();
         assert_eq!(pong_cmd.r#type, SystemType::Pong as i32);
     }
@@ -489,7 +486,7 @@ mod tests {
             })
             .with_reliability(Reliability::AtLeastOnce)
             .build();
-        
+
         assert!(!frame.message_id.is_empty());
         assert!(frame.timestamp > 0);
     }

@@ -1,6 +1,6 @@
 //! 国际化错误信息结构
 
-use super::code::{ErrorCode, ErrorCategory};
+use super::code::{ErrorCategory, ErrorCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -34,21 +34,21 @@ impl LocalizedError {
             timestamp: chrono::Utc::now(),
         }
     }
-    
+
     /// 添加错误详情
     #[must_use]
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
     }
-    
+
     /// 添加错误参数
     #[must_use]
     pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
         self.params = Some(params);
         self
     }
-    
+
     /// 添加单个参数
     #[must_use]
     pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -60,25 +60,25 @@ impl LocalizedError {
         }
         self
     }
-    
+
     /// 获取错误代码的数字值
     #[inline]
     pub fn code_value(&self) -> u32 {
         self.code.as_u32()
     }
-    
+
     /// 获取错误代码的字符串标识符
     #[inline]
     pub fn code_str(&self) -> &'static str {
         self.code.as_str()
     }
-    
+
     /// 获取错误类别
     #[inline]
     pub fn category(&self) -> ErrorCategory {
         self.code.category()
     }
-    
+
     /// 判断是否为可重试的错误
     #[inline]
     pub fn is_retryable(&self) -> bool {

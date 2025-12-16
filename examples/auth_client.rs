@@ -1,51 +1,51 @@
 //! 认证聊天室客户端示例
-//! 
+//!
 //! 演示客户端如何使用 token 进行认证
-//! 
+//!
 //! ## 认证说明
-//! 
+//!
 //! 1. **设置 Token**：
 //!    - 通过 `with_token()` 设置 token
 //!    - Token 会在 CONNECT 消息中自动发送给服务端
-//! 
+//!
 //! 2. **认证流程**：
 //!    - 客户端连接后，自动发送 CONNECT 消息（包含 token）
 //!    - 服务端验证 token，验证通过后发送 CONNECT_ACK
 //!    - 只有验证通过后，客户端才能收发业务消息
-//! 
+//!
 //! ## 启动命令
-//! 
+//!
 //! ```bash
 //! # 使用正确 token（12345）
 //! RUST_LOG=debug cargo run --example auth_client
-//! 
+//!
 //! # 使用错误 token（通过命令行参数）
 //! RUST_LOG=debug cargo run --example auth_client -- wrong_token
-//! 
+//!
 //! # 通过环境变量指定 token
 //! TOKEN=12345 RUST_LOG=debug cargo run --example auth_client
 //! ```
-//! 
+//!
 //! ## 配置说明
-//! 
+//!
 //! - `with_token()`: 设置 token（用于认证）
 //! - `with_user_id()`: 设置用户ID（可选，用于聊天室显示用户名）
 
-use flare_core::client::{ObserverClientBuilder, ClientEventHandler};
-use flare_core::common::config_types::{TransportProtocol, HeartbeatConfig};
-use flare_core::common::protocol::{frame_with_message_command, send_message, generate_message_id, Reliability, Frame};
+use async_trait::async_trait;
+use flare_core::client::{ClientEventHandler, ObserverClientBuilder};
+use flare_core::common::config_types::{HeartbeatConfig, TransportProtocol};
+use flare_core::common::error::Result;
 use flare_core::common::protocol::flare::core::commands::{
+    command::Type, message_command::Type as MsgType, notification_command::Type as NotifType,
     system_command::Type as SysType,
-    message_command::Type as MsgType,
-    notification_command::Type as NotifType,
-    command::Type,
+};
+use flare_core::common::protocol::{
+    Frame, Reliability, frame_with_message_command, generate_message_id, send_message,
 };
 use flare_core::transport::events::{ConnectionEvent, ConnectionObserver};
-use flare_core::common::error::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::{info, error, debug, warn};
-use async_trait::async_trait;
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,11 +81,11 @@ async fn main() -> Result<()> {
         print!("Token (默认: 12345): ");
         use std::io::Write;
         std::io::stdout().flush().unwrap();
-        
+
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
         let mut input_line = String::new();
-        
+
         match reader.read_line(&mut input_line).await {
             Ok(_) => {
                 let trimmed = input_line.trim();
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
             }
         }
     };
-    
+
     info!("✅ Token: {}", token);
     if token == "12345" {
         info!("💡 提示：使用正确 token，应该可以成功连接");
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     // 3. 创建错误标志，用于在连接错误时立即退出
     // ============================================================
     let connection_error = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    
+
     // ============================================================
     // 4. 创建观察者（用于接收消息和连接事件）
     // ============================================================
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         message_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         connection_error: Arc::clone(&connection_error),
     });
-    
+
     // ============================================================
     // 5. 创建事件处理器（用于打印所有收到的消息）
     // ============================================================
@@ -141,19 +141,19 @@ async fn main() -> Result<()> {
     let mut client = ObserverClientBuilder::new("127.0.0.1:8080")
         .with_observer(observer.clone() as Arc<dyn ConnectionObserver>)
         .with_event_handler(event_handler.clone() as Arc<dyn ClientEventHandler>)
-        
         // ============================================================
         // 认证配置：设置 token
         // ============================================================
-        .with_token(token.clone())  // 设置 token，将在 CONNECT 消息中发送
-        
+        .with_token(token.clone()) // 设置 token，将在 CONNECT 消息中发送
         // ============================================================
         // 协议配置：支持多协议竞速
         // ============================================================
         .with_protocol_race(vec![TransportProtocol::QUIC, TransportProtocol::WebSocket])
-        .with_protocol_url(TransportProtocol::WebSocket, "ws://127.0.0.1:8080".to_string())
+        .with_protocol_url(
+            TransportProtocol::WebSocket,
+            "ws://127.0.0.1:8080".to_string(),
+        )
         .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-        
         // ============================================================
         // 连接配置
         // ============================================================
@@ -161,10 +161,9 @@ async fn main() -> Result<()> {
         .with_connect_timeout(std::time::Duration::from_secs(10))
         .with_reconnect_interval(std::time::Duration::from_secs(3))
         .with_max_reconnect_attempts(Some(5))
-        
         .build_with_race()
         .await?;
-    
+
     info!("✅ 连接成功");
     info!("");
     info!("📋 认证结果：");
@@ -192,11 +191,11 @@ async fn main() -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
-    
+
     loop {
         // 注意：如果发生连接错误，观察者会在 on_event 中调用 std::process::exit(1) 立即退出
         // 这里只需要正常处理用户输入即可
-        
+
         // 使用 tokio::select! 同时监听输入和连接状态
         tokio::select! {
             result = reader.read_line(&mut line) => {
@@ -209,28 +208,28 @@ async fn main() -> Result<()> {
                     Ok(_) => {
                         let message = line.trim().to_string();
                         line.clear();
-                        
+
                         if message.is_empty() {
                             continue;
                         }
-                        
+
                         if message == "quit" || message == "exit" {
                             info!("退出客户端...");
                             break;
                         }
-                        
+
                         // 处理特殊命令
                         if message == "/token" {
                             info!("当前 token: {}", token);
                             continue;
                         }
-                        
+
                         // 检查连接状态
                         if !client.is_connected() {
                             error!("连接已断开，无法发送消息");
                             break;
                         }
-                        
+
                         // 发送消息
                         let msg_cmd = send_message(
                             generate_message_id(),
@@ -238,12 +237,12 @@ async fn main() -> Result<()> {
                             None,
                             None,
                         );
-                        
+
                         let frame = frame_with_message_command(
                             msg_cmd,
                             Reliability::AtLeastOnce,
                         );
-                        
+
                         if let Err(e) = client.send_frame(&frame).await {
                             error!("发送消息失败: {}", e);
                             // 发送失败可能是连接问题，检查连接状态
@@ -281,7 +280,7 @@ async fn main() -> Result<()> {
 }
 
 /// 带错误标志的认证聊天观察者
-/// 
+///
 /// 当发生连接错误时，立即退出程序
 struct AuthChatObserverWithErrorFlag {
     message_count: Arc<std::sync::atomic::AtomicU64>,
@@ -296,24 +295,31 @@ impl ConnectionObserver for AuthChatObserverWithErrorFlag {
                 info!("✅ 已连接到服务器");
                 info!("   客户端已自动发送 CONNECT 消息，包含 token");
             }
-            
+
             ConnectionEvent::Disconnected(reason) => {
                 // 检查是否是认证失败导致的断开
                 // 注意：协议竞速时关闭未选中的连接也会触发 Disconnected，这种情况不应该退出
-                if reason.contains("认证") || reason.contains("Token") || reason.contains("验证") || 
-                   reason.contains("authentication") || reason.contains("Authentication") ||
-                   reason.contains("Token 无效") || reason.contains("未提供 token") {
+                if reason.contains("认证")
+                    || reason.contains("Token")
+                    || reason.contains("验证")
+                    || reason.contains("authentication")
+                    || reason.contains("Authentication")
+                    || reason.contains("Token 无效")
+                    || reason.contains("未提供 token")
+                {
                     error!("❌ 连接被拒绝（认证失败）: {}", reason);
                     error!("💡 提示：请检查 token 是否正确（正确 token: 12345）");
                     // 只有认证失败才退出
-                    self.connection_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.connection_error
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     error!("⚠️  认证失败，立即退出程序");
                     std::process::exit(1);
-                } else if reason.is_empty() || 
-                          reason.contains("协议竞速") || 
-                          reason.contains("未选中") ||
-                          reason.contains("Closed by client") ||
-                          reason.contains("Client disconnected") {
+                } else if reason.is_empty()
+                    || reason.contains("协议竞速")
+                    || reason.contains("未选中")
+                    || reason.contains("Closed by client")
+                    || reason.contains("Client disconnected")
+                {
                     // 协议竞速或正常关闭导致的断开，不退出
                     debug!("ℹ️  连接断开（正常关闭）: {}", reason);
                 } else {
@@ -322,23 +328,30 @@ impl ConnectionObserver for AuthChatObserverWithErrorFlag {
                     warn!("⚠️  连接断开: {}", reason);
                 }
             }
-            
+
             ConnectionEvent::Error(e) => {
                 // 检查是否是认证相关的错误
                 let error_str = format!("{:?}", e);
-                if error_str.contains("认证") || error_str.contains("Token") || error_str.contains("验证") || 
-                   error_str.contains("authentication") || error_str.contains("Authentication") ||
-                   error_str.contains("Token 无效") || error_str.contains("未提供 token") ||
-                   error_str.contains("authentication_failed") {
+                if error_str.contains("认证")
+                    || error_str.contains("Token")
+                    || error_str.contains("验证")
+                    || error_str.contains("authentication")
+                    || error_str.contains("Authentication")
+                    || error_str.contains("Token 无效")
+                    || error_str.contains("未提供 token")
+                    || error_str.contains("authentication_failed")
+                {
                     error!("❌ 连接错误（认证失败）: {:?}", e);
                     error!("💡 提示：请检查 token 是否正确（正确 token: 12345）");
                     // 只有认证失败才退出
-                    self.connection_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.connection_error
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     error!("⚠️  认证失败，立即退出程序");
                     std::process::exit(1);
-                } else if error_str.contains("protocol error") || 
-                          error_str.contains("Connection reset") ||
-                          error_str.contains("WebSocket protocol error") {
+                } else if error_str.contains("protocol error")
+                    || error_str.contains("Connection reset")
+                    || error_str.contains("WebSocket protocol error")
+                {
                     // WebSocket 协议错误（可能是协议竞速时关闭连接导致的），不退出
                     debug!("ℹ️  连接错误（协议竞速或协议层错误）: {:?}", e);
                 } else {
@@ -347,18 +360,21 @@ impl ConnectionObserver for AuthChatObserverWithErrorFlag {
                     warn!("⚠️  连接错误: {:?}", e);
                 }
             }
-            
+
             ConnectionEvent::Message(data) => {
                 // 解析消息：MessageParser 支持自动检测格式（JSON/Protobuf）
                 // 默认使用JSON格式，parse()会自动检测实际格式
                 let parser = flare_core::common::MessageParser::json();
-                
+
                 match parser.parse(data) {
                     Ok(frame) => {
                         if let Some(cmd) = &frame.command {
                             if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
                                 let message_text = String::from_utf8_lossy(&msg_cmd.payload);
-                                let count = self.message_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                let count = self
+                                    .message_count
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1;
                                 info!("[消息 #{}] {}", count, message_text);
                             }
                         }
@@ -373,15 +389,19 @@ impl ConnectionObserver for AuthChatObserverWithErrorFlag {
 }
 
 /// 调试事件处理器
-/// 
+///
 /// 打印所有收到的系统命令、消息命令、通知命令和连接事件
 struct DebugEventHandler;
 
 #[async_trait]
 impl ClientEventHandler for DebugEventHandler {
-    async fn handle_system_command(&self, command_type: SysType, frame: &Frame) -> Result<Option<Frame>> {
+    async fn handle_system_command(
+        &self,
+        command_type: SysType,
+        frame: &Frame,
+    ) -> Result<Option<Frame>> {
         debug!("[DebugEventHandler] 📨 收到系统命令: {:?}", command_type);
-        
+
         if let Some(cmd) = &frame.command {
             if let Some(Type::System(sys_cmd)) = &cmd.r#type {
                 match command_type {
@@ -403,20 +423,28 @@ impl ClientEventHandler for DebugEventHandler {
                 }
             }
         }
-        
+
         Ok(None)
     }
-    
-    async fn handle_message_command(&self, command_type: MsgType, frame: &Frame) -> Result<Option<Frame>> {
+
+    async fn handle_message_command(
+        &self,
+        command_type: MsgType,
+        frame: &Frame,
+    ) -> Result<Option<Frame>> {
         debug!("[DebugEventHandler] 💬 收到消息命令: {:?}", command_type);
         Ok(None)
     }
-    
-    async fn handle_notification_command(&self, command_type: NotifType, _frame: &Frame) -> Result<Option<Frame>> {
+
+    async fn handle_notification_command(
+        &self,
+        command_type: NotifType,
+        _frame: &Frame,
+    ) -> Result<Option<Frame>> {
         debug!("[DebugEventHandler] 🔔 收到通知命令: {:?}", command_type);
         Ok(None)
     }
-    
+
     async fn handle_connection_event(&self, event: &ConnectionEvent) -> Result<()> {
         match event {
             ConnectionEvent::Connected => {
@@ -432,8 +460,7 @@ impl ClientEventHandler for DebugEventHandler {
                 // 消息在 handle_message_command 中处理
             }
         }
-        
+
         Ok(())
     }
 }
-

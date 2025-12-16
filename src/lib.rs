@@ -14,9 +14,12 @@ pub use server::HybridServer;
 
 // 重新导出 Builder API（观察者模式和简单模式）
 #[cfg(not(target_arch = "wasm32"))]
-pub use client::{ClientBuilder, SimpleClient, ObserverClientBuilder, ObserverClient};
+pub use client::{ClientBuilder, ObserverClient, ObserverClientBuilder, SimpleClient};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{ServerBuilder, SimpleServer, MessageContext, ObserverServerBuilder, ObserverServer, ServerHandle, DefaultServerHandle};
+pub use server::{
+    DefaultServerHandle, MessageContext, ObserverServer, ObserverServerBuilder, ServerBuilder,
+    ServerHandle, SimpleServer,
+};
 
 // 重新导出会话ID相关功能
 pub use common::session_id::*;

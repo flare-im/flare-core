@@ -1,5 +1,5 @@
 //! Flare 协议模块
-//! 
+//!
 //! 包含 protobuf 生成的消息定义和快速构建工具
 
 // 生成的文件需要通过 prost-build 生成
@@ -15,17 +15,19 @@ pub mod flare {
         pub mod commands {
             include!("flare.core.commands.rs");
         }
-        
+
         // Frame 和 Reliability - 直接从生成的文件中包含
         // build.rs 已经修复了 commands 的引用为 super::commands
         pub mod flare_core {
             include!("flare.core.rs");
         }
-        
+
         pub use flare_core::{Frame, Reliability};
-        
+
         // 重新导出常用类型
-        pub use commands::{Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand};
+        pub use commands::{
+            Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand,
+        };
     }
 }
 
@@ -38,6 +40,6 @@ pub mod serde_example;
 
 // 重新导出常用类型和构建器
 pub use builder::*;
-pub use flare::core::{Frame, Reliability};
-pub use flare::core::commands::*;
 pub use flare::core::commands::system_command::SerializationFormat;
+pub use flare::core::commands::*;
+pub use flare::core::{Frame, Reliability};
