@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::debug;
+use tracing::{debug, warn};
 
 // 使用枚举来支持两种类型的 WebSocketStream
 enum WebSocketSink {
@@ -201,6 +201,22 @@ impl WebSocketTransport {
                 let is_terminal =
                     matches!(event, ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_));
 
+                // 添加详细日志追踪消息处理
+                match &event {
+                    ConnectionEvent::Message(data) => {
+                        debug!(
+                            "[DEBUG WebSocketTransport] receiver_task_plain: 准备通知 observers, data_len={}",
+                            data.len()
+                        );
+                    }
+                    _ => {
+                        debug!(
+                            "[DEBUG WebSocketTransport] receiver_task_plain: 准备通知 observers, event={:?}",
+                            event
+                        );
+                    }
+                }
+
                 Self::_notify_observers(&observers_arc, &event);
 
                 if is_terminal {
@@ -212,8 +228,25 @@ impl WebSocketTransport {
 
     // 私有辅助方法，用于通知所有观察者
     fn _notify_observers(observers_arc: &Arc<std::sync::Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
-        let observers = observers_arc.lock().unwrap();
-        for observer in observers.iter() {
+        let observers = match observers_arc.lock() {
+            Ok(obs) => obs,
+            Err(e) => {
+                warn!("[DEBUG WebSocketTransport] _notify_observers: 无法获取 observers 锁: {}", e);
+                return;
+            }
+        };
+        
+        debug!(
+            "[DEBUG WebSocketTransport] _notify_observers: observer_count={}, event={:?}",
+            observers.len(),
+            event
+        );
+        
+        for (idx, observer) in observers.iter().enumerate() {
+            debug!(
+                "[DEBUG WebSocketTransport] _notify_observers: 调用 observer[{}].on_event",
+                idx
+            );
             observer.on_event(event);
         }
     }

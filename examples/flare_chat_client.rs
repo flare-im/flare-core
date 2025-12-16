@@ -344,8 +344,9 @@ async fn main() -> Result<()> {
                             Reliability::AtLeastOnce,
                         );
                         
-                        if let Err(e) = client.send_frame(&frame).await {
-                            error!("发送消息失败: {}", e);
+                        // 发送消息并等待响应（按 message_id 匹配）
+                        if let Err(e) = client.send_frame_and_wait(&frame, std::time::Duration::from_secs(5)).await {
+                            error!("发送消息或等待响应失败: {}", e);
                             // 如果发送失败，等待重连，不立即退出
                             if !client.is_connected() {
                                 warn!("⚠️  连接已断开，等待自动重连...");

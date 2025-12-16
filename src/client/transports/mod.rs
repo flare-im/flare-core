@@ -75,6 +75,8 @@ pub trait Client: Send + Sync {
     /// 发送成功返回 `Ok(())`，失败返回错误
     async fn send_frame(&mut self, frame: &Frame) -> Result<()>;
     
+
+    
     /// 检查连接状态
     /// 
     /// # 返回

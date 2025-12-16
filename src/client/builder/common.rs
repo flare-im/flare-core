@@ -8,6 +8,7 @@ use crate::client::{HybridClient, Client};
 use crate::common::config_types::TransportProtocol;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::time::Duration;
 
 /// 客户端包装器
 /// 
@@ -39,6 +40,12 @@ impl ClientWrapper {
     pub async fn disconnect(&self) -> Result<()> {
         let mut client = self.client.lock().await;
         client.disconnect().await
+    }
+    
+    /// 发送消息并等待响应（按 message_id 匹配）
+    pub async fn send_frame_and_wait(&self, frame: &Frame, timeout: Duration) -> Result<Frame> {
+        let mut client = self.client.lock().await;
+        client.send_frame_and_wait(frame, timeout).await
     }
     
     /// 发送消息 Frame

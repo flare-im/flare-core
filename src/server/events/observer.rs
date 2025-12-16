@@ -204,14 +204,28 @@ impl DefaultServerMessageObserver {
         command: &crate::common::protocol::MessageCommand,
         connection_id: &str,
     ) -> Result<()> {
+        let message_id = command.message_id.clone();
+        debug!(
+            "[DefaultObserver] handle_message_command: 开始处理, connection_id={}, message_id={}",
+            connection_id, message_id
+        );
+        
         // 如果有自定义事件处理器，使用它
         if let Some(ref event_handler) = self.event_handler {
             use crate::common::protocol::flare::core::commands::message_command::Type as MsgType;
             if let Ok(msg_type) = MsgType::try_from(command.r#type) {
+                debug!(
+                    "[DefaultObserver] handle_message_command: 调用 event_handler.handle_message_command_by_type, connection_id={}, message_id={}, msg_type={:?}",
+                    connection_id, message_id, msg_type
+                );
                 if let Ok(Some(response)) = event_handler
                     .handle_message_command_by_type(command, msg_type, connection_id)
                     .await
                 {
+                    debug!(
+                        "[DefaultObserver] handle_message_command: event_handler 返回响应, connection_id={}, message_id={}",
+                        connection_id, message_id
+                    );
                     // 发送自定义回复
                     let manager_trait = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
                     let conn_id = connection_id.to_string();
@@ -226,6 +240,11 @@ impl DefaultServerMessageObserver {
                         }
                     });
                     return Ok(());
+                } else {
+                    debug!(
+                        "[DefaultObserver] handle_message_command: event_handler 返回 None, 继续默认处理, connection_id={}, message_id={}",
+                        connection_id, message_id
+                    );
                 }
             }
         }
@@ -237,6 +256,11 @@ impl DefaultServerMessageObserver {
         let conn_id = connection_id.to_string();
         let frame_clone = frame.clone();
         
+        debug!(
+            "[DefaultObserver] handle_message_command: 准备调用 handler.handle_frame, connection_id={}, message_id={}",
+            conn_id, message_id
+        );
+        
         // 更新连接活跃时间
         let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
         let conn_id_update = conn_id.clone();
@@ -245,15 +269,72 @@ impl DefaultServerMessageObserver {
         });
         
         tokio::spawn(async move {
-            if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
+            info!(
+                "[DefaultObserver] handle_message_command: 开始调用 handler.handle_frame, connection_id={}, message_id={}",
+                conn_id, message_id
+            );
+            let start_time = std::time::Instant::now();
+            
+            // 添加超时保护，避免阻塞
+            let timeout_duration = std::time::Duration::from_secs(10);
+            let result = match tokio::time::timeout(
+                timeout_duration,
+                handler.handle_frame(&frame_clone, &conn_id)
+            ).await {
+                Ok(res) => res,
+                Err(_) => {
+                    error!(
+                        "[DefaultObserver] handle_message_command: handler.handle_frame 超时, connection_id={}, message_id={}, timeout={:?}",
+                        conn_id, message_id, timeout_duration
+                    );
+                    return;
+                }
+            };
+            
+            info!(
+                "[DefaultObserver] handle_message_command: handler.handle_frame 调用完成, connection_id={}, message_id={}, result={:?}",
+                conn_id, message_id, result.is_ok()
+            );
+            match result {
+                Ok(Some(response)) => {
+                    let duration_ms = start_time.elapsed().as_millis();
+                    debug!(
+                        "[DefaultObserver] handle_message_command: handler.handle_frame 返回响应, connection_id={}, message_id={}, duration_ms={}",
+                        conn_id, message_id, duration_ms
+                    );
                 // 发送回复
                 let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
                 if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
                     if let Ok(data) = parser.serialize(&response) {
                         let conn_clone = Arc::clone(&conn);
                         let mut c = conn_clone.lock().await;
-                        let _ = c.send(&data).await;
+                            if let Err(e) = c.send(&data).await {
+                                error!(
+                                    "[DefaultObserver] handle_message_command: 发送响应失败, connection_id={}, message_id={}, error={}",
+                                    conn_id, message_id, e
+                                );
+                            } else {
+                                debug!(
+                                    "[DefaultObserver] handle_message_command: 响应已发送, connection_id={}, message_id={}",
+                                    conn_id, message_id
+                                );
+                            }
+                        }
                     }
+                }
+                Ok(None) => {
+                    let duration_ms = start_time.elapsed().as_millis();
+                    debug!(
+                        "[DefaultObserver] handle_message_command: handler.handle_frame 返回 None, connection_id={}, message_id={}, duration_ms={}",
+                        conn_id, message_id, duration_ms
+                    );
+                }
+                Err(e) => {
+                    let duration_ms = start_time.elapsed().as_millis();
+                    error!(
+                        "[DefaultObserver] handle_message_command: handler.handle_frame 失败, connection_id={}, message_id={}, error={}, duration_ms={}",
+                        conn_id, message_id, e, duration_ms
+                    );
                 }
             }
         });
@@ -330,7 +411,17 @@ impl ConnectionObserver for DefaultServerMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                if let Ok(frame) = self.parser.parse(data) {
+                debug!(
+                    "[DefaultObserver] on_event: 收到消息, connection_id={}, data_len={}",
+                    self.connection_id, data.len()
+                );
+                match self.parser.parse(data) {
+                    Ok(frame) => {
+                        debug!(
+                            "[DefaultObserver] on_event: 解析 Frame 成功, connection_id={}, message_id={}",
+                            self.connection_id,
+                            frame.message_id
+                        );
                     // 先克隆 frame，避免生命周期问题
                     let frame_clone = frame.clone();
                     if let Some(cmd) = &frame.command {
@@ -350,10 +441,31 @@ impl ConnectionObserver for DefaultServerMessageObserver {
                                 let conn_id = self.connection_id.clone();
                                 let msg_cmd_clone = msg_cmd.clone();
                                 let observer = self.clone();
+                                            let message_id = msg_cmd_clone.message_id.clone();
+                                            
+                                            debug!(
+                                                "[DefaultObserver] 收到消息命令: connection_id={}, message_id={}, message_type={}",
+                                                conn_id, message_id, msg_cmd_clone.r#type
+                                            );
                                 
                                 tokio::spawn(async move {
-                                    if let Err(e) = observer.handle_message_command(&frame_clone, &msg_cmd_clone, &conn_id).await {
-                                        error!("[DefaultObserver] 处理消息命令失败: {}", e);
+                                                debug!(
+                                                    "[DefaultObserver] 准备调用 handle_message_command: connection_id={}, message_id={}",
+                                                    conn_id, message_id
+                                                );
+                                                match observer.handle_message_command(&frame_clone, &msg_cmd_clone, &conn_id).await {
+                                                    Ok(_) => {
+                                                        debug!(
+                                                            "[DefaultObserver] handle_message_command 成功: connection_id={}, message_id={}",
+                                                            conn_id, message_id
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        error!(
+                                                            "[DefaultObserver] 处理消息命令失败: connection_id={}, message_id={}, error={}",
+                                                            conn_id, message_id, e
+                                                        );
+                                                    }
                                     }
                                 });
                             }
@@ -405,6 +517,13 @@ impl ConnectionObserver for DefaultServerMessageObserver {
                                 debug!("[DefaultObserver] 未处理的命令类型");
                             }
                         }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "[DefaultObserver] on_event: 解析 Frame 失败, connection_id={}, error={}, data_len={}",
+                            self.connection_id, e, data.len()
+                        );
                     }
                 }
             }

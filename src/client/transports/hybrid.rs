@@ -757,6 +757,37 @@ impl std::fmt::Debug for HybridClient {
 
 /// 创建混合客户端的便捷函数
 impl HybridClient {
+    /// 发送消息并等待服务端响应（按 Frame.message_id 匹配）
+    pub async fn send_frame_and_wait(&mut self, frame: &Frame, timeout: Duration) -> Result<Frame> {
+        if frame.message_id.is_empty() {
+            return Err(FlareError::protocol_error("message_id is empty".to_string()));
+        }
+        // 在发送前注册等待器
+        let rx = self.core.register_pending_response(&frame.message_id).await;
+        // 发送消息
+        {
+            let mut client = self.inner.lock().await;
+            client.send_frame(frame).await?;
+        }
+        // 等待响应或超时
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
+                // 发送失败（通道已关闭），清理等待项
+                self.core.cancel_pending_response(&frame.message_id).await;
+                Err(FlareError::protocol_error("Response channel closed".to_string()))
+            }
+            Err(_) => {
+                // 超时，清理等待项
+                self.core.cancel_pending_response(&frame.message_id).await;
+                Err(FlareError::protocol_error(format!(
+                    "Response timeout for message_id {}",
+                    frame.message_id
+                )))
+            }
+        }
+    }
+
     /// 使用配置创建并连接（单协议）
     pub async fn connect_with_config(config: ClientConfig) -> Result<Self> {
         let mut client = Self::new(config)?;

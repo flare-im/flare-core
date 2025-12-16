@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 
+
 /// WebSocket 客户端
 /// 
 /// 只处理协议层，其他功能委托给 ClientCore
@@ -231,6 +232,8 @@ impl Client for WebSocketClient {
         
         self.send_frame_internal(frame).await
     }
+
+
 
     fn is_connected(&self) -> bool {
         matches!(

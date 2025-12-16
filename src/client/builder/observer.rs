@@ -219,6 +219,11 @@ impl ObserverClient {
         self.wrapper.send_frame(frame).await
     }
 
+    /// 发送并等待响应（按 message_id 匹配）
+    pub async fn send_frame_and_wait(&mut self, frame: &Frame, timeout: std::time::Duration) -> Result<Frame> {
+        self.wrapper.send_frame_and_wait(frame, timeout).await
+    }
+
     /// 检查连接状态
     pub fn is_connected(&self) -> bool {
         self.wrapper.is_connected()

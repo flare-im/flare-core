@@ -16,7 +16,7 @@ use crate::common::error::{FlareError, Result};
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use crate::transport::connection::Connection;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use std::collections::HashMap;
 
 /// 客户端核心功能
@@ -41,6 +41,8 @@ pub struct ClientCore {
     /// 客户端连接（用于断开连接）
     /// 使用 Arc 包装，以便在 clone 时共享同一个连接引用
     client_connection: Arc<std::sync::Mutex<Option<Arc<Mutex<Box<dyn Connection>>>>>>,
+    /// 等待响应的请求池（按 message_id 匹配）
+    pending_map: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
 }
 
 impl ClientCore {
@@ -60,6 +62,7 @@ impl ClientCore {
             config: config.clone(),
             event_handler: None,
             client_connection: Arc::new(std::sync::Mutex::new(None)),
+            pending_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
     
@@ -172,6 +175,13 @@ impl ClientCore {
                 return;
             }
         };
+        // 尝试匹配等待的响应（按 Frame.message_id）
+        {
+            let mut pending = self.pending_map.lock().await;
+            if let Some(sender) = pending.remove(&frame.message_id) {
+                let _ = sender.send(frame.clone());
+            }
+        }
         
         // 处理系统命令（CONNECT_ACK, PONG, KICKED）
         let is_system_command = self.handle_system_commands(&frame).await;
@@ -790,6 +800,23 @@ impl ClientCore {
     }
 }
 
+impl ClientCore {
+    /// 注册一个按 message_id 等待的响应通道
+    /// 返回 Receiver，调用方可在外部等待
+    pub async fn register_pending_response(&self, message_id: &str) -> oneshot::Receiver<Frame> {
+        let (tx, rx) = oneshot::channel();
+        let mut pending = self.pending_map.lock().await;
+        pending.insert(message_id.to_string(), tx);
+        rx
+    }
+
+    /// 取消等待（超时或主动取消时调用）
+    pub async fn cancel_pending_response(&self, message_id: &str) {
+        let mut pending = self.pending_map.lock().await;
+        pending.remove(message_id);
+    }
+}
+
 // 为 ClientCore 实现 Clone（用于共享状态管理器和观察者）
 impl Clone for ClientCore {
     fn clone(&self) -> Self {
@@ -802,6 +829,7 @@ impl Clone for ClientCore {
             config: self.config.clone(),
             event_handler: self.event_handler.clone(), // 事件处理器可以共享
             client_connection: Arc::clone(&self.client_connection), // 共享连接引用
+            pending_map: Arc::clone(&self.pending_map),
         }
     }
 }
