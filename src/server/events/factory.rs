@@ -4,11 +4,10 @@
 
 use crate::common::MessageParser;
 use crate::server::connection::ConnectionManager;
+use crate::server::events::{ServerMessageWrapper, observer::ConnectionHandlerObserverAdapter};
 use crate::transport::events::ConnectionObserver;
 use std::sync::Arc;
-
-// 前向声明，避免循环依赖
-use crate::server::transports::ConnectionHandler;
+use tracing::error;
 
 /// ServerCore 的轻量级引用
 ///
@@ -36,9 +35,9 @@ pub struct ServerCoreRef {
 /// impl ServerMessageObserverFactory for MyCustomObserverFactory {
 ///     fn create_observer(
 ///         &self,
-///         handler: Arc<dyn ConnectionHandler>,
 ///         manager: Arc<ConnectionManager>,
 ///         parser: MessageParser,
+///         event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
 ///         connection_id: String,
 ///         core_ref: Arc<ServerCoreRef>,
 ///         core: Arc<crate::server::transports::server_core::ServerCore>,
@@ -52,9 +51,9 @@ pub trait ServerMessageObserverFactory: Send + Sync {
     /// 为指定连接创建观察者
     ///
     /// # 参数
-    /// - `handler`: 连接处理器
     /// - `manager`: 连接管理器
     /// - `parser`: 消息解析器
+    /// - `event_handler`: 事件处理器（必需）
     /// - `connection_id`: 连接 ID
     /// - `core_ref`: 服务器核心的轻量级引用
     /// - `core`: 服务器核心的完整引用（用于需要完整功能的情况）
@@ -63,9 +62,9 @@ pub trait ServerMessageObserverFactory: Send + Sync {
     /// 创建的观察者实例
     fn create_observer(
         &self,
-        handler: Arc<dyn ConnectionHandler>,
         manager: Arc<ConnectionManager>,
         parser: MessageParser,
+        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
         connection_id: String,
         core_ref: Arc<ServerCoreRef>,
         core: Arc<crate::server::transports::server_core::ServerCore>,
@@ -129,34 +128,48 @@ impl Default for DefaultServerMessageObserverFactory {
     }
 }
 
+/// 服务端观察者工厂实现
 impl ServerMessageObserverFactory for DefaultServerMessageObserverFactory {
     fn create_observer(
         &self,
-        handler: Arc<dyn ConnectionHandler>,
         manager: Arc<ConnectionManager>,
         parser: MessageParser,
+        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
         connection_id: String,
-        _core_ref: Arc<ServerCoreRef>,
-        core: Arc<crate::server::transports::server_core::ServerCore>,
+        core_ref: Arc<ServerCoreRef>,
+        _core: Arc<crate::server::transports::server_core::ServerCore>,
     ) -> Arc<dyn ConnectionObserver> {
         // 优先使用工厂配置，如果没有则使用 core_ref 中的配置
         let device_manager = self
             .device_manager
             .clone()
-            .or_else(|| _core_ref.device_manager.clone());
-        let event_handler = self
-            .event_handler
-            .clone()
-            .or_else(|| _core_ref.event_handler.clone());
+            .or_else(|| core_ref.device_manager.clone());
 
-        Arc::new(crate::server::events::DefaultServerMessageObserver::new(
-            handler,
-            manager,
-            parser,
-            connection_id,
-            core,
-            device_manager,
+        // 优先使用传入的 event_handler，如果没有则使用工厂配置，最后使用 core_ref 中的配置
+        let event_handler = Some(event_handler)
+            .or_else(|| self.event_handler.clone())
+            .or_else(|| core_ref.event_handler.clone())
+            .ok_or_else(|| {
+                error!("[DefaultServerMessageObserverFactory] ServerEventHandler is required but not provided");
+                "ServerEventHandler is required"
+            })
+            .expect("ServerEventHandler is required");
+
+        // 创建 ServerMessageWrapper（实现 ConnectionHandler）
+        let wrapper = Arc::new(ServerMessageWrapper::new(
             event_handler,
+            Some(Arc::clone(&manager)),
+            device_manager,
+            parser.clone(), // 克隆 parser 用于适配器
+        ));
+
+        // 将 ConnectionHandler 适配为 ConnectionObserver
+        // 不传递 parser，而是从连接信息中动态获取协商结果来创建 parser
+        Arc::new(ConnectionHandlerObserverAdapter::new(
+            wrapper,
+            connection_id,
+            manager,
+            Some(_core),
         ))
     }
 }
@@ -209,9 +222,9 @@ impl Default for ChainedObserverFactory {
 impl ServerMessageObserverFactory for ChainedObserverFactory {
     fn create_observer(
         &self,
-        handler: Arc<dyn ConnectionHandler>,
         manager: Arc<ConnectionManager>,
         parser: MessageParser,
+        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
         connection_id: String,
         core_ref: Arc<ServerCoreRef>,
         core: Arc<crate::server::transports::server_core::ServerCore>,
@@ -219,9 +232,9 @@ impl ServerMessageObserverFactory for ChainedObserverFactory {
         // 如果只有一个工厂，直接返回
         if self.factories.len() == 1 {
             return self.factories[0].create_observer(
-                handler,
                 manager,
                 parser,
+                event_handler,
                 connection_id,
                 core_ref,
                 core,
@@ -234,9 +247,9 @@ impl ServerMessageObserverFactory for ChainedObserverFactory {
             .iter()
             .map(|factory| {
                 factory.create_observer(
-                    Arc::clone(&handler),
                     Arc::clone(&manager),
                     parser.clone(),
+                    Arc::clone(&event_handler),
                     connection_id.clone(),
                     Arc::clone(&core_ref),
                     Arc::clone(&core),

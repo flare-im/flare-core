@@ -14,13 +14,13 @@ pub mod transports;
 
 pub use auth::{AuthResult, Authenticator, DefaultAuthenticator};
 pub use builder::{
-    FlareServer, FlareServerBuilder, MessageContext, MessageListener, ObserverServer,
-    ObserverServerBuilder, ServerBuilder, SimpleServer,
+    FlareServer, FlareServerBuilder, MessageContext, ObserverServer, ObserverServerBuilder,
+    ServerBuilder, SimpleServer,
 };
 pub use config::ServerConfig;
 pub use connection::{ConnectionInfo, ConnectionManager, ConnectionManagerTrait, ConnectionStats};
 pub use device::{DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceManager};
-pub use events::{DefaultServerMessageObserver, ServerEventHandler};
+pub use events::ServerEventHandler;
 pub use handle::{DefaultServerHandle, ServerHandle};
 pub use heartbeat::HeartbeatDetector;
 pub use transports::{ConnectionHandler, HybridServer, QUICServer, Server, WebSocketServer};

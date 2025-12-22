@@ -4,10 +4,7 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::{
-    Frame, MessageCommand, NotificationCommand,
-    flare::core::commands::{
-        message_command::Type as MessageType, notification_command::Type as NotificationType,
-    },
+    Frame, MessageCommand, NotificationCommand, flare::core::commands::CustomCommand,
 };
 use async_trait::async_trait;
 
@@ -41,15 +38,15 @@ pub trait ServerEventHandler: Send + Sync {
         Ok(None)
     }
 
-    /// 处理消息命令
+    /// 处理 SEND 消息命令（发送消息）
     ///
     /// # 参数
     /// - `command`: 消息命令
     /// - `connection_id`: 连接 ID
     ///
     /// # 返回
-    /// 可选回复 Frame
-    async fn handle_message_command(
+    /// 可选回复 Frame（如果返回 None，框架会自动发送 ACK）
+    async fn handle_message(
         &self,
         command: &MessageCommand,
         connection_id: &str,
@@ -58,17 +55,38 @@ pub trait ServerEventHandler: Send + Sync {
         Ok(None)
     }
 
-    /// 处理特定类型的消息命令
+    /// 处理 ACK 消息命令（确认消息）
     ///
-    /// 默认实现调用 `handle_message_command`
-    async fn handle_message_command_by_type(
+    /// # 参数
+    /// - `command`: ACK 消息命令
+    /// - `connection_id`: 连接 ID
+    ///
+    /// # 返回
+    /// 可选回复 Frame
+    async fn handle_ack(
         &self,
         command: &MessageCommand,
-        msg_type: MessageType,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
-        let _ = msg_type;
-        self.handle_message_command(command, connection_id).await
+        let _ = (command, connection_id);
+        Ok(None)
+    }
+
+    /// 处理 DATA 消息命令（普通数据传输）
+    ///
+    /// # 参数
+    /// - `command`: DATA 消息命令
+    /// - `connection_id`: 连接 ID
+    ///
+    /// # 返回
+    /// 可选回复 Frame
+    async fn handle_data(
+        &self,
+        command: &MessageCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        let _ = (command, connection_id);
+        Ok(None)
     }
 
     /// 处理通知命令
@@ -86,20 +104,6 @@ pub trait ServerEventHandler: Send + Sync {
     ) -> Result<Option<Frame>> {
         let _ = (command, connection_id);
         Ok(None)
-    }
-
-    /// 处理特定类型的通知命令
-    ///
-    /// 默认实现调用 `handle_notification_command`
-    async fn handle_notification_command_by_type(
-        &self,
-        command: &NotificationCommand,
-        notif_type: NotificationType,
-        connection_id: &str,
-    ) -> Result<Option<Frame>> {
-        let _ = notif_type;
-        self.handle_notification_command(command, connection_id)
-            .await
     }
 
     /// 处理连接断开事件
@@ -120,5 +124,60 @@ pub trait ServerEventHandler: Send + Sync {
     async fn on_error(&self, connection_id: &str, error: &str) -> Result<()> {
         let _ = (connection_id, error);
         Ok(())
+    }
+
+    /// 处理自定义命令
+    ///
+    /// # 参数
+    /// - `command`: 自定义命令
+    /// - `connection_id`: 连接 ID
+    ///
+    /// # 返回
+    /// 可选回复 Frame
+    ///
+    /// # 说明
+    /// 默认实现返回 None，表示不处理自定义命令
+    /// 如果需要处理自定义命令，可以重写此方法
+    async fn handle_custom_command(
+        &self,
+        command: &CustomCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        let _ = (command, connection_id);
+        Ok(None)
+    }
+
+    /// 处理连接建立完成事件（在 CONNECT 协商完成后调用）
+    ///
+    /// # 参数
+    /// - `connection_id`: 连接 ID
+    ///
+    /// # 说明
+    /// 此方法在 CONNECT 协商完成后调用，用于处理连接建立后的业务逻辑
+    /// 默认实现为空，如果需要处理连接建立逻辑，可以重写此方法
+    async fn on_connect(&self, connection_id: &str) -> Result<()> {
+        let _ = connection_id;
+        Ok(())
+    }
+
+    /// 处理系统事件（System::Event）
+    ///
+    /// # 参数
+    /// - `frame`: 包含系统事件的 Frame
+    /// - `connection_id`: 连接 ID
+    ///
+    /// # 返回
+    /// 可选回复 Frame
+    ///
+    /// # 说明
+    /// 默认实现返回 None，表示不处理系统事件
+    /// 如果需要处理系统事件，可以重写此方法
+    async fn handle_system_event(
+        &self,
+        frame: &Frame,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        let _ = (frame, connection_id);
+        Ok(None)
     }
 }

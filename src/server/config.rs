@@ -3,6 +3,7 @@
 use crate::common::compression::CompressionAlgorithm;
 use crate::common::config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
 use crate::common::device::DeviceConflictStrategy;
+use crate::common::encryption::EncryptionAlgorithm;
 use crate::common::protocol::SerializationFormat;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ pub struct ServerConfig {
     pub default_serialization_format: SerializationFormat,
     /// 压缩算法（默认）
     pub default_compression: CompressionAlgorithm,
+    /// 加密算法（默认）
+    pub default_encryption: EncryptionAlgorithm,
     /// 最大连接数
     pub max_connections: usize,
     /// 连接超时时间
@@ -49,6 +52,7 @@ impl Default for ServerConfig {
             protocol_addresses: None,
             default_serialization_format: SerializationFormat::Protobuf,
             default_compression: CompressionAlgorithm::None,
+            default_encryption: EncryptionAlgorithm::None,
             max_connections: 10000,
             connection_timeout: Duration::from_secs(300),
             default_heartbeat: HeartbeatConfig::default(),
@@ -91,6 +95,12 @@ impl ServerConfig {
     /// 设置默认压缩算法
     pub fn with_compression(mut self, compression: CompressionAlgorithm) -> Self {
         self.default_compression = compression;
+        self
+    }
+
+    /// 设置默认加密算法
+    pub fn with_encryption(mut self, encryption: EncryptionAlgorithm) -> Self {
+        self.default_encryption = encryption;
         self
     }
 

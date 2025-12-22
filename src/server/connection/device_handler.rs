@@ -137,8 +137,11 @@ pub async fn handle_device_conflict(
                 let kick_frame = frame_with_system_command(kick_cmd, Reliability::AtLeastOnce);
 
                 // 3. 使用连接的协商格式序列化并发送被踢消息
-                let parser =
-                    MessageParser::new(conn_info.serialization_format, conn_info.compression);
+                let parser = MessageParser::new(
+                    conn_info.serialization_format,
+                    conn_info.compression,
+                    crate::common::encryption::EncryptionAlgorithm::None,
+                );
 
                 match parser.serialize(&kick_frame) {
                     Ok(kick_data) => {

@@ -5,9 +5,12 @@
 pub mod factory;
 pub mod handler;
 pub mod observer;
+// pub mod observer_back;
+pub mod event_wrapper;
 
 pub use factory::{
     ChainedObserverFactory, DefaultServerMessageObserverFactory, ServerMessageObserverFactory,
 };
 pub use handler::ServerEventHandler;
-pub use observer::DefaultServerMessageObserver;
+// pub use observer_back::DefaultServerMessageObserver;
+pub use event_wrapper::ServerMessageWrapper;

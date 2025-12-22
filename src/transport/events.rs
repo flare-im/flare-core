@@ -102,6 +102,7 @@ impl ConnectionObserver for NoOpObserver {
 
 impl NoOpObserver {
     /// 创建新的空观察者
+    #[allow(clippy::new_ret_no_self)]
     pub fn new() -> ArcObserver {
         Arc::new(Self)
     }
@@ -119,6 +120,7 @@ impl LoggingObserver {
     ///
     /// # 参数
     /// - `prefix`: 日志前缀，用于标识不同的观察者实例
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(prefix: impl Into<String>) -> ArcObserver {
         Arc::new(Self {
             prefix: prefix.into(),

@@ -37,11 +37,15 @@ impl HeartbeatManager {
     ///
     /// # 参数
     /// - `connection`: 连接实例
-    /// - `parser`: 消息解析器（用于序列化 ping 消息）
+    /// - `parser`: 消息解析器的引用（用于序列化 ping 消息，始终使用最新的 parser）
     ///
     /// # 返回
     /// 停止心跳的发送端
-    pub fn start(&mut self, connection: Arc<Mutex<Box<dyn Connection>>>, parser: MessageParser) {
+    pub fn start(
+        &mut self,
+        connection: Arc<Mutex<Box<dyn Connection>>>,
+        parser: Arc<tokio::sync::Mutex<MessageParser>>,
+    ) {
         let (tx, mut rx) = mpsc::channel(1);
         self.stop_tx = Some(tx);
 
@@ -61,9 +65,15 @@ impl HeartbeatManager {
                             crate::common::protocol::Reliability::AtLeastOnce,
                         );
 
-                        let data = match parser.serialize(&ping_frame) {
-                            Ok(d) => d,
-                            Err(_) => continue,
+                        let data = {
+                            let parser_guard = parser.lock().await;
+                            match parser_guard.serialize(&ping_frame) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::error!("[HeartbeatManager] 序列化心跳消息失败: {}", e);
+                                    continue;
+                                }
+                            }
                         };
 
                         // 使用 tokio::sync::Mutex，支持跨 await
@@ -104,7 +114,7 @@ impl HeartbeatManager {
     /// 停止心跳
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
+            drop(tx.send(()));
         }
     }
 

@@ -13,8 +13,9 @@ pub enum TransportType {
     TCP,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum StreamWrapper {
-    WebSocket(WebSocketStream<MaybeTlsStream<TcpStream>>),
+    WebSocket(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
     QUIC {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
@@ -46,6 +47,7 @@ impl TransportFactory {
     ) -> Result<Box<dyn Connection>> {
         match (transport_type, stream) {
             (TransportType::WebSocket, StreamWrapper::WebSocket(ws_stream)) => {
+                let ws_stream = *ws_stream;
                 Ok(Box::new(WebSocketTransport::new(ws_stream)))
             }
             (TransportType::QUIC, StreamWrapper::QUIC { send, recv }) => {

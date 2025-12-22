@@ -51,7 +51,7 @@ impl MessageRouter {
         let route = route.into();
         self.handlers
             .entry(route)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(handler);
     }
 
@@ -186,6 +186,7 @@ impl Default for MessageRouter {
 
 /// 简单的消息处理器实现
 pub struct SimpleHandler {
+    #[allow(clippy::type_complexity)]
     handler: Box<dyn Fn(&Frame) -> Result<Option<Frame>> + Send + Sync>,
 }
 
@@ -210,6 +211,7 @@ impl MessageHandler for SimpleHandler {
 
 /// 异步消息处理器实现
 pub struct AsyncHandler {
+    #[allow(clippy::type_complexity)]
     handler: Arc<
         dyn Fn(
                 &Frame,

@@ -92,7 +92,27 @@ impl ClientConnectionHelper {
             ));
         }
 
+        // 检查协商状态
+        let negotiation_completed = core.is_negotiation_completed();
+
         let parser = core.parser.lock().await;
+        tracing::trace!(
+            "[ClientConnectionHelper] 发送消息: message_id={}, format={:?}",
+            frame.message_id,
+            parser.default_format()
+        );
+
+        // 如果协商未完成，记录警告（但允许发送，因为可能是系统消息）
+        if !negotiation_completed {
+            tracing::warn!(
+                "[ClientConnectionHelper] ⚠️  协商未完成但尝试发送消息: message_id={}, format={:?}, compression={:?}, encryption={:?}",
+                frame.message_id,
+                parser.default_format(),
+                parser.default_compression(),
+                parser.default_encryption()
+            );
+        }
+
         let data = parser.serialize(frame)?;
         drop(parser);
 

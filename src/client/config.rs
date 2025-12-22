@@ -244,7 +244,9 @@ impl ClientConfig {
 
     /// 获取实际使用的压缩算法（强制算法优先，否则使用首选算法）
     pub fn get_compression(&self) -> CompressionAlgorithm {
-        self.force_compression.unwrap_or(self.compression)
+        self.force_compression
+            .clone()
+            .unwrap_or_else(|| self.compression.clone())
     }
 
     /// 获取要使用的协议列表

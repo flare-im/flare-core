@@ -76,7 +76,7 @@ mod tests {
             error.params.as_ref().unwrap().get("user_id"),
             Some(&"user123".to_string())
         );
-        assert!(error.is_retryable() == false);
+        assert!(!error.is_retryable());
     }
 
     #[test]

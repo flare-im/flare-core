@@ -3,8 +3,8 @@
 //! 支持单个协议或多协议同时监听
 //! 统一管理连接和心跳检测，简化服务器实现
 
+use super::Server;
 use super::server_core::ServerCore;
-use super::{ConnectionHandler, Server};
 use crate::common::config_types::TransportProtocol;
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
@@ -41,19 +41,17 @@ impl HybridServer {
     ///
     /// # 参数
     /// - `config`: 服务端配置
-    /// - `handler`: 连接处理器
     ///
     /// # 返回
     /// 混合服务端实例
-    pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
-        Self::with_connection_manager(config, handler, None, None, None, None)
+    pub fn new(config: ServerConfig) -> Result<Self> {
+        Self::with_connection_manager(config, None, None, None, None)
     }
 
     /// 使用指定的连接管理器创建混合服务端
     ///
     /// # 参数
     /// - `config`: 服务端配置
-    /// - `handler`: 连接处理器
     /// - `connection_manager`: 可选的连接管理器，如果为 None，则创建新的并统一管理
     /// - `device_manager`: 可选的设备管理器，如果为 None 且配置中指定了设备冲突策略，则自动创建
     /// - `event_handler`: 可选的事件处理器
@@ -63,11 +61,43 @@ impl HybridServer {
     /// 混合服务端实例
     pub fn with_connection_manager(
         config: ServerConfig,
-        handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<crate::server::connection::ConnectionManager>>,
         device_manager: Option<Arc<crate::server::device::DeviceManager>>,
         event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
         authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
+    ) -> Result<Self> {
+        Self::with_connection_manager_and_pipeline(
+            config,
+            connection_manager,
+            device_manager,
+            event_handler,
+            authenticator,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// 使用指定的连接管理器和消息管道创建混合服务端
+    ///
+    /// # 参数
+    /// - `config`: 服务端配置
+    /// - `connection_manager`: 可选的连接管理器
+    /// - `device_manager`: 可选的设备管理器
+    /// - `event_handler`: 可选的事件处理器
+    /// - `authenticator`: 可选的认证器
+    /// - `middlewares`: 中间件列表
+    /// - `processors`: 处理器列表
+    ///
+    /// # 返回
+    /// 混合服务端实例
+    pub fn with_connection_manager_and_pipeline(
+        config: ServerConfig,
+        connection_manager: Option<Arc<crate::server::connection::ConnectionManager>>,
+        device_manager: Option<Arc<crate::server::device::DeviceManager>>,
+        event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
+        authenticator: Option<Arc<dyn crate::server::auth::Authenticator>>,
+        middlewares: Vec<crate::common::message::pipeline::ArcMessageMiddleware>,
+        processors: Vec<crate::common::message::pipeline::ArcMessageProcessor>,
     ) -> Result<Self> {
         // 创建服务器核心，统一管理连接和心跳
         let mut core = ServerCore::new(&config, connection_manager.clone());
@@ -90,6 +120,35 @@ impl HybridServer {
             .with_event_handler(event_handler)
             .with_authenticator(authenticator);
 
+        // 添加中间件和处理器（在包装为 Arc 之前）
+        // 使用 tokio::task::block_in_place 来允许在异步运行时中阻塞当前线程
+        // 这样可以避免 "Cannot start a runtime from within a runtime" 错误
+        if !middlewares.is_empty() || !processors.is_empty() {
+            tokio::task::block_in_place(|| {
+                let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                    crate::common::error::FlareError::general_error(
+                        "Tokio runtime not available".to_string(),
+                    )
+                })?;
+
+                handle.block_on(async {
+                    for middleware in middlewares {
+                        core.add_middleware(middleware).await;
+                    }
+                    for processor in processors {
+                        core.add_processor(processor).await;
+                    }
+                });
+                Ok::<(), crate::common::error::FlareError>(())
+            })
+            .map_err(|e| {
+                crate::common::error::FlareError::general_error(format!(
+                    "Failed to add middlewares/processors: {}",
+                    e
+                ))
+            })?;
+        }
+
         // 将 ServerCore 包装为 Arc，以便共享给 WebSocketServer 和 QUICServer
         let shared_core = Arc::new(core);
 
@@ -105,16 +164,13 @@ impl HybridServer {
             let bind_address = config.get_protocol_address(protocol);
             server_config.bind_address = bind_address;
 
-            // 使用共享的 ServerCore，确保设备管理器等配置正确传递
             let server: Box<dyn Server> = match protocol {
                 TransportProtocol::WebSocket => Box::new(WebSocketServer::with_shared_core(
                     server_config,
-                    Arc::clone(&handler),
                     shared_core.clone(),
                 )),
                 TransportProtocol::QUIC => Box::new(QUICServer::with_shared_core(
                     server_config,
-                    Arc::clone(&handler),
                     shared_core.clone(),
                 )?),
                 TransportProtocol::TCP => {

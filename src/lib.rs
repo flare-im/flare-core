@@ -22,4 +22,4 @@ pub use server::{
 };
 
 // 重新导出会话ID相关功能
-pub use common::session_id::*;
+pub use common::conversation::*;

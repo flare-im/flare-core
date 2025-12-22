@@ -89,7 +89,7 @@ cargo login <your-token>
 
 ```toml
 [package]
-version = "0.1.0"  # 首次发布
+version = "0.1.1"  # 首次发布
 ```
 
 ### 4. 提交代码
@@ -97,10 +97,10 @@ version = "0.1.0"  # 首次发布
 ```bash
 # 确保所有更改已提交
 git add .
-git commit -m "Prepare for v0.1.0 release"
-git tag v0.1.0
+git commit -m "Prepare for v0.1.1 release"
+git tag v0.1.1
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
 ### 5. 发布到 crates.io
@@ -115,7 +115,7 @@ cargo publish
 发布后，访问以下链接验证：
 
 - 包页面：`https://crates.io/crates/flare-core`
-- 文档：`https://docs.rs/flare-core/0.1.0`
+- 文档：`https://docs.rs/flare-core/0.1.1`
 
 ## 发布后操作
 
@@ -125,7 +125,7 @@ cargo publish
 
 1. 访问仓库的 Releases 页面
 2. 点击 "Draft a new release"
-3. 选择版本标签（如 `v0.1.0`）
+3. 选择版本标签（如 `v0.1.1`）
 4. 填写 Release 说明
 5. 发布
 
@@ -139,7 +139,7 @@ cargo publish
 
 ## 版本更新流程
 
-### 补丁版本（0.1.0 → 0.1.1）
+### 补丁版本（0.1.1 → 0.1.1）
 
 用于修复 bug，不破坏 API：
 
@@ -148,7 +148,7 @@ cargo publish
 version = "0.1.1"
 ```
 
-### 次要版本（0.1.0 → 0.2.0）
+### 次要版本（0.1.1 → 0.2.0）
 
 用于添加新功能，保持向后兼容：
 
@@ -157,7 +157,7 @@ version = "0.1.1"
 version = "0.2.0"
 ```
 
-### 主版本（0.1.0 → 1.0.0）
+### 主版本（0.1.1 → 1.0.0）
 
 用于破坏性变更：
 

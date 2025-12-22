@@ -8,7 +8,7 @@
 //! - 设备管理（设备信息、设备冲突处理）
 //! - 序列化协商（JSON/Protobuf）
 //! - 压缩协商（Gzip/Zstd/None）
-//! - 加密协商（AES-256-GCM/None）
+//! - 加密支持（AES-256-GCM，已注册加密器，可在协商时启用）
 //!
 //! 所有协议选择、协议竞速、压缩、序列化和加密都由 HybridClient 和 ClientCore 自动处理
 //!
@@ -46,6 +46,7 @@ use async_trait::async_trait;
 use flare_core::client::*;
 use flare_core::common::config_types::{HeartbeatConfig, TransportProtocol};
 use flare_core::common::device::{DeviceInfo, DevicePlatform};
+use flare_core::common::encryption::{Aes256GcmEncryptor, EncryptionUtil};
 use flare_core::common::error::Result;
 use flare_core::common::message::{
     ArcMessageMiddleware, LogLevel, LoggingMiddleware, MetricsMiddleware,
@@ -56,7 +57,7 @@ use flare_core::common::protocol::{
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,11 +73,21 @@ async fn main() -> Result<()> {
     info!("   - 中间件：日志 → 性能监控");
     info!("   - 协议竞速：自动选择最快的协议（QUIC 优先，WebSocket 备选）");
     info!("   - 设备管理：支持多平台设备信息，自动处理设备冲突");
-    info!("   - 协商：自动协商序列化格式和压缩方式");
+    info!("   - 协商：自动协商序列化格式、压缩方式和加密算法");
     info!("");
 
     // ============================================================
-    // 1. 获取用户ID（用于测试多设备互斥）
+    // 1. 注册加密器（可选，用于加密通信）
+    // ============================================================
+    // 注意：在生产环境中，密钥应该从安全配置中读取，不要硬编码
+    // 这里使用与服务端相同的示例密钥（32 字节）
+    let encryption_key = b"01234567890123456789012345678901"; // 32 bytes for AES-256
+    let encryptor = Aes256GcmEncryptor::new(encryption_key)?;
+    EncryptionUtil::register_custom(Arc::new(encryptor));
+    info!("🔐 已注册 AES-256-GCM 加密器");
+
+    // ============================================================
+    // 2. 获取用户ID（用于测试多设备互斥）
     // ============================================================
     // 方式1：从命令行参数读取（如果提供）
     // 方式2：从环境变量读取（如果提供）
@@ -124,7 +135,7 @@ async fn main() -> Result<()> {
     info!("");
 
     // ============================================================
-    // 2. 创建设备信息（用于设备管理和多设备互斥测试）
+    // 3. 创建设备信息（用于设备管理和多设备互斥测试）
     // ============================================================
     // 平台互斥策略说明：
     // - 同一用户同一平台只能有一个设备在线
@@ -175,14 +186,14 @@ async fn main() -> Result<()> {
     info!("");
 
     // ============================================================
-    // 3. 创建聊天监听器
+    // 4. 创建聊天监听器
     // ============================================================
     let chat_listener = Arc::new(ChatListener {
         message_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     // ============================================================
-    // 4. 创建中间件
+    // 5. 创建中间件
     // ============================================================
     // 日志中间件
     let logging_middleware =
@@ -194,7 +205,7 @@ async fn main() -> Result<()> {
         Arc::new(MetricsMiddleware::new("ClientMetrics")) as ArcMessageMiddleware;
 
     // ============================================================
-    // 5. 使用 FlareClientBuilder 构建客户端（使用所有能力）
+    // 6. 使用 FlareClientBuilder 构建客户端（使用所有能力）
     // ============================================================
     // 注意：协议选择、协议竞速、压缩、序列化和加密都由 HybridClient 和 ClientCore 自动处理
     let client = FlareClientBuilder::new("127.0.0.1:8080")
@@ -224,18 +235,21 @@ async fn main() -> Result<()> {
         .with_device_info(device_info) // 设置设备信息，将在 CONNECT 消息中发送
         .with_user_id(user_id.clone()) // 设置用户 ID（用于设备管理和多设备互斥测试）
         // ============================================================
-        // 协商配置：客户端序列化格式（可选，由 ClientCore 处理）
+        // 协商配置：客户端序列化格式、压缩和加密（可选，由 ClientCore 处理）
         // ============================================================
-        // 场景1：不指定格式 - 使用服务端默认JSON（推荐）
-        // 不调用 with_format()，将使用服务端默认JSON
+        // 场景1：不指定格式 - 使用服务端默认格式（推荐）
+        // 不调用 with_format()，将使用服务端默认格式
         // 场景2：指定格式（非强制） - 客户端指定格式，服务端优先使用
         // 取消下面的注释来指定格式：
-        // .with_format(flare_core::common::protocol::SerializationFormat::Protobuf)
-        // .with_compression(flare_core::common::compression::CompressionAlgorithm::None)
+        // .with_format(SerializationFormat::Protobuf)
+        // .with_compression(CompressionAlgorithm::Gzip)
         // 场景3：强制模式 - 客户端强制使用指定格式（适用于不支持某些格式的平台）
         // 取消下面的注释来启用强制模式：
-        // .force_format(flare_core::common::protocol::SerializationFormat::Json)
-        // .force_compression(flare_core::common::compression::CompressionAlgorithm::None)
+        // .force_format(SerializationFormat::Json)
+        // .force_compression(CompressionAlgorithm::None)
+        // 场景4：启用加密（可选）
+        // 取消下面的注释来启用加密：
+        // .with_encryption(EncryptionAlgorithm::Aes256Gcm)
         // ============================================================
         // 连接配置
         // ============================================================
@@ -358,7 +372,7 @@ async fn main() -> Result<()> {
                             }
                             // 继续循环，不退出
                         }
-                        info!("发送消息并等待响应成功: {}", frame.message_id);
+                        debug!("发送消息并等待响应成功: {}", frame.message_id);
                     }
                     Err(e) => {
                         error!("读取输入失败: {}", e);

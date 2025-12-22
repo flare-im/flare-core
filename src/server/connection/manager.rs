@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// 连接信息
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectionInfo {
     /// 连接 ID（唯一标识符）
     pub connection_id: String,
@@ -33,10 +33,21 @@ pub struct ConnectionInfo {
     pub serialization_format: crate::common::protocol::SerializationFormat,
     /// 压缩算法（由客户端协商决定，默认不压缩）
     pub compression: crate::common::compression::CompressionAlgorithm,
+    /// 加密凡事（协商决定）
+    pub encryption: crate::common::encryption::EncryptionAlgorithm,
     /// 是否已验证（如果启用认证，只有已验证的连接才能收发消息）
     pub authenticated: bool,
     /// 认证时间戳（Unix 时间戳，秒，如果已验证）
     pub authenticated_at: Option<u64>,
+    /// 协商是否已完成（CONNECT 和 CONNECT_ACK 完成）
+    pub negotiation_completed: bool,
+    /// 协商是否已确认（客户端收到 CONNECT_ACK 后发送确认，服务端收到后标记）
+    /// 确认后，消息必须严格按照协商好的方式处理，不再容错
+    pub negotiation_confirmed: bool,
+    /// 缓存的 MessageParser（协商完成后创建，避免每次消息处理都创建新的 parser）
+    pub cached_parser: Option<std::sync::Arc<crate::common::MessageParser>>,
+    /// 缓存的 MessagePipeline（协商完成后创建，如果配置了中间件或处理器）
+    pub cached_pipeline: Option<std::sync::Arc<crate::common::message::pipeline::MessagePipeline>>,
 }
 
 impl ConnectionInfo {
@@ -58,6 +69,7 @@ impl ConnectionInfo {
             // 默认使用 JSON 且不压缩（客户端可以协商）
             serialization_format: crate::common::protocol::SerializationFormat::Json,
             compression: crate::common::compression::CompressionAlgorithm::None,
+            encryption: crate::common::encryption::EncryptionAlgorithm::None,
             authenticated,
             authenticated_at: authenticated.then(|| {
                 std::time::SystemTime::now()
@@ -65,6 +77,10 @@ impl ConnectionInfo {
                     .unwrap_or_default()
                     .as_secs()
             }),
+            negotiation_completed: false, // 初始状态：协商未完成
+            negotiation_confirmed: false, // 初始状态：协商未确认
+            cached_parser: None,          // 初始状态：未缓存 parser
+            cached_pipeline: None,        // 初始状态：未缓存 pipeline
         }
     }
 
@@ -127,6 +143,7 @@ impl ConnectionInfo {
 /// 管理所有活跃连接，支持按 ID 查询、按用户 ID 查询等功能
 pub struct ConnectionManager {
     /// 连接存储：connection_id -> (Connection, ConnectionInfo)
+    #[allow(clippy::type_complexity)]
     connections: Arc<RwLock<HashMap<String, (Arc<Mutex<Box<dyn Connection>>>, ConnectionInfo)>>>,
     /// 用户 ID 到连接 ID 的映射（一个用户可能有多个连接）
     user_connections: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -234,16 +251,17 @@ impl ConnectionManager {
     ///
     /// # 返回
     /// 连接实例和连接信息的元组，如果不存在则返回 None
+    #[allow(clippy::type_complexity)]
     pub fn get_connection(
         &self,
         connection_id: &str,
     ) -> Option<(Arc<Mutex<Box<dyn Connection>>>, ConnectionInfo)> {
-        self.connections.read().ok().and_then(|connections| {
-            connections.get(connection_id).map(|(conn, info)| {
-                // 返回最新的连接信息（包括最新的 user_id）
-                (Arc::clone(conn), info.clone())
-            })
-        })
+        let connections = self.connections.read().ok()?;
+        let (conn, info) = connections.get(connection_id)?;
+        let conn_clone = Arc::clone(conn);
+        let info_clone = info.clone();
+        drop(connections);
+        Some((conn_clone, info_clone))
     }
 
     /// 获取用户的所有连接
@@ -313,12 +331,17 @@ impl ConnectionManager {
             .write()
             .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
 
-        let (_, info) = connections.get_mut(connection_id).ok_or_else(|| {
-            FlareError::protocol_error(format!("Connection {} not found", connection_id))
-        })?;
-
-        info.update_active();
-        Ok(())
+        if let Some((_, info)) = connections.get_mut(connection_id) {
+            info.update_active();
+            drop(connections);
+            Ok(())
+        } else {
+            drop(connections);
+            Err(FlareError::protocol_error(format!(
+                "Connection {} not found",
+                connection_id
+            )))
+        }
     }
 
     /// 设置连接为已验证状态
@@ -336,32 +359,52 @@ impl ConnectionManager {
             FlareError::protocol_error(format!("Connection {} not found", connection_id))
         })?;
 
-        info.set_authenticated(user_id.clone());
+        // 保存旧的 user_id（在调用 set_authenticated 之前）
+        let old_user_id = info.user_id.clone();
 
-        // 如果提供了用户 ID，更新用户连接映射
-        if let Some(user_id) = user_id {
+        let final_user_id = user_id.or(old_user_id.clone());
+
+        // 设置认证状态（如果 final_user_id 是 Some，会设置 user_id）
+        info.set_authenticated(final_user_id.clone());
+
+        // 如果有 user_id（传入的或已存在的），确保用户连接映射正确
+        if let Some(user_id) = final_user_id {
             let mut user_connections = self
                 .user_connections
                 .write()
                 .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
 
-            // 如果之前有用户 ID，先移除旧映射
-            if let Some(old_user_id) = &info.user_id {
-                if old_user_id != &user_id {
-                    if let Some(conn_ids) = user_connections.get_mut(old_user_id) {
+            // 如果 user_id 发生变化，需要更新映射
+            let user_id_changed = old_user_id
+                .as_ref()
+                .map(|old| old != &user_id)
+                .unwrap_or(true);
+
+            if user_id_changed {
+                // 如果之前有旧用户 ID，先移除旧映射
+                if let Some(old_user_id) = old_user_id {
+                    if let Some(conn_ids) = user_connections.get_mut(&old_user_id) {
                         conn_ids.retain(|id| id != connection_id);
                         if conn_ids.is_empty() {
-                            user_connections.remove(old_user_id);
+                            user_connections.remove(&old_user_id);
                         }
                     }
                 }
-            }
 
-            // 添加新映射
-            user_connections
-                .entry(user_id)
-                .or_insert_with(Vec::new)
-                .push(connection_id.to_string());
+                // 添加新映射（检查是否已存在，避免重复）
+                let conn_ids = user_connections
+                    .entry(user_id.clone())
+                    .or_insert_with(Vec::new);
+                if !conn_ids.contains(&connection_id.to_string()) {
+                    conn_ids.push(connection_id.to_string());
+                }
+            } else {
+                // user_id 没有变化，只需确保映射存在
+                let conn_ids = user_connections.entry(user_id).or_insert_with(Vec::new);
+                if !conn_ids.contains(&connection_id.to_string()) {
+                    conn_ids.push(connection_id.to_string());
+                }
+            }
         }
 
         Ok(())
@@ -374,7 +417,87 @@ impl ConnectionManager {
         device_info: Option<crate::common::device::DeviceInfo>,
         serialization_format: crate::common::protocol::SerializationFormat,
         compression: crate::common::compression::CompressionAlgorithm,
+        encryption: crate::common::encryption::EncryptionAlgorithm,
         user_id: Option<String>,
+    ) -> Result<()> {
+        let mut connections = self
+            .connections
+            .write()
+            .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
+
+        let (_, info) = connections.get_mut(connection_id).ok_or_else(|| {
+            FlareError::protocol_error(format!("Connection {} not found", connection_id))
+        })?;
+
+        // 更新协商信息（但不标记协商完成）
+        // 协商完成将在 CONNECT_ACK 发送完成后由 update_connection_negotiation_with_pipeline 标记
+        info.device_info = device_info;
+        info.serialization_format = serialization_format;
+        info.compression = compression;
+        info.encryption = encryption;
+        // 注意：这里不设置 negotiation_completed = true
+        // 也不创建 cached_parser，这些将在 CONNECT_ACK 发送完成后设置
+
+        // 保存旧的 user_id（在修改之前）
+        let old_user_id = info.user_id.clone();
+
+        let user_id_to_set = user_id.clone().or(old_user_id.clone());
+
+        // 添加调试日志
+        if user_id_to_set.is_none() {
+            tracing::trace!(
+                connection_id = %connection_id,
+                incoming_user_id = ?user_id,
+                old_user_id = ?old_user_id,
+                "update_connection_negotiation: user_id_to_set is None, user_id will not be set"
+            );
+        }
+
+        if let Some(user_id_val) = user_id_to_set {
+            // 如果之前有用户 ID 且与新 user_id 不同，先移除旧映射
+            if let Some(old_user_id) = old_user_id {
+                if old_user_id != user_id_val {
+                    let mut user_connections = self.user_connections.write().map_err(|_| {
+                        FlareError::general_error("Failed to lock user_connections")
+                    })?;
+                    if let Some(conn_ids) = user_connections.get_mut(&old_user_id) {
+                        conn_ids.retain(|id| id != connection_id);
+                        if conn_ids.is_empty() {
+                            user_connections.remove(&old_user_id);
+                        }
+                    }
+                }
+            }
+
+            // 更新用户 ID
+            info.user_id = Some(user_id_val.clone());
+
+            // 添加到新用户映射
+            let mut user_connections = self
+                .user_connections
+                .write()
+                .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
+            user_connections
+                .entry(user_id_val)
+                .or_insert_with(Vec::new)
+                .push(connection_id.to_string());
+        }
+
+        Ok(())
+    }
+
+    /// 更新连接的协商信息（设备信息、序列化格式、压缩算法、加密方式）并设置 pipeline
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_connection_negotiation_with_pipeline(
+        &self,
+        connection_id: &str,
+        device_info: Option<crate::common::device::DeviceInfo>,
+        serialization_format: crate::common::protocol::SerializationFormat,
+        compression: crate::common::compression::CompressionAlgorithm,
+        encryption: crate::common::encryption::EncryptionAlgorithm,
+        user_id: Option<String>,
+        parser: crate::common::MessageParser,
+        pipeline: Option<std::sync::Arc<crate::common::message::pipeline::MessagePipeline>>,
     ) -> Result<()> {
         let mut connections = self
             .connections
@@ -389,25 +512,46 @@ impl ConnectionManager {
         info.device_info = device_info;
         info.serialization_format = serialization_format;
         info.compression = compression;
+        info.encryption = encryption;
+        // 标记协商已完成
+        info.negotiation_completed = true;
+        // 缓存 parser 和 pipeline
+        info.cached_parser = Some(std::sync::Arc::new(parser));
+        info.cached_pipeline = pipeline;
 
-        // 如果提供了用户 ID，更新用户 ID
-        if let Some(user_id) = user_id {
-            // 如果之前有用户 ID，先移除旧映射
-            if let Some(old_user_id) = &info.user_id {
-                let mut user_connections = self
-                    .user_connections
-                    .write()
-                    .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
-                if let Some(conn_ids) = user_connections.get_mut(old_user_id) {
-                    conn_ids.retain(|id| id != connection_id);
-                    if conn_ids.is_empty() {
-                        user_connections.remove(old_user_id);
+        // 保存旧的 user_id（在修改之前）
+        let old_user_id = info.user_id.clone();
+
+        let user_id_to_set = user_id.clone().or(old_user_id.clone());
+
+        // 添加调试日志
+        if user_id_to_set.is_none() {
+            tracing::trace!(
+                connection_id = %connection_id,
+                incoming_user_id = ?user_id,
+                old_user_id = ?old_user_id,
+                "update_connection_negotiation_with_pipeline: user_id_to_set is None, user_id will not be set"
+            );
+        }
+
+        if let Some(user_id_val) = user_id_to_set {
+            // 如果之前有用户 ID 且与新 user_id 不同，先移除旧映射
+            if let Some(old_user_id) = old_user_id {
+                if old_user_id != user_id_val {
+                    let mut user_connections = self.user_connections.write().map_err(|_| {
+                        FlareError::general_error("Failed to lock user_connections")
+                    })?;
+                    if let Some(conn_ids) = user_connections.get_mut(&old_user_id) {
+                        conn_ids.retain(|id| id != connection_id);
+                        if conn_ids.is_empty() {
+                            user_connections.remove(&old_user_id);
+                        }
                     }
                 }
             }
 
             // 更新用户 ID
-            info.user_id = Some(user_id.clone());
+            info.user_id = Some(user_id_val.clone());
 
             // 添加到新用户映射
             let mut user_connections = self
@@ -415,10 +559,37 @@ impl ConnectionManager {
                 .write()
                 .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
             user_connections
-                .entry(user_id)
+                .entry(user_id_val)
                 .or_insert_with(Vec::new)
                 .push(connection_id.to_string());
         }
+
+        Ok(())
+    }
+
+    /// 标记协商已确认（客户端收到 CONNECT_ACK 后发送确认）
+    pub fn mark_negotiation_confirmed(&self, connection_id: &str) -> Result<()> {
+        let mut connections = self
+            .connections
+            .write()
+            .map_err(|_| FlareError::general_error("Failed to lock connections"))?;
+
+        let (_, info) = connections.get_mut(connection_id).ok_or_else(|| {
+            FlareError::protocol_error(format!("Connection {} not found", connection_id))
+        })?;
+
+        if !info.negotiation_completed {
+            return Err(FlareError::protocol_error(format!(
+                "Cannot confirm negotiation for connection {}: negotiation not completed",
+                connection_id
+            )));
+        }
+
+        info.negotiation_confirmed = true;
+        tracing::trace!(
+            "[ConnectionManager] 协商已确认: connection_id={}",
+            connection_id
+        );
 
         Ok(())
     }
@@ -574,8 +745,13 @@ impl ConnectionManagerTrait for ConnectionManager {
                 device_info: info.device_info.clone(),
                 serialization_format: info.serialization_format,
                 compression: info.compression,
+                encryption: info.encryption,
                 authenticated: info.authenticated,
                 authenticated_at: info.authenticated_at,
+                negotiation_completed: info.negotiation_completed,
+                negotiation_confirmed: info.negotiation_confirmed,
+                cached_parser: info.cached_parser.clone(),
+                cached_pipeline: info.cached_pipeline.clone(),
             };
             (conn, trait_info)
         })

@@ -47,13 +47,10 @@ fn main() -> Result<()> {
                 );
             } else {
                 // 如果文件不存在且编译失败，返回错误
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "Failed to compile protobuf files: {}. Please install protoc: brew install protobuf",
-                        e
-                    ),
-                ));
+                return Err(std::io::Error::other(format!(
+                    "Failed to compile protobuf files: {}. Please install protoc: brew install protobuf",
+                    e
+                )));
             }
         }
     }

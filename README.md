@@ -42,13 +42,71 @@
 - **客户端心跳** - 客户端自动发送心跳保持连接
 - **可配置** - 心跳间隔和超时时间可配置
 
-### 🏗️ 灵活的构建模式
-- **Flare 模式** - 使用 `FlareClientBuilder`/`FlareServerBuilder`，只需实现简单的 `MessageListener` 接口，自动集成所有功能
-- **消息处理管道** - 统一的消息处理流程，支持中间件、自动序列化/压缩
-- **观察者模式** - 实现 `ConnectionHandler`/`ConnectionObserver` trait 处理消息
-- **简单模式** - 使用闭包定义消息处理逻辑
-- **事件处理器** - 支持细化的命令处理和事件观察
-- **中间件系统** - 支持日志、监控、验证等中间件
+### 🏗️ 统一的构建模式架构
+
+Flare Core 采用**统一的三种构建模式**，客户端和服务端都提供相同的抽象层次，确保架构一致性和代码复用。
+
+#### 三种模式概览
+
+| 模式 | 构建器 | 实现方式 | 抽象级别 | 适用场景 |
+|------|--------|---------|---------|---------|
+| **简单模式** | `ClientBuilder` / `ServerBuilder` | 闭包（Closure） | ⭐ 最低 | 快速原型、学习测试、小型应用 |
+| **观察者模式** | `ObserverClientBuilder` / `ObserverServerBuilder` | Trait 实现 | ⭐⭐ 中等 | 自定义处理、事件驱动、需要基本功能 |
+| **Flare 模式** | `FlareClientBuilder` / `FlareServerBuilder` | 完整功能集 | ⭐⭐⭐ 最高 | 生产环境、企业应用、完整功能需求 |
+
+#### 架构设计原则
+
+1. **公共逻辑统一处理**：所有模式共享底层实现（`HybridClient`/`HybridServer`），避免代码重复
+2. **渐进式增强**：从简单到复杂，按需选择，无需为兼容性保留冗余代码
+3. **类型安全**：充分利用 Rust 类型系统，编译期保证正确性
+4. **零成本抽象**：高级抽象不带来运行时开销
+
+#### 客户端三种模式
+
+**简单模式（ClientBuilder）**
+- ✅ 使用闭包处理消息和事件
+- ✅ 最小依赖，零配置
+- ✅ 适合快速原型和学习
+
+**观察者模式（ObserverClientBuilder）**
+- ✅ 实现 `ConnectionObserver` trait
+- ✅ 支持自定义事件处理
+- ✅ 支持消息路由
+
+**Flare 模式（FlareClientBuilder）**
+- ✅ 实现 `MessageListener` trait
+- ✅ 完整的消息管道（序列化、压缩、加密）
+- ✅ 中间件支持、自动重连、协议竞速
+
+#### 服务端三种模式
+
+**简单模式（ServerBuilder）**
+- ✅ 使用闭包处理消息和连接事件
+- ✅ 最小依赖，零配置
+- ✅ 适合快速原型和学习
+
+**观察者模式（ObserverServerBuilder）**
+- ✅ 实现 `ServerEventHandler` trait（必需）
+- ✅ 自动消息路由到对应处理方法
+- ✅ 自动 ACK 处理和错误响应
+- ✅ 支持设备管理和认证
+
+**Flare 模式（FlareServerBuilder）**
+- ✅ 实现 `ServerEventHandler` trait（必需）
+- ✅ 完整功能：设备管理、认证、心跳、多协议
+- ✅ 序列化协商、压缩算法协商
+- ✅ 生产环境推荐
+
+#### 统一的核心特性
+
+所有模式都基于统一的底层实现，共享以下核心能力：
+
+- **多协议支持**：WebSocket + QUIC，自动协议竞速（客户端）或多协议监听（服务端）
+- **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
+- **心跳机制**：自动心跳检测和超时管理
+- **连接管理**：统一的连接生命周期管理
+- **错误处理**：完善的错误处理和日志记录
+- **类型安全**：充分利用 Rust 类型系统保证安全性
 
 ### 📦 模块化设计
 - **清晰的架构** - 协议层、核心层、业务层分离
@@ -74,141 +132,31 @@ flare-core = "0.1.0"
 
 ### 服务端示例
 
-#### 观察者模式（推荐）
+#### Flare 模式（FlareServerBuilder，推荐用于生产环境）
 
-```rust
-use flare_core::server::*;
-use flare_core::common::*;
-use std::sync::Arc;
+详见：[服务端 Flare 模式示例](doc/server-flare-mode-example.md)
 
-// 实现 ConnectionHandler
-struct MyHandler;
+#### 观察者模式（ObserverServerBuilder）
 
-#[async_trait::async_trait]
-impl ConnectionHandler for MyHandler {
-    async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        // 处理消息
-        Ok(None)
-    }
+详见：[服务端观察者模式示例](doc/server-observer-mode-example.md)
 
-    async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        println!("新连接: {}", connection_id);
-        Ok(())
-    }
+#### 简单模式（ServerBuilder）
 
-    async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
-        println!("连接断开: {}", connection_id);
-        Ok(())
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let handler = Arc::new(MyHandler);
-    
-    let mut server = ObserverServerBuilder::new("0.0.0.0:8080")
-        .with_handler(handler)
-        .build()?;
-    
-    server.start().await?;
-    tokio::signal::ctrl_c().await?;
-    server.stop().await?;
-    Ok(())
-}
-```
-
-#### 简单模式
-
-```rust
-use flare_core::server::*;
-use flare_core::common::*;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut server = ServerBuilder::new("0.0.0.0:8080")
-        .on_message(|frame, ctx| async move {
-            // 处理消息
-            Ok(None)
-        })
-        .on_connect(|conn_id, ctx| async move {
-            println!("新连接: {}", conn_id);
-            Ok(())
-        })
-        .build()?;
-    
-    server.start().await?;
-    tokio::signal::ctrl_c().await?;
-    server.stop().await?;
-    Ok(())
-}
-```
+详见：[服务端简单模式示例](doc/server-simple-mode-example.md)
 
 ### 客户端示例
 
-#### 观察者模式（推荐）
+#### Flare 模式（FlareClientBuilder，推荐用于生产环境）
 
-```rust
-use flare_core::client::*;
-use flare_core::transport::events::*;
-use std::sync::Arc;
+详见：[客户端 Flare 模式示例](doc/client-flare-mode-example.md)
 
-// 实现 ConnectionObserver
-struct MyObserver;
+#### 观察者模式（ObserverClientBuilder）
 
-impl ConnectionObserver for MyObserver {
-    fn on_event(&self, event: &ConnectionEvent) {
-        match event {
-            ConnectionEvent::Connected => println!("已连接"),
-            ConnectionEvent::Disconnected(reason) => println!("断开: {}", reason),
-            ConnectionEvent::Message(data) => {
-                // 处理消息
-            }
-            ConnectionEvent::Error(e) => eprintln!("错误: {:?}", e),
-        }
-    }
-}
+详见：[客户端观察者模式示例](doc/client-observer-mode-example.md)
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let observer = Arc::new(MyObserver);
-    
-    let mut client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
-        .with_observer(observer)
-        .build_with_race()
-        .await?;
-    
-    // 发送消息
-    let frame = /* ... */;
-    client.send_frame(&frame).await?;
-    
-    tokio::signal::ctrl_c().await?;
-    client.disconnect().await?;
-    Ok(())
-}
-```
+#### 简单模式（ClientBuilder）
 
-#### 简单模式
-
-```rust
-use flare_core::client::*;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut client = ClientBuilder::new("ws://127.0.0.1:8080")
-        .on_message(|frame| {
-            println!("收到消息: {:?}", frame);
-            Ok(())
-        })
-        .on_event(|event| {
-            println!("事件: {:?}", event);
-        })
-        .build_with_race()
-        .await?;
-    
-    // 使用客户端...
-    Ok(())
-}
-```
+详见：[客户端简单模式示例](doc/client-simple-mode-example.md)
 
 ## 📚 核心模块
 
@@ -217,12 +165,13 @@ async fn main() -> Result<()> {
 - **`HybridServer`** - 混合服务端，支持多协议监听
 - **`FlareServerBuilder`** - Flare 服务端构建器（推荐，最简单）
 - **`ServerBuilder`** / **`ObserverServerBuilder`** - 服务端构建器（高级定制）
-- **`MessageListener`** - 消息监听器接口（消息管道模式）
+- **`MessageListener`** - 消息监听器接口（用于自定义命令处理）
+- **`ServerEventHandler`** - 事件处理器接口（**必需**，核心接口，处理消息命令、通知命令、系统命令和连接事件）
+- **`ConnectionHandler`** - 连接处理器接口（用于简单构建器）
 - **`ConnectionManager`** - 连接管理器
 - **`ServerCore`** - 服务端核心功能（连接管理、心跳检测、协商处理）
 - **`Authenticator`** - 认证器接口
 - **`DeviceManager`** - 设备管理器
-- **`ServerEventHandler`** - 事件处理器接口
 
 ### 客户端模块 (`client`)
 
@@ -259,6 +208,173 @@ async fn main() -> Result<()> {
 
 ## 🔧 高级功能
 
+### 构建模式详细对比
+
+#### 服务端构建模式对比
+
+| 特性 | 简单模式 | 观察者模式 | Flare 模式 |
+|------|---------|-----------|-----------|
+| **构建器** | `ServerBuilder` | `ObserverServerBuilder` | `FlareServerBuilder` |
+| **实现方式** | 闭包（Closure） | `ServerEventHandler` trait | `ServerEventHandler` trait |
+| **功能完整性** | ⭐ 最小实现 | ⭐⭐ 基本功能 | ⭐⭐⭐ 完整功能 |
+| **自动 ACK** | ❌ 需手动处理 | ✅ 自动处理 | ✅ 自动处理 |
+| **错误处理** | ❌ 需手动处理 | ✅ 自动处理 | ✅ 自动处理 |
+| **设备管理** | ❌ | ✅ | ✅ |
+| **认证机制** | ✅ | ✅ | ✅ |
+| **序列化协商** | ✅ | ✅ | ✅ |
+| **心跳检测** | ✅ | ✅ | ✅ |
+| **适用场景** | 快速原型、学习 | 自定义处理逻辑 | 生产环境 |
+
+#### 客户端构建模式对比
+
+| 特性 | 简单模式 | 观察者模式 | Flare 模式 |
+|------|---------|-----------|-----------|
+| **构建器** | `ClientBuilder` | `ObserverClientBuilder` | `FlareClientBuilder` |
+| **实现方式** | 闭包（Closure） | `ConnectionObserver` trait | `MessageListener` trait |
+| **功能完整性** | ⭐ 最小实现 | ⭐⭐ 基本功能 | ⭐⭐⭐ 完整功能 |
+| **消息管道** | ❌ | ❌ | ✅ |
+| **中间件支持** | ❌ | ❌ | ✅ |
+| **自动重连** | ❌ | ❌ | ✅ |
+| **协议竞速** | ✅ | ✅ | ✅ |
+| **序列化协商** | ✅ | ✅ | ✅ |
+| **心跳管理** | ✅ | ✅ | ✅ |
+| **适用场景** | 快速原型、学习 | 自定义处理逻辑 | 生产环境 |
+
+#### 架构设计原则
+
+**1. 公共逻辑统一处理**
+- 所有模式共享底层实现（`HybridClient`/`HybridServer`）
+- 协议层、核心层、业务层清晰分离
+- 避免代码重复，维护成本低
+
+**2. 渐进式增强**
+- 从简单到复杂，按需选择
+- 无需为兼容性保留冗余代码
+- 高级模式完全兼容低级模式的功能
+
+**3. 类型安全**
+- 充分利用 Rust 类型系统
+- 编译期保证正确性
+- 零成本抽象，无运行时开销
+
+**4. 统一的事件处理**
+- **服务端**：`ServerEventHandler` 是观察者模式和 Flare 模式的核心接口
+  - 细化的命令处理：按命令类型处理（消息、通知、自定义、系统事件）
+  - 自动路由：`ServerMessageWrapper` 自动将消息路由到对应方法
+  - 自动 ACK：框架自动处理 ACK 响应和错误响应
+  - 生命周期管理：统一处理连接建立、断开、错误等事件
+
+- **客户端**：`MessageListener`（Flare 模式）和 `ConnectionObserver`（观察者模式）
+  - 统一的事件处理接口
+  - 支持消息管道和中间件（Flare 模式）
+  - 灵活的事件驱动架构
+
+#### 如何选择构建模式？
+
+**简单模式**
+- ✅ 快速原型开发
+- ✅ 学习和测试
+- ✅ 小型应用
+- ✅ 需要完全控制消息处理流程
+
+**观察者模式**
+- ✅ 需要自定义消息处理逻辑
+- ✅ 需要事件驱动的架构
+- ✅ 不需要完整功能集
+- ✅ 需要灵活扩展
+
+**Flare 模式（推荐）**
+- ✅ 生产环境
+- ✅ 需要完整功能的企业应用
+- ✅ 需要高性能和可扩展性
+- ✅ 需要统一消息处理流程
+
+### 事件处理器（ServerEventHandler）
+
+`ServerEventHandler` 是服务端的核心接口，**必须实现**。它提供了细化的命令处理方法：
+
+```rust
+use flare_core::server::events::handler::ServerEventHandler;
+use flare_core::common::protocol::*;
+use async_trait::async_trait;
+
+struct MyEventHandler;
+
+#[async_trait]
+impl ServerEventHandler for MyEventHandler {
+    // 处理消息命令（如发送消息）
+    async fn handle_message_command_by_type(
+        &self,
+        command: &MessageCommand,
+        msg_type: MessageType,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        match msg_type {
+            MessageType::Send => {
+                println!("收到发送消息请求: {:?}", command);
+                // 处理消息发送
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    // 处理通知命令
+    async fn handle_notification_command(
+        &self,
+        command: &NotificationCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        println!("收到通知: {:?}", command);
+        Ok(None)
+    }
+
+    // 处理自定义命令
+    async fn handle_custom_command(
+        &self,
+        command: &CustomCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        println!("收到自定义命令: {}", command.name);
+        Ok(None)
+    }
+
+    // 处理系统事件
+    async fn handle_system_event(
+        &self,
+        frame: &Frame,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        println!("收到系统事件");
+        Ok(None)
+    }
+
+    // 连接建立完成（在 CONNECT 协商完成后调用）
+    async fn on_connect(&self, connection_id: &str) -> Result<()> {
+        println!("连接建立: {}", connection_id);
+        Ok(())
+    }
+
+    // 连接断开
+    async fn on_disconnect(&self, connection_id: &str, reason: Option<&str>) -> Result<()> {
+        println!("连接断开: {}, 原因: {:?}", connection_id, reason);
+        Ok(())
+    }
+
+    // 连接错误
+    async fn on_error(&self, connection_id: &str, error: &str) -> Result<()> {
+        eprintln!("连接错误: {}, 错误: {}", connection_id, error);
+        Ok(())
+    }
+}
+
+// 使用
+let event_handler = Arc::new(MyEventHandler);
+let server = FlareServerBuilder::new("0.0.0.0:8080")
+    .with_event_handler(event_handler)
+    .build()?;
+```
+
 ### 认证配置
 
 ```rust
@@ -286,7 +402,7 @@ impl Authenticator for MyAuthenticator {
 }
 
 let authenticator = Arc::new(MyAuthenticator);
-let server = ObserverServerBuilder::new("0.0.0.0:8080")
+let server = FlareServerBuilder::new("0.0.0.0:8080")
     .enable_auth()
     .with_authenticator(authenticator)
     .with_auth_timeout(Duration::from_secs(30))
@@ -400,14 +516,16 @@ cat examples/README.md
 ```
 ┌─────────────────────────────────────────┐
 │          应用层 (Application)            │
-│  - ConnectionHandler / ConnectionObserver │
-│  - EventHandler                          │
+│  - ServerEventHandler (必需)            │
+│  - MessageListener (自定义命令)          │
+│  - ConnectionHandler (简单构建器)        │
 │  - Authenticator                         │
 └─────────────────────────────────────────┘
                     ↓
 ┌─────────────────────────────────────────┐
 │          核心层 (Core)                    │
 │  - ServerCore / ClientCore               │
+│  - DefaultServerMessageObserver          │
 │  - ConnectionManager                     │
 │  - HeartbeatDetector / HeartbeatManager  │
 │  - DeviceManager                         │
@@ -434,17 +552,29 @@ cat examples/README.md
    - 统一管理连接状态、心跳、消息路由
    - 处理协商、设备冲突、认证等核心逻辑
 
-2. **ConnectionManager**
+2. **DefaultServerMessageObserver**
+   - 默认的消息观察者实现
+   - 自动路由消息命令到 `ServerEventHandler`
+   - 处理系统命令（PING/PONG/CONNECT）
+   - 管理连接生命周期事件
+
+3. **ServerEventHandler**（必需）
+   - 核心事件处理接口，**必须实现**
+   - 提供细化的命令处理方法（消息、通知、自定义、系统事件）
+   - 处理连接生命周期事件（on_connect、on_disconnect、on_error）
+   - 由 `DefaultServerMessageObserver` 自动调用
+
+4. **ConnectionManager**
    - 管理所有活跃连接
    - 支持按连接ID、用户ID查询
    - 维护连接状态和元数据
 
-3. **MessageParser**
+5. **MessageParser**
    - 支持 Protobuf 和 JSON 自动检测
    - 支持压缩/解压缩
    - 协商后动态更新解析器
 
-4. **DeviceManager**
+6. **DeviceManager**
    - 管理用户设备
    - 实现设备冲突策略
    - 处理设备踢出逻辑
@@ -462,6 +592,22 @@ cat examples/README.md
 - **零拷贝** - 尽可能减少数据拷贝
 - **连接复用** - 高效的连接管理
 - **协议竞速** - 自动选择最快的协议
+
+### 性能指标
+
+| 指标 | 目标值 | 说明 |
+|------|--------|------|
+| **消息处理延迟** | P99 < 50ms | 端到端消息处理延迟 |
+| **连接建立延迟** | P99 < 100ms | 从连接到协商完成 |
+| **内存占用** | < 2GB/10K连接 | 单实例内存占用 |
+| **吞吐量** | 10万+ TPS/实例 | 单实例消息处理能力 |
+
+### 性能优化建议
+
+1. **使用协商后的格式**：协商完成后使用 Protobuf + Gzip 可以获得最佳性能
+2. **合理使用日志级别**：生产环境建议使用 `RUST_LOG=warn`，避免热路径日志开销
+3. **连接管理**：及时清理超时连接，避免内存泄漏
+4. **消息批处理**：对于批量消息，考虑使用批处理 API
 
 ## 📦 发布到 crates.io
 
@@ -521,8 +667,9 @@ cargo publish
 - 支持压缩算法（None/Gzip/Zstd）
 - 支持多设备管理
 - 支持 Token 认证
-- 提供观察者模式和简单模式两种构建方式
-- 完善的事件处理机制
+- **ServerEventHandler 作为核心接口**：提供细化的命令处理和事件观察
+- **DefaultServerMessageObserver**：自动路由消息到 ServerEventHandler
+- 提供 Flare 模式（推荐）和观察者模式两种构建方式
 - 消息处理管道（MessagePipeline）支持中间件
 - 统一的消息处理流程，自动序列化/压缩
 - 连接成功后返回完整协商结果（格式、压缩、加密）

@@ -1,24 +1,31 @@
-//! 简单模式服务端构建器（毛坯房）
+//! 简单模式服务端构建器
 //!
-//! 提供最小实现，没有任何"装修"，适合快速原型开发和小型应用
+//! 提供最小实现，使用闭包定义消息处理逻辑，适合快速原型开发和学习。
 //!
 //! ## 特点
-//! - ✅ 最小依赖：只提供基本的消息处理（闭包）
-//! - ✅ 零配置：使用默认配置即可运行
-//! - ✅ 轻量级：不包含中间件、管道等高级功能
-//! - ✅ 快速上手：几行代码即可启动服务器
+//! - ✅ **使用闭包处理消息和连接事件**：无需实现 trait，直接使用闭包
+//! - ✅ **最小依赖**：只提供基本的消息处理功能
+//! - ✅ **零配置**：使用默认配置即可运行
+//! - ✅ **轻量级**：不包含中间件、管道等高级功能
+//! - ✅ **快速上手**：几行代码即可启动服务器
 //!
 //! ## 适用场景
 //! - 快速原型开发
-//! - 小型应用
 //! - 学习和测试
+//! - 小型应用
 //! - 需要完全控制消息处理流程的场景
+//!
+//! ## 架构说明
+//!
+//! 简单模式基于 `HybridServer`，共享所有核心能力（多协议支持、序列化协商、心跳检测等），
+//! 但消息处理逻辑通过闭包定义，不依赖高级抽象。
 
 use crate::common::error::Result;
-use crate::common::protocol::Frame;
+use crate::common::protocol::{Frame, MessageCommand};
+use crate::server::HybridServer;
 use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
+use crate::server::events::handler::ServerEventHandler;
 use crate::server::handle::ServerHandle;
-use crate::server::{ConnectionHandler, HybridServer};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -113,7 +120,7 @@ pub type OnDisconnectFn = Box<
         + Sync,
 >;
 
-/// 简化的连接处理器
+/// 简化的连接处理器（仅用于存储闭包和 handle）
 struct SimpleConnectionHandler {
     message_handler: Option<MessageHandlerFn>,
     on_connect: Option<OnConnectFn>,
@@ -127,26 +134,47 @@ impl SimpleConnectionHandler {
     }
 }
 
+/// 将 SimpleConnectionHandler 适配为 ServerEventHandler
+struct SimpleEventHandlerAdapter {
+    handler: Arc<SimpleConnectionHandler>,
+}
+
 #[async_trait]
-impl ConnectionHandler for SimpleConnectionHandler {
-    async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
+impl ServerEventHandler for SimpleEventHandlerAdapter {
+    async fn handle_message(
+        &self,
+        command: &MessageCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
         let handle = {
-            let handle_guard = self.handle.lock().await;
+            let handle_guard = self.handler.handle.lock().await;
             handle_guard.clone()
         };
 
         let context = if let Some(ref handle) = handle {
             MessageContext::new(connection_id.to_string(), Arc::clone(handle))
         } else {
-            // 如果没有 handle，创建一个空的（使用 ServerCore 的默认实现）
-            // 这里暂时返回错误，实际上应该在 build 时设置 handle
             return Err(crate::common::error::FlareError::general_error(
                 "Server handle is not available",
             ));
         };
 
-        if let Some(ref handler) = self.message_handler {
-            handler(frame, &context).await
+        let frame = Frame {
+            message_id: command.message_id.clone(),
+            command: Some(crate::common::protocol::flare::core::commands::Command {
+                r#type: Some(
+                    crate::common::protocol::flare::core::commands::command::Type::Message(
+                        command.clone(),
+                    ),
+                ),
+            }),
+            metadata: std::collections::HashMap::new(),
+            reliability: crate::common::protocol::Reliability::AtLeastOnce as i32,
+            timestamp: 0,
+        };
+
+        if let Some(ref message_handler) = self.handler.message_handler {
+            message_handler(&frame, &context).await
         } else {
             Ok(None)
         }
@@ -154,7 +182,7 @@ impl ConnectionHandler for SimpleConnectionHandler {
 
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
         let handle = {
-            let handle_guard = self.handle.lock().await;
+            let handle_guard = self.handler.handle.lock().await;
             handle_guard.clone()
         };
 
@@ -166,16 +194,16 @@ impl ConnectionHandler for SimpleConnectionHandler {
             ));
         };
 
-        if let Some(ref handler) = self.on_connect {
-            handler(connection_id, &context).await
+        if let Some(ref on_connect) = self.handler.on_connect {
+            on_connect(connection_id, &context).await
         } else {
             Ok(())
         }
     }
 
-    async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
+    async fn on_disconnect(&self, connection_id: &str, _reason: Option<&str>) -> Result<()> {
         let handle = {
-            let handle_guard = self.handle.lock().await;
+            let handle_guard = self.handler.handle.lock().await;
             handle_guard.clone()
         };
 
@@ -187,8 +215,8 @@ impl ConnectionHandler for SimpleConnectionHandler {
             ));
         };
 
-        if let Some(ref handler) = self.on_disconnect {
-            handler(connection_id, &context).await
+        if let Some(ref on_disconnect) = self.handler.on_disconnect {
+            on_disconnect(connection_id, &context).await
         } else {
             Ok(())
         }
@@ -272,7 +300,17 @@ impl SimpleServer {
 
 /// 简单模式服务端构建器
 ///
-/// 使用闭包定义消息处理逻辑
+/// 提供最小实现，使用闭包定义消息处理逻辑，适合快速原型开发和学习。
+///
+/// ## 设计原则
+///
+/// - **公共逻辑统一处理**：基于 `HybridServer`，共享所有核心能力（多协议、序列化协商、心跳等）
+/// - **最小抽象**：消息处理通过闭包定义，不依赖 trait 实现
+/// - **零配置**：使用默认配置即可运行
+///
+/// ## 使用方式
+///
+/// 使用闭包定义消息处理和连接事件处理逻辑，无需实现 trait。
 pub struct ServerBuilder {
     base: BaseServerBuilderConfig,
     message_handler: Option<MessageHandlerFn>,
@@ -324,7 +362,7 @@ impl ServerBuilder {
     /// 设置消息处理函数
     ///
     /// # 参数
-    /// - `handler`: 消息处理函数，接收 Frame 和 MessageContext，返回 Option<Frame>（可选回复）
+    /// - `handler`: 消息处理函数，接收 `Frame` 和 `MessageContext`，返回 `Option<Frame>`（可选回复）
     pub fn on_message<F>(mut self, handler: F) -> Self
     where
         F: for<'a> Fn(
@@ -447,13 +485,16 @@ impl ServerBuilder {
             handle: Arc::new(Mutex::new(None)),
         });
 
-        // 使用 with_connection_manager 以传递 authenticator
+        let event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler> =
+            Arc::new(SimpleEventHandlerAdapter {
+                handler: handler.clone(),
+            });
+
         let server = HybridServer::with_connection_manager(
             self.base.config,
-            handler.clone() as Arc<dyn ConnectionHandler>,
             None,
             None,
-            None,
+            Some(event_handler),
             self.base.authenticator,
         )?;
 

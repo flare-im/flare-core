@@ -82,7 +82,7 @@ impl CompressionRegistry {
         &self,
         algorithm: CompressionAlgorithm,
     ) -> Option<Arc<dyn Compressor>> {
-        self.find(algorithm.as_str())
+        self.find(&algorithm.as_str())
     }
 
     /// 检查压缩器是否已注册

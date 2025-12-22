@@ -1,128 +1,116 @@
-//! Flare 服务端构建器（精装修）
+//! Flare 模式服务端构建器
 //!
-//! 提供完整功能，包含所有 `common` 和 `server` 模块的能力
-//! 用户只需简单配置即可使用，也可以自定义中间件、处理器等扩展功能
+//! 提供完整功能实现，包含所有 `common` 和 `server` 模块的能力，推荐用于生产环境。
 //!
 //! ## 特点
-//! - ✅ **消息管道**：自动处理序列化、压缩、加密
-//! - ✅ **中间件支持**：日志、性能监控、验证等
-//! - ✅ **处理器链**：可组合多个处理器
-//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
-//! - ✅ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
-//! - ✅ **加密支持**：AES-256-GCM 加密
-//! - ✅ **设备管理**：完整的设备冲突策略
+//! - ✅ **实现 `ServerEventHandler` trait（必需）**：提供细化的命令处理方法
+//! - ✅ **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
+//! - ✅ **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
+//! - ✅ **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
+//! - ✅ **设备管理**：完整的设备冲突策略和多端管理
 //! - ✅ **认证机制**：JWT Token 认证
 //! - ✅ **心跳检测**：自动心跳和超时管理
 //! - ✅ **多协议支持**：WebSocket + QUIC 双协议
-//! - ✅ **简单易用**：只需实现 `MessageListener` 即可
-//! - ✅ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
+//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
 //!
 //! ## 适用场景
 //! - 生产环境
 //! - 需要完整功能的企业应用
 //! - 需要高性能和可扩展性的场景
 //! - 需要统一消息处理流程的场景
+//!
+//! ## 架构说明
+//!
+//! Flare 模式基于 `HybridServer`，使用 `ServerMessageWrapper` 作为消息处理器。
+//! `ServerMessageWrapper` 集成了所有核心功能：
+//! - 自动消息路由到 `ServerEventHandler` 的对应方法
+//! - 自动 ACK 处理和错误响应
+//! - 设备管理和连接生命周期管理
+//! - 所有模式共享的底层能力（多协议、序列化协商、心跳等）
 
-use crate::common::MessageParser;
 use crate::common::error::Result;
-use crate::common::message::{
-    ArcMessageMiddleware, ArcMessageProcessor, MessageContext, MessagePipeline, MessageProcessor,
-};
+use crate::common::message::{ArcMessageMiddleware, ArcMessageProcessor};
 use crate::common::protocol::Frame;
+use crate::server::HybridServer;
 use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
 use crate::server::connection::ConnectionManager;
 use crate::server::events::handler::ServerEventHandler;
 use crate::server::handle::ServerHandle;
-use crate::server::{ConnectionHandler, HybridServer};
-use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info};
 
-/// 消息监听器
+/// Flare 模式服务端构建器
 ///
-/// 用户只需要实现这个简单的接口就能处理消息
-#[async_trait]
-pub trait MessageListener: Send + Sync {
-    /// 处理收到的消息
-    ///
-    /// # 参数
-    /// - `frame`: 收到的消息 Frame
-    /// - `connection_id`: 连接 ID
-    ///
-    /// # 返回
-    /// - `Ok(Some(Frame))`: 需要发送的响应
-    /// - `Ok(None)`: 不需要响应
-    /// - `Err`: 处理失败
-    async fn on_message(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        let _ = (frame, connection_id);
-        Ok(None)
-    }
-
-    /// 连接建立时调用
-    async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        let _ = connection_id;
-        Ok(())
-    }
-
-    /// 连接断开时调用
-    async fn on_disconnect(&self, connection_id: &str, reason: Option<&str>) -> Result<()> {
-        let _ = (connection_id, reason);
-        Ok(())
-    }
-}
-
-/// Flare 服务端构建器
+/// 提供完整功能实现，是最强大的服务端构建模式。
 ///
-/// 提供简单易用的 API，自动集成所有功能：
-/// - 消息管道（中间件、处理器）
-/// - 序列化协商
-/// - 压缩/解压
-/// - 加密/解密
-/// - 设备管理
-/// - 认证
+/// ## 设计原则
 ///
-/// 这是最高抽象级别的构建器，适合生产环境使用
+/// - **公共逻辑统一处理**：基于 `HybridServer`，共享所有核心能力
+/// - **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到 `ServerEventHandler` 的对应方法
+/// - **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
+/// - **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
+///
+/// ## 使用方式
+///
+/// 用户只需要实现 `ServerEventHandler` trait，框架会自动处理：
+/// - 消息路由到对应的方法（handle_message、handle_ack、handle_notification_command 等）
+/// - ACK 和错误响应
+/// - 连接生命周期管理
+/// - 设备管理和认证
 pub struct FlareServerBuilder {
     base: BaseServerBuilderConfig,
-    listener: Option<Arc<dyn MessageListener>>,
-    middlewares: Vec<ArcMessageMiddleware>,
-    processors: Vec<ArcMessageProcessor>,
+    event_handler: Arc<dyn ServerEventHandler>,
     connection_manager: Option<Arc<ConnectionManager>>,
     device_manager: Option<Arc<crate::server::device::DeviceManager>>,
-    event_handler: Option<Arc<dyn ServerEventHandler>>,
+    middlewares: Vec<ArcMessageMiddleware>,
+    processors: Vec<ArcMessageProcessor>,
 }
 
 impl FlareServerBuilder {
     /// 创建新的 Flare 服务端构建器
-    pub fn new(bind_address: impl Into<String>) -> Self {
+    ///
+    /// # 参数
+    /// - `bind_address`: 绑定地址
+    /// - `event_handler`: 事件处理器（必须），用户只需要实现 `ServerEventHandler` 的 `handle_message` 方法即可
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// use flare_core::server::events::handler::ServerEventHandler;
+    /// use flare_core::common::protocol::MessageCommand;
+    /// use flare_core::common::error::Result;
+    /// use flare_core::common::protocol::Frame;
+    /// use async_trait::async_trait;
+    /// use std::sync::Arc;
+    ///
+    /// struct MyHandler;
+    ///
+    /// #[async_trait]
+    /// impl ServerEventHandler for MyHandler {
+    ///     async fn handle_message(
+    ///         &self,
+    ///         command: &MessageCommand,
+    ///         connection_id: &str,
+    ///     ) -> Result<Option<Frame>> {
+    ///         // 处理消息
+    ///         Ok(None)
+    ///     }
+    /// }
+    ///
+    /// let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(MyHandler))
+    ///     .build()?;
+    /// ```
+    pub fn new(
+        bind_address: impl Into<String>,
+        event_handler: Arc<dyn ServerEventHandler>,
+    ) -> Self {
         Self {
             base: BaseServerBuilderConfig::new(bind_address),
-            listener: None,
-            middlewares: Vec::new(),
-            processors: Vec::new(),
+            event_handler,
             connection_manager: None,
             device_manager: None,
-            event_handler: None,
+            middlewares: Vec::new(),
+            processors: Vec::new(),
         }
-    }
-
-    /// 设置消息监听器（必须）
-    pub fn with_listener(mut self, listener: Arc<dyn MessageListener>) -> Self {
-        self.listener = Some(listener);
-        self
-    }
-
-    /// 添加中间件
-    pub fn with_middleware(mut self, middleware: ArcMessageMiddleware) -> Self {
-        self.middlewares.push(middleware);
-        self
-    }
-
-    /// 添加处理器
-    pub fn with_processor(mut self, processor: ArcMessageProcessor) -> Self {
-        self.processors.push(processor);
-        self
     }
 
     /// 设置连接管理器（可选）
@@ -137,12 +125,6 @@ impl FlareServerBuilder {
         device_manager: Arc<crate::server::device::DeviceManager>,
     ) -> Self {
         self.device_manager = Some(device_manager);
-        self
-    }
-
-    /// 设置事件处理器（可选）
-    pub fn with_event_handler(mut self, event_handler: Arc<dyn ServerEventHandler>) -> Self {
-        self.event_handler = Some(event_handler);
         self
     }
 
@@ -217,6 +199,15 @@ impl FlareServerBuilder {
         self
     }
 
+    /// 设置默认加密算法
+    pub fn with_default_encryption(
+        mut self,
+        encryption: crate::common::encryption::EncryptionAlgorithm,
+    ) -> Self {
+        self.base = self.base.with_default_encryption(encryption);
+        self
+    }
+
     /// 设置最大连接数
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.base = self.base.with_max_connections(max);
@@ -253,67 +244,100 @@ impl FlareServerBuilder {
         self
     }
 
+    /// 添加中间件（用于消息处理管道）
+    ///
+    /// 中间件会在消息处理前后执行，可以用于日志、监控、验证等。
+    /// 中间件按添加顺序执行，优先级高的中间件会先执行。
+    ///
+    /// # 参数
+    /// - `middleware`: 中间件实例
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// use flare_core::common::message::{LoggingMiddleware, LogLevel};
+    ///
+    /// FlareServerBuilder::new("0.0.0.0:8080", handler)
+    ///     .with_middleware(Arc::new(LoggingMiddleware::new("ServerLogging")
+    ///         .with_level(LogLevel::Info)))
+    ///     .build()?;
+    /// ```
+    pub fn with_middleware(mut self, middleware: ArcMessageMiddleware) -> Self {
+        self.middlewares.push(middleware);
+        self
+    }
+
+    /// 添加处理器（用于消息处理管道）
+    ///
+    /// 处理器用于处理具体的业务逻辑。
+    /// 如果处理器返回响应，后续处理器不会执行。
+    ///
+    /// # 参数
+    /// - `processor`: 处理器实例
+    pub fn with_processor(mut self, processor: ArcMessageProcessor) -> Self {
+        self.processors.push(processor);
+        self
+    }
+
     /// 构建服务端
+    ///
+    /// # 错误处理
+    /// - 如果配置无效（如启用了认证但未提供认证器），返回配置错误
+    /// - 如果服务器初始化失败，返回相应的错误
+    ///
+    /// # 返回
+    /// - `Ok(FlareServer)` - 成功构建的服务端实例
+    /// - `Err(FlareError)` - 构建失败的错误信息
+    ///
+    /// Flare 模式使用 `ServerMessageWrapper` 作为消息处理器，它：
+    /// - 集成了 `ServerEventHandler` 的所有功能，自动路由消息到对应的处理方法
+    /// - 自动处理 ACK、错误响应等基础功能
+    /// - 支持设备管理、连接管理等高级特性
     pub fn build(self) -> Result<FlareServer> {
-        let listener = self.listener.ok_or_else(|| {
-            crate::common::error::FlareError::protocol_error(
-                "MessageListener is required".to_string(),
-            )
-        })?;
-
-        // 创建消息管道（使用默认 JSON 解析器，协商后会更新）
-        let pipeline = Arc::new(Mutex::new(MessagePipeline::new(MessageParser::json())));
-
-        // 添加用户提供的中间件
-        let middlewares = self.middlewares;
-        let processors = self.processors;
-
-        // 创建连接处理器（集成消息管道）
-        let handler = Arc::new(FlareHandler {
-            pipeline: pipeline.clone(),
-            listener: listener.clone(),
-        });
-
-        // 直接使用 HybridServer，而不是通过 ObserverServer
-        // 这样可以更好地控制消息管道的集成
-        let server = HybridServer::with_connection_manager(
-            self.base.config,
-            handler.clone(),
-            self.connection_manager,
-            self.device_manager,
-            self.event_handler,
-            self.base.authenticator,
+        // 验证配置（使用公共验证逻辑）
+        crate::server::builder::common::validate_auth_config(
+            &self.base.config,
+            &self.base.authenticator,
         )?;
 
-        let wrapper = ServerWrapper::new(server);
+        // 创建消息解析器（使用公共创建逻辑）
+        // let parser = crate::server::builder::common::create_message_parser(&self.base.config);
 
-        // 初始化消息管道（添加中间件和处理器）
-        let pipeline_clone = pipeline.clone();
-        let listener_clone = listener.clone();
-        tokio::spawn(async move {
-            let pipeline = pipeline_clone.lock().await;
+        info!(
+            "[FlareServerBuilder] 开始构建服务端: bind_address={}, protocols={:?}, format={:?}, compression={:?}",
+            self.base.config.bind_address,
+            self.base.config.get_protocols(),
+            self.base.config.default_serialization_format,
+            self.base.config.default_compression
+        );
 
-            // 添加用户提供的中间件
-            for middleware in middlewares {
-                pipeline.add_middleware(middleware).await;
-            }
+        let middleware_count = self.middlewares.len();
+        let processor_count = self.processors.len();
 
-            // 创建监听器处理器
-            let listener_processor = Arc::new(ListenerProcessor {
-                listener: listener_clone.clone(),
-            });
-            pipeline.add_processor(listener_processor).await;
+        let server = HybridServer::with_connection_manager_and_pipeline(
+            self.base.config,
+            self.connection_manager,
+            self.device_manager,
+            Some(self.event_handler.clone()),
+            self.base.authenticator,
+            self.middlewares,
+            self.processors,
+        )
+        .map_err(|e| {
+            error!("[FlareServerBuilder] 构建服务端失败: {}", e);
+            e
+        })?;
 
-            // 添加用户提供的处理器
-            for processor in processors {
-                pipeline.add_processor(processor).await;
-            }
-        });
+        if middleware_count > 0 || processor_count > 0 {
+            info!(
+                "[FlareServerBuilder] 已配置 {} 个中间件和 {} 个处理器",
+                middleware_count, processor_count
+            );
+        }
 
+        info!("[FlareServerBuilder] 服务端构建成功");
         Ok(FlareServer {
-            wrapper,
-            pipeline,
-            listener,
+            wrapper: ServerWrapper::new(server),
+            event_handler: self.event_handler,
         })
     }
 }
@@ -321,10 +345,8 @@ impl FlareServerBuilder {
 /// Flare 服务端
 pub struct FlareServer {
     wrapper: ServerWrapper,
-    #[allow(dead_code)] // 保留用于未来扩展（如动态更新管道配置）
-    pipeline: Arc<Mutex<MessagePipeline>>,
-    #[allow(dead_code)] // 保留用于未来扩展（如动态更新监听器）
-    listener: Arc<dyn MessageListener>,
+    #[allow(dead_code)] // 保留用于未来扩展（如动态更新事件处理器）
+    event_handler: Arc<dyn ServerEventHandler>,
 }
 
 impl FlareServer {
@@ -398,49 +420,5 @@ impl FlareServer {
     /// 获取 ServerHandle（用于消息发送和连接管理）
     pub fn get_server_handle(&self) -> Option<Arc<dyn ServerHandle>> {
         self.wrapper.get_server_handle()
-    }
-}
-
-/// Flare 服务端处理器
-struct FlareHandler {
-    pipeline: Arc<Mutex<MessagePipeline>>,
-    listener: Arc<dyn MessageListener>,
-}
-
-#[async_trait]
-impl ConnectionHandler for FlareHandler {
-    async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        let pipeline = self.pipeline.lock().await;
-        pipeline.process_frame(frame, Some(connection_id)).await
-    }
-
-    async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        info!("[FlareServer] ✅ 新连接: {}", connection_id);
-        self.listener.on_connect(connection_id).await
-    }
-
-    async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
-        info!("[FlareServer] ❌ 连接断开: {}", connection_id);
-        self.listener.on_disconnect(connection_id, None).await
-    }
-}
-
-/// 监听器处理器
-struct ListenerProcessor {
-    listener: Arc<dyn MessageListener>,
-}
-
-#[async_trait]
-impl MessageProcessor for ListenerProcessor {
-    async fn process(&self, ctx: &MessageContext) -> Result<Option<Frame>> {
-        if let Some(connection_id) = &ctx.connection_id {
-            self.listener.on_message(&ctx.frame, connection_id).await
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn name(&self) -> &str {
-        "ListenerProcessor"
     }
 }

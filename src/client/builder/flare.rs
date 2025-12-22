@@ -1,20 +1,16 @@
-//! Flare 客户端构建器（精装修）
+//! Flare 模式客户端构建器
 //!
-//! 提供完整功能，包含所有 `common` 和 `client` 模块的能力
-//! 用户只需简单配置即可使用，也可以自定义中间件、处理器等扩展功能
+//! 提供完整功能实现，包含所有 `common` 和 `client` 模块的能力，推荐用于生产环境。
 //!
 //! ## 特点
+//! - ✅ **实现 `MessageListener` trait（必需）**：提供统一的消息处理接口
 //! - ✅ **消息管道**：自动处理序列化、压缩、加密
 //! - ✅ **中间件支持**：日志、性能监控、验证等
 //! - ✅ **处理器链**：可组合多个处理器
-//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
-//! - ✅ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
-//! - ✅ **加密支持**：AES-256-GCM 加密
+//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
 //! - ✅ **心跳管理**：自动心跳和超时管理
 //! - ✅ **自动重连**：支持断线重连
 //! - ✅ **多协议支持**：WebSocket + QUIC 双协议竞速
-//! - ✅ **简单易用**：只需实现 `MessageListener` 即可
-//! - ✅ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
 //! - ✅ **统一事件处理**：使用 Observer 模式统一处理所有事件（连接事件、消息事件等）
 //!
 //! ## 适用场景
@@ -22,6 +18,11 @@
 //! - 需要完整功能的企业应用
 //! - 需要高性能和可扩展性的场景
 //! - 需要统一消息处理流程的场景
+//!
+//! ## 架构说明
+//!
+//! Flare 模式基于 `HybridClient`，使用 `MessagePipeline` 提供统一的消息处理流程。
+//! 消息管道支持中间件、自动序列化/压缩、加密等功能，同时保持与底层实现的统一。
 
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use crate::client::{Client, HybridClient};
@@ -74,11 +75,11 @@ pub trait MessageListener: Send + Sync {
     }
 }
 
-/// Flare 客户端构建器
+/// Flare 模式客户端构建器
 ///
-/// 提供简单易用的 API，自动集成所有功能：
-/// - 消息管道（中间件、处理器）
-/// - 序列化协商
+/// 提供完整功能实现的客户端构建器
+///
+/// 用户需要实现 `MessageListener` trait，框架会自动处理消息序列化、压缩、加密和心跳管理
 /// - 压缩/解压
 /// - 加密/解密
 /// - 心跳管理
@@ -125,17 +126,9 @@ impl FlareClientBuilder {
     ///
     /// 观察者会收到连接事件（Connected、Disconnected、Error、Message）
     ///
-    /// ## 设计说明
+    /// 添加连接观察者
     ///
-    /// 统一使用 Observer 模式处理所有事件，包括：
-    /// - 连接事件（Connected、Disconnected、Error）
-    /// - 消息事件（Message，包含已解析的 Frame）
-    ///
-    /// 这种设计符合 IM SDK 的最佳实践（参考微信、飞书、WhatsApp 等），具有以下优势：
-    /// - **简化 API**：用户只需要实现一个接口
-    /// - **更灵活**：可以注册多个观察者，每个处理不同的事情
-    /// - **更符合观察者模式**：所有事件都通过观察者处理
-    /// - **减少概念复杂度**：不需要理解多个不同的机制
+    /// 观察者会收到连接事件（Connected、Disconnected、Error、Message）
     ///
     /// ## 示例
     ///
@@ -307,8 +300,11 @@ impl FlareClientBuilder {
             )
         })?;
 
-        // 创建消息管道（使用默认 JSON 解析器，协商后会更新）
-        let pipeline = Arc::new(Mutex::new(MessagePipeline::new(MessageParser::json())));
+        // 创建消息管道（使用 PRE_NEGOTIATION_PARSER，协商后会更新）
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        let pipeline = Arc::new(Mutex::new(MessagePipeline::new(
+            PRE_NEGOTIATION_PARSER.clone(),
+        )));
 
         // 添加用户提供的中间件
         for middleware in self.middlewares {
@@ -443,11 +439,12 @@ impl ConnectionObserver for FlareObserver {
             }
 
             ConnectionEvent::Disconnected(reason) => {
-                let reason_clone = reason.clone();
-                info!("[FlareClient] ❌ 连接断开: {}", reason_clone);
+                // 使用 Arc<str> 避免 String clone，减少内存分配
+                let reason_arc: Arc<str> = Arc::from(reason.as_str());
+                info!("[FlareClient] ❌ 连接断开: {}", reason_arc);
                 let listener = self.listener.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = listener.on_disconnect(Some(&reason_clone)).await {
+                    if let Err(e) = listener.on_disconnect(Some(&reason_arc)).await {
                         error!("[FlareClient] on_disconnect 失败: {}", e);
                     }
                 });
@@ -478,9 +475,10 @@ impl ConnectionObserver for FlareObserver {
                     warn!("[FlareClient] 连接丢失: {:?}", err);
                     info!("[FlareClient] 💡 底层客户端将自动尝试重连（如果配置了重连）");
                     let listener = self.listener.clone();
-                    let err_str_clone = err_str.clone();
+                    // 使用 Arc<str> 避免 String clone，减少内存分配
+                    let err_str_arc: Arc<str> = Arc::from(err_str.as_str());
                     tokio::spawn(async move {
-                        if let Err(e) = listener.on_error(&err_str_clone).await {
+                        if let Err(e) = listener.on_error(&err_str_arc).await {
                             error!("[FlareClient] on_error 失败: {}", e);
                         }
                     });
@@ -488,9 +486,10 @@ impl ConnectionObserver for FlareObserver {
                     // 其他错误，正常记录并通知 listener
                     warn!("[FlareClient] 连接错误: {:?}", err);
                     let listener = self.listener.clone();
-                    let err_str_clone = err_str.clone();
+                    // 使用 Arc<str> 避免 String clone，减少内存分配
+                    let err_str_arc: Arc<str> = Arc::from(err_str.as_str());
                     tokio::spawn(async move {
-                        if let Err(e) = listener.on_error(&err_str_clone).await {
+                        if let Err(e) = listener.on_error(&err_str_arc).await {
                             error!("[FlareClient] on_error 失败: {}", e);
                         }
                     });
@@ -498,10 +497,83 @@ impl ConnectionObserver for FlareObserver {
             }
 
             ConnectionEvent::Message(data) => {
-                // 使用消息管道处理消息
+                // 先尝试用 PRE_NEGOTIATION_PARSER 解析，检查是否是 CONNECT_ACK 消息
+                // CONNECT_ACK 消息必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
+                use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+                use crate::common::protocol::flare::core::commands::command::Type as CommandType;
+                use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
+
                 let pipeline = self.pipeline.clone();
                 let data = data.clone();
                 tokio::spawn(async move {
+                    // 1. 先尝试用 PRE_NEGOTIATION_PARSER 解析，检查是否是 CONNECT_ACK
+                    if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(&data) {
+                        if let Some(cmd) = &frame.command {
+                            if let Some(CommandType::System(sys_cmd)) = &cmd.r#type {
+                                if sys_cmd.r#type == SysType::ConnectAck as i32 {
+                                    // 这是 CONNECT_ACK 消息，需要更新 MessagePipeline 的 parser
+                                    // 从 CONNECT_ACK 中提取协商结果
+                                    let format =
+                                        crate::common::protocol::SerializationFormat::try_from(
+                                            sys_cmd.format,
+                                        )
+                                        .unwrap_or(
+                                            crate::common::protocol::SerializationFormat::Json,
+                                        );
+                                    let compression =
+                                        crate::common::compression::CompressionAlgorithm::from_str(
+                                            &sys_cmd.compression,
+                                        )
+                                        .unwrap_or(
+                                            crate::common::compression::CompressionAlgorithm::None,
+                                        );
+                                    let encryption =
+                                        crate::common::encryption::EncryptionAlgorithm::from_str(
+                                            &sys_cmd.encryption,
+                                        )
+                                        .unwrap_or(
+                                            crate::common::encryption::EncryptionAlgorithm::None,
+                                        );
+
+                                    // 更新 MessagePipeline 的 parser
+                                    {
+                                        let compression_clone = compression.clone();
+                                        let encryption_clone = encryption.clone();
+                                        let pipeline_guard = pipeline.lock().await;
+                                        let new_parser = crate::common::MessageParser::new(
+                                            format,
+                                            compression,
+                                            encryption,
+                                        );
+                                        pipeline_guard.update_parser(new_parser).await;
+                                        debug!(
+                                            "[FlareObserver] ✅ 已更新 MessagePipeline 的 parser: format={:?}, compression={:?}, encryption={:?}",
+                                            format, compression_clone, encryption_clone
+                                        );
+                                    }
+
+                                    // 使用 PRE_NEGOTIATION_PARSER 解析的 frame 继续处理
+                                    let pipeline_guard = pipeline.lock().await;
+                                    match pipeline_guard.process_frame(&frame, None).await {
+                                        Ok(Some(_response_data)) => {
+                                            debug!(
+                                                "[FlareClient] 消息管道返回响应，但客户端无法自动发送，需要用户手动处理"
+                                            );
+                                        }
+                                        Ok(None) => {
+                                            debug!("[FlareClient] CONNECT_ACK 处理完成，无需响应");
+                                        }
+                                        Err(e) => {
+                                            error!("[FlareClient] CONNECT_ACK 处理失败: {}", e);
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. 如果不是 CONNECT_ACK，使用 MessagePipeline 的 parser 解析
                     let pipeline = pipeline.lock().await;
                     match pipeline.process_raw(&data, None).await {
                         Ok(Some(_response_data)) => {

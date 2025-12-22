@@ -18,6 +18,7 @@ pub enum TransportProtocol {
 
 impl TransportProtocol {
     /// 从字符串转换为协议类型
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "websocket" | "ws" => Some(TransportProtocol::WebSocket),

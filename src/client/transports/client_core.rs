@@ -6,17 +6,22 @@ use crate::client::config::ClientConfig;
 use crate::client::connection::ConnectionStateManager;
 use crate::client::heartbeat::HeartbeatManager;
 use crate::client::router::MessageRouter;
-use crate::common::MessageParser;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::flare::core::commands::command::Type;
 use crate::common::protocol::flare::core::commands::message_command::Type as MessageCommandType;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotificationCommandType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
 use crate::common::protocol::{Frame, Reliability, connect, frame_with_system_command};
+use crate::common::{
+    CompressionAlgorithm, EncryptionAlgorithm, MessageParser, SerializationFormat,
+};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{Mutex, oneshot};
 
 /// 客户端核心功能
@@ -40,18 +45,27 @@ pub struct ClientCore {
     event_handler: Option<Arc<dyn crate::client::events::handler::ClientEventHandler>>,
     /// 客户端连接（用于断开连接）
     /// 使用 Arc 包装，以便在 clone 时共享同一个连接引用
+    #[allow(clippy::type_complexity)]
     client_connection: Arc<std::sync::Mutex<Option<Arc<Mutex<Box<dyn Connection>>>>>>,
     /// 等待响应的请求池（按 message_id 匹配）
     pub(crate) pending_map: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
+    /// 协商完成标志
+    /// 当收到 CONNECT_ACK 并更新 parser 后，设置为 true
+    /// 用于判断是否应该使用协商后的 parser 解析消息
+    negotiation_completed: Arc<AtomicBool>,
 }
 
 impl ClientCore {
     /// 创建新的客户端核心
     pub fn new(config: &ClientConfig) -> Self {
         let (format, compression) = Self::determine_initial_format(config);
-        let parser = MessageParser::new(format, compression);
+        let parser = MessageParser::new(
+            format,
+            compression,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        );
 
-        let message_router = config.enable_router.then(|| MessageRouter::new());
+        let message_router = config.enable_router.then(MessageRouter::new);
 
         Self {
             state_manager: Arc::new(ConnectionStateManager::new()),
@@ -63,6 +77,7 @@ impl ClientCore {
             event_handler: None,
             client_connection: Arc::new(std::sync::Mutex::new(None)),
             pending_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            negotiation_completed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -89,13 +104,20 @@ impl ClientCore {
         &self,
         format: crate::common::protocol::SerializationFormat,
         compression: crate::common::compression::CompressionAlgorithm,
+        encryption: crate::common::encryption::EncryptionAlgorithm,
     ) {
+        let compression_clone = compression.clone();
+        let encryption_clone = encryption.clone();
         let mut parser = self.parser.lock().await;
-        *parser = MessageParser::new(format, compression);
-        tracing::debug!(
-            "[ClientCore] 协商完成，解析器已更新: 最终序列化方式={:?}, 最终压缩方式={:?}",
+        *parser = MessageParser::new(format, compression, encryption);
+        // 标记协商已完成
+        self.negotiation_completed.store(true, Ordering::SeqCst);
+        tracing::info!(
+            "[ClientCore] ✅ 协商完成，解析器已更新: 最终序列化方式={:?}, 最终压缩方式={:?}, 最终加密方式={:?}, negotiation_completed={}",
             format,
-            compression
+            compression_clone,
+            encryption_clone,
+            self.negotiation_completed.load(Ordering::SeqCst)
         );
     }
 
@@ -130,9 +152,10 @@ impl ClientCore {
             self.config.heartbeat.timeout,
         );
 
-        // 获取当前 parser 的副本用于心跳
-        let parser = self.parser.lock().await.clone();
-        heartbeat.start(connection, parser);
+        // **关键修复**：传递 parser 的引用而不是副本
+        // 这样心跳管理器可以始终使用最新的 parser（协商后的 parser）
+        let parser_ref = Arc::clone(&self.parser);
+        heartbeat.start(connection, parser_ref);
         self.heartbeat_manager = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
     }
 
@@ -166,40 +189,48 @@ impl ClientCore {
     ///
     /// 如果启用了路由，使用路由处理；否则直接通知观察者
     pub async fn handle_message(&self, data: Vec<u8>) {
+        // 根据协商完成标志决定使用哪个 parser
+        let negotiation_completed = self.negotiation_completed.load(Ordering::SeqCst);
+
         // 解析消息
-        let frame = match self.parse_message(&data).await {
-            Ok(frame) => frame,
-            Err(e) => {
-                tracing::warn!("Failed to parse message: {}", e);
-                return;
+        let frame = if !negotiation_completed {
+            // 协商未完成：只使用 PRE_NEGOTIATION_PARSER（这个阶段只会收到 CONNECT_ACK）
+            use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+            match PRE_NEGOTIATION_PARSER.parse(&data) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    tracing::warn!("Failed to parse message (pre-negotiation): {}", e);
+                    return;
+                }
+            }
+        } else {
+            // 协商已完成：直接使用协商后的 parser 解析
+            match self.parse_message(&data).await {
+                Ok(frame) => frame,
+                Err(e) => {
+                    tracing::warn!("Failed to parse message (negotiated): {}", e);
+                    return;
+                }
             }
         };
-        // 尝试匹配等待的响应（按 Frame.message_id）
         let is_pending_response = {
-            tracing::debug!(
-                "[ClientCore] handle_message: 尝试匹配等待的响应, frame.message_id={}",
+            tracing::trace!(
+                "[ClientCore] 尝试匹配等待的响应: message_id={}",
                 frame.message_id
             );
-            
-            // 检查 MessageCommand 中的 message_id（用于调试）
+
             if let Some(cmd) = &frame.command {
                 if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                    tracing::debug!(
-                        "[ClientCore] handle_message: MessageCommand.message_id={}, Frame.message_id={}",
-                        msg_cmd.message_id,
-                        frame.message_id
-                    );
-                    // 如果 MessageCommand.message_id 和 Frame.message_id 不一致，记录警告
                     if msg_cmd.message_id != frame.message_id {
                         tracing::warn!(
-                            "[ClientCore] handle_message: MessageCommand.message_id 和 Frame.message_id 不一致! MessageCommand.message_id={}, Frame.message_id={}",
+                            "[ClientCore] MessageCommand.message_id 和 Frame.message_id 不一致: cmd_id={}, frame_id={}",
                             msg_cmd.message_id,
                             frame.message_id
                         );
                     }
                 }
             }
-            
+
             // 列出所有等待的 message_id（用于调试）
             let pending_ids: Vec<String> = {
                 let pending = self.pending_map.lock().await;
@@ -211,10 +242,10 @@ impl ClientCore {
                     pending_ids
                 );
             }
-            
+
             let mut pending = self.pending_map.lock().await;
             if let Some(sender) = pending.remove(&frame.message_id) {
-                tracing::info!(
+                tracing::debug!(
                     "[ClientCore] ✅ 匹配到等待的响应: message_id={}",
                     frame.message_id
                 );
@@ -225,7 +256,7 @@ impl ClientCore {
                     );
                     false // 发送失败，继续处理
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "[ClientCore] ✅ 响应已发送到等待通道: message_id={}",
                         frame.message_id
                     );
@@ -326,16 +357,18 @@ impl ClientCore {
                     "[ClientCore] ✅ 收到 CONNECT_ACK: 服务端确定的序列化方式={:?}, 压缩方式={:?}, 加密方式={:?}",
                     format,
                     compression,
-                    encryption.as_deref().unwrap_or("none")
+                    encryption
                 );
 
                 // 更新 parser 为协商后的格式（如果不是强制模式）
                 if !self.config.is_force_format() {
-                    self.update_parser(format, compression).await;
+                    self.update_parser(format, compression.clone(), encryption.clone())
+                        .await;
                     tracing::info!(
-                        "[ClientCore] ✅ 解析器已更新为协商后的格式: {:?}, 压缩: {:?}",
+                        "[ClientCore] ✅ 解析器已更新为协商后的格式: {:?}, 压缩: {:?}, 加密: {:?}",
                         format,
-                        compression
+                        compression,
+                        encryption
                     );
                 } else {
                     tracing::info!(
@@ -343,6 +376,13 @@ impl ClientCore {
                         self.config.get_serialization_format(),
                         self.config.get_compression()
                     );
+                }
+
+                // 发送 NEGOTIATION_READY 命令，通知服务端客户端已准备好按协商方式通信
+                // 注意：这里使用协商后的 parser（如果已更新）或 JSON parser（如果还在协商前）
+                // 但 NEGOTIATION_READY 应该在协商完成后发送，所以应该使用协商后的 parser
+                if let Err(e) = self.send_negotiation_ready().await {
+                    tracing::warn!("[ClientCore] 发送 NEGOTIATION_READY 失败: {}", e);
                 }
             }
             Err(e) => {
@@ -501,12 +541,18 @@ impl ClientCore {
         match event {
             ConnectionEvent::Connected => {
                 self.state_manager.set_connected();
+                // 连接建立时，重置协商完成标志
+                self.negotiation_completed.store(false, Ordering::SeqCst);
             }
             ConnectionEvent::Disconnected(_) => {
                 self.state_manager.set_disconnected();
+                // 连接断开时，重置协商完成标志
+                self.negotiation_completed.store(false, Ordering::SeqCst);
             }
             ConnectionEvent::Error(_) => {
                 self.state_manager.set_failed();
+                // 连接错误时，重置协商完成标志
+                self.negotiation_completed.store(false, Ordering::SeqCst);
             }
             ConnectionEvent::Message(_) => {
                 // 消息处理在 handle_message 中完成
@@ -557,6 +603,12 @@ impl ClientCore {
     /// 检查是否可以发送消息
     pub fn can_send(&self) -> bool {
         self.state_manager.get_state().can_send()
+    }
+
+    /// 检查协商是否已完成
+    pub fn is_negotiation_completed(&self) -> bool {
+        self.negotiation_completed
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 检查是否可以连接
@@ -648,10 +700,7 @@ impl ClientCore {
 
         // 添加压缩算法（仅当客户端指定了压缩时）
         if compression != crate::common::compression::CompressionAlgorithm::None {
-            metadata.insert(
-                "compression".to_string(),
-                compression.as_str().as_bytes().to_vec(),
-            );
+            metadata.insert("compression".to_string(), compression.as_str().into_bytes());
         }
 
         // 添加是否强制指定格式的标记
@@ -702,14 +751,14 @@ impl ClientCore {
             // 客户端指定了非JSON格式：发送format元数据，服务端优先使用
             (
                 self.config.serialization_format,
-                self.config.compression,
+                self.config.compression.clone(),
                 true,
             )
         } else {
             // 客户端使用默认JSON：不发送format元数据，让服务端使用默认JSON
             (
                 self.config.serialization_format,
-                self.config.compression,
+                self.config.compression.clone(),
                 false,
             )
         }
@@ -756,8 +805,9 @@ impl ClientCore {
             let parser = self.parser.lock().await;
             parser.serialize(frame)
         } else {
-            // 协商模式：使用默认 JSON parser 发送 CONNECT 消息
-            MessageParser::json().serialize(frame)
+            // 协商模式：使用 PRE_NEGOTIATION_PARSER 发送 CONNECT 消息
+            use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+            PRE_NEGOTIATION_PARSER.serialize(frame)
         }
     }
 
@@ -790,9 +840,9 @@ impl ClientCore {
         &self,
         frame: &Frame,
     ) -> Result<(
-        crate::common::protocol::SerializationFormat,
-        crate::common::compression::CompressionAlgorithm,
-        Option<String>,
+        SerializationFormat,
+        CompressionAlgorithm,
+        EncryptionAlgorithm,
     )> {
         let cmd = frame
             .command
@@ -817,11 +867,12 @@ impl ClientCore {
         }
 
         // 解析协商结果
-        let format = crate::common::protocol::SerializationFormat::try_from(cmd.format)
-            .unwrap_or(crate::common::protocol::SerializationFormat::Json);
+        let format = SerializationFormat::try_from(cmd.format).unwrap_or(SerializationFormat::Json);
 
-        let compression = Self::parse_compression_from_ack(cmd);
-        let encryption = Self::parse_encryption_from_ack(cmd);
+        let compression =
+            CompressionAlgorithm::from_str(&cmd.compression).unwrap_or(CompressionAlgorithm::None);
+        let encryption =
+            EncryptionAlgorithm::from_str(&cmd.encryption).unwrap_or(EncryptionAlgorithm::None);
 
         tracing::debug!(
             "[ClientCore] 收到 CONNECT_ACK，协商结果: format={:?}, compression={:?}, encryption={:?}",
@@ -834,37 +885,6 @@ impl ClientCore {
         Self::check_conflict_connections(cmd);
 
         Ok((format, compression, encryption))
-    }
-
-    /// 从 CONNECT_ACK 解析压缩算法
-    fn parse_compression_from_ack(
-        cmd: &crate::common::protocol::SystemCommand,
-    ) -> crate::common::compression::CompressionAlgorithm {
-        // 优先使用新字段
-        if !cmd.compression.is_empty() {
-            return crate::common::compression::CompressionAlgorithm::from_str(&cmd.compression)
-                .unwrap_or(crate::common::compression::CompressionAlgorithm::None);
-        }
-
-        // 兼容旧版本：从 metadata 中读取
-        cmd.metadata
-            .get("compression")
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-            .and_then(|s| crate::common::compression::CompressionAlgorithm::from_str(&s))
-            .unwrap_or(crate::common::compression::CompressionAlgorithm::None)
-    }
-
-    /// 从 CONNECT_ACK 解析加密方式
-    fn parse_encryption_from_ack(cmd: &crate::common::protocol::SystemCommand) -> Option<String> {
-        // 优先使用新字段
-        if !cmd.encryption.is_empty() {
-            return Some(cmd.encryption.clone());
-        }
-
-        // 兼容旧版本：从 metadata 中读取
-        cmd.metadata
-            .get("encryption")
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     }
 
     /// 检查冲突连接通知
@@ -882,6 +902,57 @@ impl ClientCore {
                     }
                 }
             }
+        }
+    }
+
+    /// 发送 NEGOTIATION_READY 命令
+    ///
+    /// 在收到 CONNECT_ACK 并更新 parser 后调用，通知服务端客户端已准备好按协商方式通信
+    async fn send_negotiation_ready(&self) -> Result<()> {
+        use crate::common::protocol::flare::core::commands::SystemCommand;
+        use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
+        use crate::common::protocol::{Reliability, frame_with_system_command};
+
+        // 创建 NEGOTIATION_READY 系统命令
+        let negotiation_ready_cmd = SystemCommand {
+            r#type: SysType::NegotiationReady as i32,
+            format: 0,                                  // 不需要
+            compression: String::new(),                 // 不需要
+            encryption: String::new(),                  // 不需要
+            message: String::new(),                     // 不需要
+            metadata: std::collections::HashMap::new(), // 不需要
+            data: vec![],                               // 不需要
+        };
+
+        let frame = frame_with_system_command(negotiation_ready_cmd, Reliability::AtLeastOnce);
+
+        // 使用 PRE_NEGOTIATION_PARSER 序列化 NEGOTIATION_READY
+        // 注意：NEGOTIATION_READY 必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
+        // 这样服务端和客户端都统一使用 PRE_NEGOTIATION_PARSER 处理，确保兼容性
+        // 服务端收到 NEGOTIATION_READY 后才会严格使用协商后的 parser（不允许 fallback）
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        let data = PRE_NEGOTIATION_PARSER.serialize(&frame)?;
+
+        // 通过 client_connection 发送
+        let client_conn_opt = {
+            if let Ok(conn_guard) = self.client_connection.lock() {
+                conn_guard.clone()
+            } else {
+                return Err(FlareError::connection_failed(
+                    "Client connection not available".to_string(),
+                ));
+            }
+        };
+
+        if let Some(client_conn) = client_conn_opt {
+            let mut conn = client_conn.lock().await;
+            conn.send(&data).await?;
+            tracing::debug!("[ClientCore] ✅ 已发送 NEGOTIATION_READY 命令");
+            Ok(())
+        } else {
+            Err(FlareError::connection_failed(
+                "Client connection not set".to_string(),
+            ))
         }
     }
 }
@@ -916,6 +987,7 @@ impl Clone for ClientCore {
             event_handler: self.event_handler.clone(), // 事件处理器可以共享
             client_connection: Arc::clone(&self.client_connection), // 共享连接引用
             pending_map: Arc::clone(&self.pending_map),
+            negotiation_completed: Arc::clone(&self.negotiation_completed), // 共享协商完成标志
         }
     }
 }

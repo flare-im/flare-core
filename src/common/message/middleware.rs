@@ -137,6 +137,7 @@ impl MessageMiddleware for MetricsMiddleware {
 /// 验证消息格式和内容
 pub struct ValidationMiddleware {
     name: String,
+    #[allow(clippy::type_complexity)]
     validator: Arc<dyn Fn(&Frame) -> Result<()> + Send + Sync>,
 }
 

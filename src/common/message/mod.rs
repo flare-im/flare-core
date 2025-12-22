@@ -15,7 +15,7 @@ pub mod processor;
 // 重新导出常用类型，方便使用
 pub use handler::{ArcMessageObserver, MessageEvent, MessageHandler, MessageObserver};
 pub use middleware::{LogLevel, LoggingMiddleware, MetricsMiddleware, ValidationMiddleware};
-pub use parser::MessageParser;
+pub use parser::{MessageParser, PRE_NEGOTIATION_PARSER};
 pub use pipeline::{
     ArcMessageMiddleware, ArcMessageProcessor, MessageContext, MessageMiddleware, MessagePipeline,
     MessageProcessor,

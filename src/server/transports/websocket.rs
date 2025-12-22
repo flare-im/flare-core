@@ -5,9 +5,9 @@
 use crate::common::error::Result;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
+use crate::server::transports::Server;
 use crate::server::transports::common::ServerConnectionHelper;
 use crate::server::transports::server_core::ServerCore;
-use crate::server::transports::{ConnectionHandler, Server};
 use crate::transport::connection::Connection;
 use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
@@ -23,20 +23,18 @@ use tracing::debug;
 pub struct WebSocketServer {
     config: ServerConfig,
     core: Arc<ServerCore>,
-    handler: Arc<dyn ConnectionHandler>,
     is_running: Arc<Mutex<bool>>,
 }
 
 impl WebSocketServer {
     /// 创建新的 WebSocket 服务端
-    pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Self {
-        Self::with_connection_manager(config, handler, None)
+    pub fn new(config: ServerConfig) -> Self {
+        Self::with_connection_manager(config, None)
     }
 
     /// 使用指定的连接管理器创建 WebSocket 服务端
     pub fn with_connection_manager(
         config: ServerConfig,
-        handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<ConnectionManager>>,
     ) -> Self {
         let core = Arc::new(ServerCore::new(&config, connection_manager));
@@ -44,21 +42,15 @@ impl WebSocketServer {
         Self {
             config,
             core,
-            handler,
             is_running: Arc::new(Mutex::new(false)),
         }
     }
 
     /// 使用指定的 ServerCore 创建 WebSocket 服务端（用于共享 ServerCore）
-    pub fn with_shared_core(
-        config: ServerConfig,
-        handler: Arc<dyn ConnectionHandler>,
-        core: Arc<ServerCore>,
-    ) -> Self {
+    pub fn with_shared_core(config: ServerConfig, core: Arc<ServerCore>) -> Self {
         Self {
             config,
             core,
-            handler,
             is_running: Arc::new(Mutex::new(false)),
         }
     }
@@ -85,7 +77,6 @@ impl Server for WebSocketServer {
         self.core.start_heartbeat(&self.config);
 
         // 准备共享资源
-        let handler = Arc::clone(&self.handler);
         let manager = Arc::clone(&self.core.connection_manager);
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
@@ -97,7 +88,6 @@ impl Server for WebSocketServer {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
                         debug!("[WebSocketServer] 收到新连接");
-                        let handler_clone = Arc::clone(&handler);
                         let manager_clone = Arc::clone(&manager);
                         let config_clone = config.clone();
                         let core_clone = Arc::clone(&core);
@@ -105,7 +95,6 @@ impl Server for WebSocketServer {
                         tokio::spawn(async move {
                             handle_websocket_connection(
                                 stream,
-                                handler_clone,
                                 manager_clone,
                                 config_clone,
                                 core_clone,
@@ -143,7 +132,6 @@ impl Server for WebSocketServer {
 /// 处理 WebSocket 连接（内部函数）
 async fn handle_websocket_connection(
     stream: TcpStream,
-    handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
     config: ServerConfig,
     core: Arc<ServerCore>,
@@ -162,24 +150,14 @@ async fn handle_websocket_connection(
     let connection: Box<dyn Connection> = Box::new(transport);
 
     // 使用公共模块设置连接
-    let connection_id = match ServerConnectionHelper::setup_new_connection(
+    if let Err(e) = ServerConnectionHelper::setup_new_connection(
         connection,
         manager.clone(),
-        handler.clone(),
         &config,
         core.clone(),
     )
     .await
     {
-        Ok(id) => id,
-        Err(e) => {
-            debug!("[WebSocketServer] 设置连接失败: {}", e);
-            return;
-        }
-    };
-
-    // 通知连接建立（注意：CONNECT_ACK 将在收到 CONNECT 消息后发送）
-    if let Err(e) = handler.on_connect(&connection_id).await {
-        debug!("[WebSocketServer] handler.on_connect 错误: {}", e);
+        debug!("[WebSocketServer] 设置连接失败: {}", e);
     }
 }

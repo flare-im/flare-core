@@ -128,13 +128,14 @@ pub type ArcMessageProcessor = Arc<dyn MessageProcessor>;
 /// 1. 原始数据 → 解析（自动解压、反序列化）→ Frame
 /// 2. Frame → 中间件（before）→ 处理器 → 中间件（after）→ 响应 Frame
 /// 3. 响应 Frame → 序列化（压缩、序列化）→ 原始数据
+#[derive(Clone)]
 pub struct MessagePipeline {
     /// 中间件列表（按优先级排序）
     middlewares: Arc<RwLock<Vec<ArcMessageMiddleware>>>,
     /// 处理器列表
     processors: Arc<RwLock<Vec<ArcMessageProcessor>>>,
-    /// 消息解析器
-    parser: MessageParser,
+    /// 消息解析器（使用 Arc 以便在运行时更新）
+    parser: Arc<tokio::sync::Mutex<MessageParser>>,
 }
 
 impl MessagePipeline {
@@ -143,8 +144,14 @@ impl MessagePipeline {
         Self {
             middlewares: Arc::new(RwLock::new(Vec::new())),
             processors: Arc::new(RwLock::new(Vec::new())),
-            parser,
+            parser: Arc::new(tokio::sync::Mutex::new(parser)),
         }
+    }
+
+    /// 更新消息解析器（协商完成后调用）
+    pub async fn update_parser(&self, parser: MessageParser) {
+        let mut p = self.parser.lock().await;
+        *p = parser;
     }
 
     /// 添加中间件
@@ -189,16 +196,19 @@ impl MessagePipeline {
         connection_id: Option<&str>,
     ) -> Result<Option<Vec<u8>>> {
         // 1. 解析消息（自动解压、反序列化）
-        let frame = self.parser.parse(data).map_err(|e| {
+        let parser = self.parser.lock().await;
+        let frame = parser.parse(data).map_err(|e| {
             FlareError::deserialization_error(format!("Failed to parse message: {}", e))
         })?;
+        drop(parser);
 
         // 2. 处理 Frame
         let response = self.process_frame(&frame, connection_id).await?;
 
         // 3. 序列化响应（如果有）
         if let Some(response_frame) = response {
-            let response_data = self.parser.serialize(&response_frame).map_err(|e| {
+            let parser = self.parser.lock().await;
+            let response_data = parser.serialize(&response_frame).map_err(|e| {
                 FlareError::encoding_error(format!("Failed to serialize response: {}", e))
             })?;
             Ok(Some(response_data))
@@ -223,11 +233,13 @@ impl MessagePipeline {
         connection_id: Option<&str>,
     ) -> Result<Option<Frame>> {
         // 创建消息上下文
+        let parser = self.parser.lock().await;
         let ctx = MessageContext::new(
             frame.clone(),
             connection_id.map(|s| s.to_string()),
-            self.parser.clone(),
+            parser.clone(),
         );
+        drop(parser);
 
         // 1. 执行中间件（before）
         let middlewares = self.middlewares.read().await;

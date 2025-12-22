@@ -1,18 +1,24 @@
-//! 简单模式客户端构建器（毛坯房）
+//! 简单模式客户端构建器
 //!
-//! 提供最小实现，没有任何"装修"，适合快速原型开发和小型应用
+//! 提供最小实现，使用闭包定义消息处理逻辑，适合快速原型开发和学习。
 //!
 //! ## 特点
-//! - ✅ 最小依赖：只提供基本的消息处理（闭包）
-//! - ✅ 零配置：使用默认配置即可运行
-//! - ✅ 轻量级：不包含中间件、管道等高级功能
-//! - ✅ 快速上手：几行代码即可启动客户端
+//! - ✅ **使用闭包处理消息和事件**：无需实现 trait，直接使用闭包
+//! - ✅ **最小依赖**：只提供基本的消息处理功能
+//! - ✅ **零配置**：使用默认配置即可运行
+//! - ✅ **轻量级**：不包含中间件、管道等高级功能
+//! - ✅ **快速上手**：几行代码即可启动客户端
 //!
 //! ## 适用场景
 //! - 快速原型开发
-//! - 小型应用
 //! - 学习和测试
+//! - 小型应用
 //! - 需要完全控制消息处理流程的场景
+//!
+//! ## 架构说明
+//!
+//! 简单模式基于 `HybridClient`，共享所有核心能力（多协议支持、序列化协商、心跳检测等），
+//! 但消息处理逻辑通过闭包定义，不依赖高级抽象。
 
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use crate::client::{Client, HybridClient};
@@ -41,6 +47,7 @@ impl ConnectionObserver for SimpleClientObserver {
                 if let Ok(frame) = crate::common::MessageParser::new(
                     crate::common::protocol::SerializationFormat::Protobuf,
                     crate::common::compression::CompressionAlgorithm::None,
+                    crate::common::encryption::EncryptionAlgorithm::None,
                 )
                 .parse(data)
                 {
@@ -116,7 +123,17 @@ impl SimpleClient {
 
 /// 简单模式客户端构建器
 ///
-/// 使用闭包定义消息处理逻辑
+/// 提供最小实现，使用闭包定义消息处理逻辑，适合快速原型开发和学习。
+///
+/// ## 设计原则
+///
+/// - **公共逻辑统一处理**：基于 `HybridClient`，共享所有核心能力（多协议、序列化协商、心跳等）
+/// - **最小抽象**：消息处理通过闭包定义，不依赖 trait 实现
+/// - **零配置**：使用默认配置即可运行
+///
+/// ## 使用方式
+///
+/// 使用闭包定义消息和事件处理逻辑，无需实现 trait。
 pub struct ClientBuilder {
     base: BaseClientBuilderConfig,
     message_handler: Option<ClientMessageHandler>,

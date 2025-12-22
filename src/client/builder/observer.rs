@@ -1,17 +1,22 @@
-//! 观察者模式客户端构建器（基本装修）
+//! 观察者模式客户端构建器
 //!
-//! 提供基本实现，用户可以自定义观察器和处理器
+//! 提供基本功能实现，使用 `ConnectionObserver` trait 处理连接事件和消息。
 //!
 //! ## 特点
-//! - ✅ 自定义观察器：实现 `ConnectionObserver` trait 自定义消息处理
-//! - ✅ 事件处理：支持自定义事件处理器
-//! - ✅ 消息路由：支持消息路由功能
-//! - ✅ 灵活扩展：可以添加自定义的观察器和处理器
+//! - ✅ **实现 `ConnectionObserver` trait**：自定义消息和事件处理
+//! - ✅ **事件处理**：支持自定义事件处理器
+//! - ✅ **消息路由**：支持消息路由功能
+//! - ✅ **灵活扩展**：可以添加自定义的观察器和处理器
 //!
 //! ## 适用场景
-//! - 需要自定义消息处理逻辑
+//! - 需要自定义消息处理逻辑但不需要完整功能集
 //! - 需要事件驱动的架构
 //! - 需要消息路由功能
+//!
+//! ## 架构说明
+//!
+//! 观察者模式基于 `HybridClient`，使用 `ConnectionObserver` trait 处理所有连接事件。
+//! 观察者可以处理消息、连接建立、断开、错误等事件，提供灵活的事件驱动架构。
 
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use crate::client::{Client, HybridClient};
@@ -22,7 +27,17 @@ use std::sync::Arc;
 
 /// 观察者模式客户端构建器
 ///
-/// 使用实现了 ConnectionObserver trait 的观察者
+/// 提供基本功能实现，使用 `ConnectionObserver` trait 处理连接事件和消息。
+///
+/// ## 设计原则
+///
+/// - **公共逻辑统一处理**：基于 `HybridClient`，共享所有核心能力
+/// - **事件驱动**：使用 `ConnectionObserver` trait 处理所有连接事件
+/// - **灵活扩展**：支持自定义观察器和事件处理器
+///
+/// ## 使用方式
+///
+/// 用户只需要实现 `ConnectionObserver` trait，处理消息、连接建立、断开、错误等事件。
 pub struct ObserverClientBuilder {
     base: BaseClientBuilderConfig,
     observer: Option<Arc<dyn ConnectionObserver>>,

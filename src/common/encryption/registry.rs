@@ -25,12 +25,18 @@ pub struct EncryptionRegistry {
     encryptors: Arc<RwLock<HashMap<String, Arc<dyn Encryptor>>>>,
 }
 
-impl EncryptionRegistry {
-    /// 创建新的注册表
-    pub fn new() -> Self {
+impl Default for EncryptionRegistry {
+    fn default() -> Self {
         Self {
             encryptors: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl EncryptionRegistry {
+    /// 创建新的注册表
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 注册内置加密器
@@ -110,7 +116,7 @@ impl EncryptionRegistry {
 impl EncryptionRegistry {
     /// 获取全局注册表实例
     pub fn global() -> &'static EncryptionRegistry {
-        &*ENCRYPTION_REGISTRY
+        &ENCRYPTION_REGISTRY
     }
 }
 
@@ -171,7 +177,25 @@ impl EncryptionUtil {
     /// EncryptionUtil::register_custom(Arc::new(MyEncryptor));
     /// ```
     pub fn register_custom(encryptor: Arc<dyn Encryptor>) {
-        EncryptionRegistry::global().register(encryptor.name(), encryptor);
+        let name = encryptor.name();
+        // 如果已注册同名加密器，记录警告但不覆盖（避免密钥不一致问题）
+        if EncryptionUtil::is_registered(name) {
+            tracing::warn!(
+                "Encryptor '{}' is already registered. Skipping registration to avoid key mismatch.",
+                name
+            );
+            return;
+        }
+        EncryptionRegistry::global().register(name, encryptor);
+        tracing::debug!("Registered encryptor: {}", name);
+    }
+
+    /// 获取所有已注册的加密器名称列表
+    ///
+    /// # 返回
+    /// 已注册的加密器名称列表
+    pub fn list_registered() -> Vec<String> {
+        EncryptionRegistry::global().list_registered()
     }
 }
 

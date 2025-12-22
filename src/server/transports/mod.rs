@@ -54,11 +54,11 @@ pub trait ConnectionHandler: Send + Sync {
 /// # 示例
 ///
 /// ```rust
-/// use flare_core::server::{Server, ConnectionHandler};
+/// use flare_core::server::Server;
 /// use flare_core::common::error::Result;
 ///
 /// struct MyCustomServer {
-///     handler: Arc<dyn ConnectionHandler>,
+///     // 自定义服务器实现
 /// }
 ///
 /// #[async_trait]

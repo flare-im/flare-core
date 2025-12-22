@@ -51,7 +51,11 @@ impl ClientConnectionManager {
     /// - `client`: 客户端实例（可以是 WebSocketClient、QUICClient 等）
     /// - `config`: 客户端配置
     pub fn new(client: Box<dyn Client>, config: ClientConfig) -> Self {
-        let parser = MessageParser::new(config.serialization_format, config.compression);
+        let parser = MessageParser::new(
+            config.serialization_format,
+            config.compression.clone(),
+            crate::common::encryption::EncryptionAlgorithm::None,
+        );
 
         Self {
             config,

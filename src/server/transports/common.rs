@@ -6,7 +6,7 @@ use crate::common::generate_id;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
 use crate::server::handle::ServerHandle;
-use crate::server::transports::{ConnectionHandler, server_core::ServerCore};
+use crate::server::transports::server_core::ServerCore;
 use crate::transport::connection::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -21,7 +21,6 @@ impl ServerConnectionHelper {
     pub async fn setup_new_connection(
         connection: Box<dyn Connection>,
         manager: Arc<ConnectionManager>,
-        handler: Arc<dyn ConnectionHandler>,
         config: &ServerConfig,
         core: Arc<ServerCore>,
     ) -> Result<String, crate::common::error::FlareError> {
@@ -49,11 +48,7 @@ impl ServerConnectionHelper {
             })?;
 
         // 创建观察者
-        let observer = core.create_observer_with_core(
-            Arc::clone(&handler),
-            connection_id.clone(),
-            Arc::clone(&core),
-        );
+        let observer = core.create_observer_with_core(connection_id.clone(), Arc::clone(&core));
 
         // 添加观察者到连接
         if let Some((conn, _)) = manager.get_connection(&connection_id) {

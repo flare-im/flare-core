@@ -77,7 +77,7 @@ impl HeartbeatDetector {
     /// 停止心跳检测
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
+            drop(tx.send(()));
         }
     }
 }

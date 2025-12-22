@@ -4,6 +4,7 @@
 
 use crate::common::compression::CompressionAlgorithm;
 use crate::common::device::DeviceInfo;
+use crate::common::encryption::EncryptionAlgorithm;
 use crate::common::error::Result;
 use crate::common::protocol::flare::core::commands::system_command::SerializationFormat;
 use crate::common::protocol::{Frame, SystemCommand};
@@ -16,6 +17,8 @@ pub struct NegotiationResult {
     pub serialization_format: SerializationFormat,
     /// 压缩算法（客户端请求的压缩方式）
     pub compression: CompressionAlgorithm,
+    /// 加密方式
+    pub encryption: EncryptionAlgorithm,
     /// 是否强制指定格式（客户端强制模式，服务端必须使用客户端指定的格式）
     pub is_forced: bool,
     /// 设备信息（如果客户端提供）
@@ -24,12 +27,12 @@ pub struct NegotiationResult {
     pub user_id: Option<String>,
 }
 
-impl NegotiationResult {
-    /// 创建默认协商结果（JSON + 不压缩）
-    pub fn default() -> Self {
+impl Default for NegotiationResult {
+    fn default() -> Self {
         Self {
             serialization_format: SerializationFormat::Json,
             compression: CompressionAlgorithm::None,
+            encryption: EncryptionAlgorithm::None,
             is_forced: false,
             device_info: None,
             user_id: None,
@@ -55,8 +58,6 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
         {
             use crate::common::protocol::flare::core::commands::system_command::Type as SystemType;
             if sys_cmd.r#type == SystemType::Connect as i32 {
-                // 解析序列化格式（使用 TryFrom 替代已弃用的 from_i32）
-                // 如果客户端未指定格式（format=0或Unspecified），使用默认JSON
                 use std::convert::TryFrom;
                 result.serialization_format = if sys_cmd.format == 0 {
                     // 客户端未指定格式，使用默认JSON（服务端会在协商时决定最终格式）
@@ -71,6 +72,14 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
                     if let Ok(compression_str) = String::from_utf8(compression_bytes.clone()) {
                         result.compression = CompressionAlgorithm::from_str(&compression_str)
                             .unwrap_or(CompressionAlgorithm::None);
+                    }
+                }
+
+                // 解析加密方式
+                if let Some(encryption_bytes) = sys_cmd.metadata.get("encryption") {
+                    if let Ok(encryption_str) = String::from_utf8(encryption_bytes.clone()) {
+                        result.encryption = EncryptionAlgorithm::from_str(&encryption_str)
+                            .unwrap_or(EncryptionAlgorithm::None)
                     }
                 }
 
@@ -175,30 +184,38 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
 pub fn create_connect_ack(
     format: SerializationFormat,
     compression: CompressionAlgorithm,
-    encryption: Option<&str>,
+    encryption: EncryptionAlgorithm,
     additional_metadata: Option<HashMap<String, Vec<u8>>>,
 ) -> SystemCommand {
     // 验证压缩算法是否已注册
     let mut compression_str = compression.as_str();
-    if !crate::common::compression::CompressionUtil::is_registered(compression_str) {
+    if !crate::common::compression::CompressionUtil::is_registered(&compression_str) {
         tracing::warn!(
             "[Negotiation] 压缩算法 '{}' 未注册，将使用 'none'",
             compression_str
         );
         // 如果未注册，回退到 none
-        compression_str = "none";
+        compression_str = "none".to_string();
     }
 
-    // 验证加密方式是否已注册（如果提供了）
-    let mut encryption_str = encryption.unwrap_or("none");
-    if encryption_str != "none"
-        && !crate::common::encryption::EncryptionUtil::is_registered(encryption_str)
-    {
-        tracing::warn!(
-            "[Negotiation] 加密方式 '{}' 未注册，将使用 'none'",
-            encryption_str
-        );
-        encryption_str = "none";
+    // 验证加密算法是否已注册
+    let mut encryption_str = encryption.as_str();
+    if encryption != EncryptionAlgorithm::None {
+        if !crate::common::encryption::EncryptionUtil::is_registered(&encryption_str) {
+            let registered = crate::common::encryption::EncryptionUtil::list_registered();
+            tracing::warn!(
+                "[Negotiation] 加密算法 '{}' 未注册，将使用 'none'。已注册的加密器: {:?}",
+                encryption_str,
+                registered
+            );
+            // 如果未注册，回退到 none
+            encryption_str = "none".to_string();
+        } else {
+            tracing::debug!(
+                "[Negotiation] 加密算法 '{}' 已注册，可以使用",
+                encryption_str
+            );
+        }
     }
 
     let mut metadata = HashMap::new();
@@ -212,8 +229,8 @@ pub fn create_connect_ack(
 
     crate::common::protocol::connect_ack(
         format,
-        Some(compression_str),
-        Some(encryption_str),
+        Some(compression_str.as_str()),
+        Some(encryption_str.as_str()),
         metadata,
     )
 }

@@ -43,13 +43,13 @@ pub trait MessageObserver: Send + Sync {
                 Some(crate::common::protocol::flare::core::commands::command::Type::System(
                     sys_cmd,
                 )) => {
-                    self.handle_system_command(&sys_cmd, frame, connection_id)
+                    self.handle_system_command(sys_cmd, frame, connection_id)
                         .await
                 }
                 Some(crate::common::protocol::flare::core::commands::command::Type::Message(
                     msg_cmd,
                 )) => {
-                    self.handle_message_command(&msg_cmd, frame, connection_id)
+                    self.handle_message_command(msg_cmd, frame, connection_id)
                         .await
                 }
                 Some(
@@ -57,13 +57,13 @@ pub trait MessageObserver: Send + Sync {
                         notif_cmd,
                     ),
                 ) => {
-                    self.handle_notification_command(&notif_cmd, frame, connection_id)
+                    self.handle_notification_command(notif_cmd, frame, connection_id)
                         .await
                 }
                 Some(crate::common::protocol::flare::core::commands::command::Type::Custom(
                     custom_cmd,
                 )) => {
-                    self.handle_custom_command(&custom_cmd, frame, connection_id)
+                    self.handle_custom_command(custom_cmd, frame, connection_id)
                         .await
                 }
                 None => Ok(None),

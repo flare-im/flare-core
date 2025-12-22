@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// 使用闭包处理消息，适合简单场景
 pub struct FunctionProcessor {
     name: String,
+    #[allow(clippy::type_complexity)]
     handler: Arc<
         dyn Fn(
                 &MessageContext,
@@ -53,6 +54,7 @@ impl MessageProcessor for FunctionProcessor {
 /// 将消息委托给其他处理器（如 ConnectionHandler）
 pub struct DelegateProcessor {
     name: String,
+    #[allow(clippy::type_complexity)]
     handler: Arc<
         dyn Fn(
                 &Frame,

@@ -6,29 +6,92 @@ use super::traits::Encryptor;
 use crate::common::error::{FlareError, Result};
 
 /// 加密算法类型枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// 支持内置算法和自定义算法扩展
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EncryptionAlgorithm {
     /// 不使用加密
     None,
     /// AES-256-GCM 加密
     Aes256Gcm,
+    /// 自定义加密算法（通过字符串标识符）
+    ///
+    /// 使用此变体可以注册和使用自定义加密算法
+    /// 自定义算法必须通过 `EncryptionUtil::register_custom` 注册
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::encryption::{EncryptionAlgorithm, EncryptionUtil, Encryptor};
+    /// use std::sync::Arc;
+    ///
+    /// // 注册自定义加密器
+    /// struct MyCustomEncryptor;
+    /// impl Encryptor for MyCustomEncryptor { /* ... */ }
+    ///
+    /// EncryptionUtil::register_custom(Arc::new(MyCustomEncryptor));
+    ///
+    /// // 使用自定义算法
+    /// let algo = EncryptionAlgorithm::Custom("my_custom".to_string());
+    /// ```
+    Custom(String),
 }
 
 impl EncryptionAlgorithm {
     /// 从字符串转换为加密算法
+    ///
+    /// 如果字符串匹配内置算法，返回对应的枚举值
+    /// 否则返回 `Custom(String)` 变体
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::encryption::EncryptionAlgorithm;
+    ///
+    /// assert_eq!(EncryptionAlgorithm::from_str("none"), Some(EncryptionAlgorithm::None));
+    /// assert_eq!(EncryptionAlgorithm::from_str("aes256gcm"), Some(EncryptionAlgorithm::Aes256Gcm));
+    /// assert_eq!(
+    ///     EncryptionAlgorithm::from_str("my_custom"),
+    ///     Some(EncryptionAlgorithm::Custom("my_custom".to_string()))
+    /// );
+    /// ```
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "none" | "" => Some(EncryptionAlgorithm::None),
             "aes256gcm" | "aes-256-gcm" => Some(EncryptionAlgorithm::Aes256Gcm),
-            _ => None,
+            custom => Some(EncryptionAlgorithm::Custom(custom.to_string())),
         }
     }
 
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
+    /// 转换为字符串标识符
+    ///
+    /// 返回算法的字符串表示，可用于注册表查找
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::encryption::EncryptionAlgorithm;
+    ///
+    /// assert_eq!(EncryptionAlgorithm::None.as_str(), "none");
+    /// assert_eq!(EncryptionAlgorithm::Aes256Gcm.as_str(), "aes256gcm");
+    /// assert_eq!(EncryptionAlgorithm::Custom("my_custom".to_string()).as_str(), "my_custom");
+    /// ```
+    pub fn as_str(&self) -> String {
         match self {
-            EncryptionAlgorithm::None => "none",
-            EncryptionAlgorithm::Aes256Gcm => "aes256gcm",
+            EncryptionAlgorithm::None => "none".to_string(),
+            EncryptionAlgorithm::Aes256Gcm => "aes256gcm".to_string(),
+            EncryptionAlgorithm::Custom(name) => name.clone(),
+        }
+    }
+
+    /// 检查是否是自定义算法
+    pub fn is_custom(&self) -> bool {
+        matches!(self, EncryptionAlgorithm::Custom(_))
+    }
+
+    /// 获取自定义算法名称（如果是自定义算法）
+    pub fn custom_name(&self) -> Option<&str> {
+        match self {
+            EncryptionAlgorithm::Custom(name) => Some(name),
+            _ => None,
         }
     }
 }
@@ -57,7 +120,7 @@ impl Encryptor for NoEncryptor {
 /// AES-256-GCM 加密器
 ///
 /// 使用 AES-256-GCM 算法进行加密，每次加密使用随机生成的 12 字节 nonce
-/// 加密后的数据格式: [nonce (12 bytes)][ciphertext]
+/// 加密后的数据格式: \[nonce (12 bytes)\]\[ciphertext\]
 ///
 /// # 安全说明
 /// - 每次加密都会生成新的随机 nonce，确保相同明文产生不同密文
@@ -117,7 +180,7 @@ impl Encryptor for Aes256GcmEncryptor {
             Aes256Gcm as AesGcm,
             aead::{Aead, AeadCore, KeyInit, OsRng},
         };
-
+        tracing::debug!("Encrypting data: {:?}", data);
         // 创建加密器
         let cipher = AesGcm::new_from_slice(&self.key).map_err(|e| {
             FlareError::encoding_error(format!("Failed to create AES-GCM cipher: {}", e))
@@ -148,6 +211,7 @@ impl Encryptor for Aes256GcmEncryptor {
             aead::{Aead, KeyInit},
         };
 
+        tracing::debug!("Decrypting data: {:?}", data);
         // 检查数据长度（至少需要 12 字节 nonce）
         if data.len() < 12 {
             return Err(FlareError::deserialization_error(format!(

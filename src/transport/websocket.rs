@@ -31,7 +31,7 @@ impl WebSocketTransport {
         Self::from_stream(stream)
     }
 
-    /// 从 WebSocketStream<TcpStream> 创建（在没有 TLS 时使用）
+    /// 从 `WebSocketStream<TcpStream>` 创建（在没有 TLS 时使用）
     ///
     /// 使用单独的 Plain 类型，避免 unsafe transmute
     pub fn from_tcp_stream(stream: WebSocketStream<TcpStream>) -> Self {
@@ -272,6 +272,7 @@ impl WebSocketTransport {
     }
 
     /// 发送 WebSocket 协议层的 PONG 响应 (TLS)
+    #[allow(clippy::type_complexity)]
     async fn send_pong_response_tls(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
         data: &[u8],
@@ -310,6 +311,7 @@ impl WebSocketTransport {
     }
 
     /// 发送应用层的 PONG Frame 消息 (TLS)
+    #[allow(clippy::type_complexity)]
     async fn send_pong_frame_tls(
         sink: &Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
     ) -> Result<()> {

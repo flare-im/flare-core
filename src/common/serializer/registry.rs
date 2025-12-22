@@ -26,12 +26,18 @@ pub struct SerializationRegistry {
     serializers: Arc<RwLock<HashMap<String, Arc<dyn Serializer>>>>,
 }
 
-impl SerializationRegistry {
-    /// 创建新的注册表
-    pub fn new() -> Self {
+impl Default for SerializationRegistry {
+    fn default() -> Self {
         Self {
             serializers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl SerializationRegistry {
+    /// 创建新的注册表
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 注册内置序列化器
@@ -75,7 +81,7 @@ impl SerializationRegistry {
         self.serializers
             .read()
             .ok()
-            .and_then(|serializers| serializers.get(name).map(|s| Arc::clone(s)))
+            .and_then(|serializers| serializers.get(name).map(Arc::clone))
     }
 
     /// 根据格式类型查找序列化器
@@ -122,6 +128,11 @@ impl SerializationUtil {
     /// 根据名称获取序列化器
     pub fn get_serializer_by_name(name: &str) -> Option<Arc<dyn Serializer>> {
         SerializationRegistry::global().find(name)
+    }
+
+    /// 根据名称查找序列化器（便捷方法，别名）
+    pub fn find(name: &str) -> Option<Arc<dyn Serializer>> {
+        Self::get_serializer_by_name(name)
     }
 
     /// 尝试自动检测序列化格式

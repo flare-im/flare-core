@@ -1,679 +1,472 @@
-//! 默认服务端消息观察者
+//! 服务端连接观察者实现
 //!
-//! 提供通用的消息观察者实现，处理基础业务逻辑（ping/pong、错误、断开等）
+//! 将 `ConnectionHandler` 适配为 `ConnectionObserver`，处理连接事件和消息
 
 use crate::common::MessageParser;
-use crate::common::error::Result;
-use crate::common::protocol::{Frame, Reliability, frame_with_system_command, pong};
-use crate::server::connection::{ConnectionManager, ConnectionManagerTrait};
-use crate::server::events::handler::ServerEventHandler;
-use crate::server::transports::ConnectionHandler;
-use crate::server::transports::server_core::ServerCore;
+use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+use crate::server::connection::ConnectionManager;
+use crate::server::events::ServerMessageWrapper;
 use crate::transport::events::{ConnectionEvent, ConnectionObserver};
-use std::convert::TryFrom;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, warn};
 
-/// 默认服务端消息观察者
+/// 连接状态信息（用于消息处理）
+struct ConnectionState {
+    info: crate::server::connection::ConnectionInfo,
+    negotiation_completed: bool,
+    negotiation_confirmed: bool,
+    cached_parser: Option<Arc<MessageParser>>,
+    cached_pipeline: Option<Arc<crate::common::message::pipeline::MessagePipeline>>,
+}
+
+/// ConnectionHandler 到 ConnectionObserver 的适配器
 ///
-/// 处理基础业务逻辑：
-/// - 系统命令（CONNECT、PING、PONG）
-/// - 消息命令（路由到 ServerEventHandler）
-/// - 通知命令（路由到 ServerEventHandler）
-/// - 连接事件（断开、错误）
-pub struct DefaultServerMessageObserver {
-    /// 连接处理器（用于处理业务逻辑）
-    handler: Arc<dyn ConnectionHandler>,
-    /// 连接管理器
-    manager: Arc<ConnectionManager>,
-    /// 消息解析器（用于协商前的消息解析）
-    parser: MessageParser,
+/// 将实现了 `ConnectionHandler` 的 `ServerMessageWrapper` 适配为 `ConnectionObserver`
+/// 这样可以在需要 `ConnectionObserver` 的地方使用 `ServerMessageWrapper`
+///
+/// 注意：每个连接都有自己的协商结果，parser 应该根据连接信息动态创建，而不是固定存储
+pub struct ConnectionHandlerObserverAdapter {
+    /// 内部的 ConnectionHandler（ServerMessageWrapper）
+    handler: Arc<ServerMessageWrapper>,
     /// 连接 ID
     connection_id: String,
-    /// ServerCore（用于处理协商等）
-    core: Arc<ServerCore>,
-    /// 设备管理器（用于连接断开时清理设备）
-    device_manager: Option<Arc<crate::server::device::DeviceManager>>,
-    /// 事件处理器（可选，用于细化的命令处理）
-    event_handler: Option<Arc<dyn ServerEventHandler>>,
+    /// 连接管理器（用于查询连接信息，获取协商结果）
+    connection_manager: Arc<ConnectionManager>,
+    /// ServerCore 引用（用于处理 CONNECT 消息）
+    server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
 }
 
-impl Clone for DefaultServerMessageObserver {
-    fn clone(&self) -> Self {
-        Self {
-            handler: Arc::clone(&self.handler),
-            manager: Arc::clone(&self.manager),
-            parser: self.parser.clone(),
-            connection_id: self.connection_id.clone(),
-            core: Arc::clone(&self.core),
-            device_manager: self.device_manager.clone(),
-            event_handler: self.event_handler.clone(),
-        }
-    }
-}
-
-impl DefaultServerMessageObserver {
-    /// 创建新的默认观察者
+impl ConnectionHandlerObserverAdapter {
+    /// 创建适配器
     pub fn new(
-        handler: Arc<dyn ConnectionHandler>,
-        manager: Arc<ConnectionManager>,
-        parser: MessageParser,
+        handler: Arc<ServerMessageWrapper>,
         connection_id: String,
-        core: Arc<ServerCore>,
-        device_manager: Option<Arc<crate::server::device::DeviceManager>>,
-        event_handler: Option<Arc<dyn ServerEventHandler>>,
+        connection_manager: Arc<ConnectionManager>,
+        server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
     ) -> Self {
         Self {
             handler,
-            manager,
-            parser,
             connection_id,
-            core,
-            device_manager,
-            event_handler,
+            connection_manager,
+            server_core,
         }
     }
 
-    /// 处理系统命令
-    pub async fn handle_system_command(
-        &self,
-        frame: &Frame,
-        sys_type: i32,
-        connection_id: &str,
-    ) -> Result<()> {
-        use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
-
-        match SysType::try_from(sys_type) {
-            Ok(SysType::Connect) => {
-                // CONNECT 消息由 ServerCore 统一处理
-                let manager_trait = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                if let Some((conn, _)) = manager_trait.get_connection(connection_id).await {
-                    if let Err(e) = self
-                        .core
-                        .handle_connect_complete(
-                            frame,
-                            connection_id,
-                            conn,
-                            Arc::clone(&self.handler),
-                        )
-                        .await
-                    {
-                        error!("[DefaultObserver] 处理 CONNECT 消息失败: {}", e);
-                    }
-                } else {
-                    error!("[DefaultObserver] 连接不存在: {}", connection_id);
-                }
-            }
-            Ok(SysType::Ping) => {
-                // 处理 PING：回复 PONG 并更新连接活跃时间
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = connection_id.to_string();
-
-                // 更新连接活跃时间
-                let manager_update = Arc::clone(&manager);
-                let conn_id_update = conn_id.clone();
-                tokio::spawn(async move {
-                    let _ = manager_update
-                        .update_connection_active(&conn_id_update)
-                        .await;
-                });
-
-                // 如果有自定义事件处理器，先调用它
-                let parser_clone = self.parser.clone();
-                if let Some(ref event_handler) = self.event_handler {
-                    if let Ok(Some(custom_response)) =
-                        event_handler.handle_ping(frame, connection_id).await
-                    {
-                        // 使用自定义回复
-                        let manager_get = Arc::clone(&manager);
-                        let parser = parser_clone.clone();
-                        tokio::spawn(async move {
-                            if let Some((conn, _)) = manager_get.get_connection(&conn_id).await {
-                                if let Ok(data) = parser.serialize(&custom_response) {
-                                    let conn_clone = Arc::clone(&conn);
-                                    let mut c = conn_clone.lock().await;
-                                    let _ = c.send(&data).await;
-                                }
-                            }
-                        });
-                        return Ok(());
-                    }
-                }
-
-                // 默认处理：回复 PONG
-                let pong_cmd = pong();
-                let pong_frame = frame_with_system_command(pong_cmd, Reliability::AtLeastOnce);
-                if let Ok(pong_data) = parser_clone.serialize(&pong_frame) {
-                    let manager_get = Arc::clone(&manager);
-                    tokio::spawn(async move {
-                        if let Some((conn, _)) = manager_get.get_connection(&conn_id).await {
-                            let conn_clone = Arc::clone(&conn);
-                            let mut c = conn_clone.lock().await;
-                            let _ = c.send(&pong_data).await;
-                        }
-                    });
-                }
-            }
-            Ok(SysType::Pong) => {
-                // 处理 PONG：更新连接活跃时间
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = connection_id.to_string();
-
-                // 如果有自定义事件处理器，调用它
-                if let Some(ref event_handler) = self.event_handler {
-                    let _ = event_handler.handle_pong(frame, connection_id).await;
-                }
-
-                tokio::spawn(async move {
-                    let _ = manager.update_connection_active(&conn_id).await;
-                });
-            }
-            Ok(SysType::Event) => {
-                // 将 System::Event 交由 ConnectionHandler 处理（与消息/通知同构）
-                let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager);
-                let parser = self.parser.clone();
-                let conn_id = connection_id.to_string();
-                let frame_clone = frame.clone();
-
-                // 更新连接活跃时间
-                let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id_update = conn_id.clone();
-                tokio::spawn(async move {
-                    let _ = manager_update
-                        .update_connection_active(&conn_id_update)
-                        .await;
-                });
-
-                tokio::spawn(async move {
-                    if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
-                        // 发送回复（如果有）
-                        let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                        if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                            if let Ok(data) = parser.serialize(&response) {
-                                let conn_clone = Arc::clone(&conn);
-                                let mut c = conn_clone.lock().await;
-                                let _ = c.send(&data).await;
-                            }
-                        }
-                    }
-                });
-            }
-            _ => {
-                debug!("[DefaultObserver] 未处理的系统命令类型: {}", sys_type);
-            }
+    /// 处理消息事件
+    async fn handle_message_event(
+        handler: &Arc<ServerMessageWrapper>,
+        data: Vec<u8>,
+        conn_id: Arc<str>,
+        manager: Arc<ConnectionManager>,
+        server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
+    ) {
+        // **关键修复**：在处理消息时立即更新连接活跃时间，防止连接被心跳检测器清理
+        // 这必须在处理消息之前更新，因为消息处理可能耗时较长
+        let manager_trait =
+            Arc::clone(&manager) as Arc<dyn crate::server::connection::ConnectionManagerTrait>;
+        let conn_id_clone = Arc::clone(&conn_id);
+        if let Err(e) = manager_trait.update_connection_active(&conn_id_clone).await {
+            // 如果连接不存在，记录警告但不阻塞处理（可能是连接刚被清理）
+            tracing::warn!(
+                "[ConnectionHandlerObserverAdapter] 更新连接活跃时间失败（连接可能不存在）: connection_id={}, error={}",
+                conn_id,
+                e
+            );
         }
 
-        Ok(())
-    }
+        // 获取连接信息以检查协商状态和获取缓存的 parser/pipeline
+        let connection_state = Self::get_connection_state(&manager, &conn_id);
 
-    /// 处理消息命令
-    pub async fn handle_message_command(
-        &self,
-        frame: &Frame,
-        command: &crate::common::protocol::MessageCommand,
-        connection_id: &str,
-    ) -> Result<()> {
-        let message_id = command.message_id.clone();
-        debug!(
-            "[DefaultObserver] handle_message_command: 开始处理, connection_id={}, message_id={}",
-            connection_id, message_id
-        );
-
-        // 如果有自定义事件处理器，使用它
-        if let Some(ref event_handler) = self.event_handler {
-            use crate::common::protocol::flare::core::commands::message_command::Type as MsgType;
-            if let Ok(msg_type) = MsgType::try_from(command.r#type) {
-                debug!(
-                    "[DefaultObserver] handle_message_command: 调用 event_handler.handle_message_command_by_type, connection_id={}, message_id={}, msg_type={:?}",
-                    connection_id, message_id, msg_type
-                );
-                if let Ok(Some(response)) = event_handler
-                    .handle_message_command_by_type(command, msg_type, connection_id)
-                    .await
-                {
-                    debug!(
-                        "[DefaultObserver] handle_message_command: event_handler 返回响应, connection_id={}, message_id={}",
-                        connection_id, message_id
-                    );
-                    // 发送自定义回复
-                    let manager_trait =
-                        Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                    let conn_id = connection_id.to_string();
-                    let parser = self.parser.clone();
-                    tokio::spawn(async move {
-                        if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                            if let Ok(data) = parser.serialize(&response) {
-                                let conn_clone = Arc::clone(&conn);
-                                let mut c = conn_clone.lock().await;
-                                let _ = c.send(&data).await;
-                            }
-                        }
-                    });
-                    return Ok(());
-                } else {
-                    debug!(
-                        "[DefaultObserver] handle_message_command: event_handler 返回 None, 继续默认处理, connection_id={}, message_id={}",
-                        connection_id, message_id
-                    );
-                }
-            }
-        }
-
-        // 默认处理：使用 ConnectionHandler
-        let handler = Arc::clone(&self.handler);
-        let manager = Arc::clone(&self.manager);
-        let parser = self.parser.clone();
-        let conn_id = connection_id.to_string();
-        let frame_clone = frame.clone();
-
-        debug!(
-            "[DefaultObserver] handle_message_command: 准备调用 handler.handle_frame, connection_id={}, message_id={}",
-            conn_id, message_id
-        );
-
-        // 更新连接活跃时间
-        let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-        let conn_id_update = conn_id.clone();
-        tokio::spawn(async move {
-            let _ = manager_update
-                .update_connection_active(&conn_id_update)
+        // 根据协商状态路由到不同的处理逻辑
+        if connection_state.negotiation_completed {
+            Self::handle_negotiated_message(
+                handler,
+                data,
+                conn_id,
+                manager,
+                connection_state.info,
+                connection_state.negotiation_confirmed,
+                connection_state.cached_parser,
+                connection_state.cached_pipeline,
+            )
+            .await;
+        } else {
+            // 协商未完成，使用全局共享的协商前 parser
+            Self::handle_pre_negotiation_message(handler, data, conn_id, manager, server_core)
                 .await;
+        }
+    }
+
+    /// 获取连接状态信息
+    fn get_connection_state(manager: &Arc<ConnectionManager>, conn_id: &str) -> ConnectionState {
+        manager
+            .get_connection(conn_id)
+            .map(|(_, info)| ConnectionState {
+                negotiation_completed: info.negotiation_completed,
+                negotiation_confirmed: info.negotiation_confirmed,
+                cached_parser: info.cached_parser.clone(),
+                cached_pipeline: info.cached_pipeline.clone(),
+                info: info.clone(),
+            })
+            .unwrap_or_else(|| {
+                // 如果连接不存在，使用默认值
+                let default_info =
+                    crate::server::connection::ConnectionInfo::new(conn_id.to_string(), true);
+                ConnectionState {
+                    info: default_info,
+                    negotiation_completed: false,
+                    negotiation_confirmed: false,
+                    cached_parser: None,
+                    cached_pipeline: None,
+                }
+            })
+    }
+
+    /// 处理已协商完成的消息
+    ///
+    /// 处理流程：
+    /// 1. 解析消息得到 Frame（由 MessageParser 统一处理，支持容错标记）
+    /// 2. 如果有 pipeline，执行中间件（before）和处理器（processor）
+    /// 3. **无论 pipeline 是否返回响应，都继续调用 handle_frame 让 event_wrapper.rs 处理业务逻辑**
+    /// 4. event_wrapper.rs 处理后会发送响应（如果有）
+    ///
+    /// # 容错策略
+    /// - 如果 `negotiation_confirmed = false`：使用容错模式（允许解密失败时作为未加密数据处理）
+    /// - 如果 `negotiation_confirmed = true`：使用严格模式（解密失败直接返回错误）
+    /// - 在客户端确认之前，除了加密、压缩和序列化，其他都使用默认值（JSON、不压缩、不加密）
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_negotiated_message(
+        handler: &Arc<ServerMessageWrapper>,
+        data: Vec<u8>,
+        conn_id: Arc<str>,
+        manager: Arc<ConnectionManager>,
+        connection_info: crate::server::connection::ConnectionInfo,
+        negotiation_confirmed: bool,
+        cached_parser: Option<Arc<MessageParser>>,
+        cached_pipeline: Option<Arc<crate::common::message::pipeline::MessagePipeline>>,
+    ) {
+        // 1. 先尝试使用 PRE_NEGOTIATION_PARSER 解析，检查是否是 NEGOTIATION_READY 消息
+        // NEGOTIATION_READY 消息必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
+        // 这样客户端和服务端都统一使用 PRE_NEGOTIATION_PARSER 处理，确保兼容性
+        // 服务端收到 NEGOTIATION_READY 后才会严格使用协商后的 parser（不允许 fallback）
+        if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(&data) {
+            if Self::is_negotiation_ready_message(&frame) {
+                // 这是 NEGOTIATION_READY 消息，使用 PRE_NEGOTIATION_PARSER 解析成功
+                // 标记协商已确认，之后服务端将严格使用协商后的 parser（不允许 fallback）
+                if let Err(e) = (*manager).mark_negotiation_confirmed(&conn_id) {
+                    error!(
+                        "[ConnectionHandlerObserverAdapter] 标记协商确认失败: connection_id={}, error={}",
+                        conn_id, e
+                    );
+                } else {
+                    debug!(
+                        "[ConnectionHandlerObserverAdapter] ✅ 协商已确认: connection_id={}，之后将严格使用协商后的 parser",
+                        conn_id
+                    );
+                }
+                // 协商确认消息不需要进一步处理
+                return;
+            }
+        }
+
+        // 2. 如果不是 NEGOTIATION_READY 消息，使用协商后的 parser 解析
+        // 在客户端确认之前（negotiation_confirmed = false），如果协商已完成但未确认，使用容错模式
+        // 这样可以兼容客户端在收到 CONNECT_ACK 之前发送的未加密消息
+        // 在客户端确认之后（negotiation_confirmed = true），严格使用协商后的 parser，不允许 fallback
+        let allow_fallback = !negotiation_confirmed;
+
+        // 先克隆，避免在创建 parser 时移动
+        let compression = connection_info.compression.clone();
+        let encryption = connection_info.encryption.clone();
+
+        let parser = cached_parser.unwrap_or_else(|| {
+            error!(
+                "[ConnectionHandlerObserverAdapter] 协商已完成但缓存 parser 不存在，回退到动态创建: connection_id={}",
+                conn_id
+            );
+            std::sync::Arc::new(crate::common::MessageParser::new(
+                connection_info.serialization_format,
+                compression.clone(),
+                encryption.clone(),
+            ))
         });
 
-        tokio::spawn(async move {
-            info!(
-                "[DefaultObserver] handle_message_command: 开始调用 handler.handle_frame, connection_id={}, message_id={}",
-                conn_id, message_id
-            );
-            let start_time = std::time::Instant::now();
+        // 在解析前验证加密器是否已注册（如果协商了加密）
+        if encryption != crate::common::encryption::EncryptionAlgorithm::None {
+            let encryptor_name = encryption.as_str();
+            if !crate::common::encryption::EncryptionUtil::is_registered(&encryptor_name) {
+                let registered = crate::common::encryption::EncryptionUtil::list_registered();
+                error!(
+                    "[ConnectionHandlerObserverAdapter] 加密器未注册: connection_id={}, encryption={:?}, registered={:?}",
+                    conn_id, encryption, registered
+                );
+                return;
+            }
+        }
 
-            // 添加超时保护，避免阻塞
-            let timeout_duration = std::time::Duration::from_secs(10);
-            let result = match tokio::time::timeout(
-                timeout_duration,
-                handler.handle_frame(&frame_clone, &conn_id),
-            )
-            .await
-            {
-                Ok(res) => res,
-                Err(_) => {
-                    error!(
-                        "[DefaultObserver] handle_message_command: handler.handle_frame 超时, connection_id={}, message_id={}, timeout={:?}",
-                        conn_id, message_id, timeout_duration
-                    );
-                    return;
-                }
-            };
-
-            info!(
-                "[DefaultObserver] handle_message_command: handler.handle_frame 调用完成, connection_id={}, message_id={}, result={:?}",
-                conn_id,
-                message_id,
-                result.is_ok()
-            );
-            match result {
-                Ok(Some(response)) => {
-                    let duration_ms = start_time.elapsed().as_millis();
-                    debug!(
-                        "[DefaultObserver] handle_message_command: handler.handle_frame 返回响应, connection_id={}, message_id={}, duration_ms={}",
-                        conn_id, message_id, duration_ms
-                    );
-                    // 发送回复
-                    let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                    if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                        if let Ok(data) = parser.serialize(&response) {
-                            let conn_clone = Arc::clone(&conn);
-                            let mut c = conn_clone.lock().await;
-                            if let Err(e) = c.send(&data).await {
-                                error!(
-                                    "[DefaultObserver] handle_message_command: 发送响应失败, connection_id={}, message_id={}, error={}",
-                                    conn_id, message_id, e
-                                );
-                            } else {
-                                debug!(
-                                    "[DefaultObserver] handle_message_command: 响应已发送, connection_id={}, message_id={}",
-                                    conn_id, message_id
-                                );
-                            }
-                        }
+        // 使用 MessageParser 的统一解析方法，支持容错标记
+        // negotiation_confirmed = false 时允许 fallback（容错模式）
+        // negotiation_confirmed = true 时不允许 fallback（严格模式）
+        let frame = match parser.parse_with_fallback(&data, allow_fallback) {
+            Ok(frame) => frame,
+            Err(e) => {
+                // 提供更详细的错误信息，包括加密器注册状态
+                let encryptor_status = if encryption
+                    != crate::common::encryption::EncryptionAlgorithm::None
+                {
+                    let encryptor_name = encryption.as_str();
+                    if crate::common::encryption::EncryptionUtil::is_registered(&encryptor_name) {
+                        "registered".to_string()
+                    } else {
+                        format!(
+                            "NOT registered (registered: {:?})",
+                            crate::common::encryption::EncryptionUtil::list_registered()
+                        )
                     }
-                }
-                Ok(None) => {
-                    let duration_ms = start_time.elapsed().as_millis();
-                    debug!(
-                        "[DefaultObserver] handle_message_command: handler.handle_frame 返回 None, connection_id={}, message_id={}, duration_ms={}",
-                        conn_id, message_id, duration_ms
-                    );
+                } else {
+                    "none".to_string()
+                };
+
+                // 添加数据预览，帮助调试
+                let data_preview: Vec<u8> = data.iter().take(16).cloned().collect();
+                error!(
+                    "[ConnectionHandlerObserverAdapter] 解析消息失败（协商后）: connection_id={}, format={:?}, compression={:?}, encryption={:?} ({}), confirmed={}, allow_fallback={}, error={}, data_len={}, data_preview={:?}",
+                    conn_id,
+                    connection_info.serialization_format,
+                    compression,
+                    encryption,
+                    encryptor_status,
+                    negotiation_confirmed,
+                    allow_fallback,
+                    e,
+                    data.len(),
+                    data_preview
+                );
+                return;
+            }
+        };
+
+        // 3. 如果有 pipeline，执行中间件（before）和处理器（processor）
+        // 注意：Pipeline 的处理器（processor）只用于额外的处理，不应该替代 handle_frame
+        // 无论 pipeline 是否返回响应，都继续调用 handle_frame 让 event_wrapper.rs 处理业务逻辑
+        if let Some(pipeline) = cached_pipeline {
+            // 执行 pipeline 的中间件（before）和处理器
+            // 这里只执行中间件和处理器，不处理响应（响应由 event_wrapper.rs 处理）
+            match pipeline.process_frame(&frame, Some(&conn_id)).await {
+                Ok(pipeline_response) => {
+                    // Pipeline 可能返回了响应，但我们仍然继续调用 handle_frame
+                    // Pipeline 的响应可以用于中间件处理（如日志、监控），但不替代业务逻辑处理
+                    if pipeline_response.is_some() {
+                        debug!(
+                            "[ConnectionHandlerObserverAdapter] Pipeline 返回了响应，但继续调用 handle_frame: connection_id={}",
+                            conn_id
+                        );
+                    }
                 }
                 Err(e) => {
-                    let duration_ms = start_time.elapsed().as_millis();
                     error!(
-                        "[DefaultObserver] handle_message_command: handler.handle_frame 失败, connection_id={}, message_id={}, error={}, duration_ms={}",
-                        conn_id, message_id, e, duration_ms
+                        "[ConnectionHandlerObserverAdapter] Pipeline 处理失败: connection_id={}, error={}",
+                        conn_id, e
                     );
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    /// 处理通知命令
-    pub async fn handle_notification_command(
-        &self,
-        frame: &Frame,
-        command: &crate::common::protocol::NotificationCommand,
-        connection_id: &str,
-    ) -> Result<()> {
-        // 如果有自定义事件处理器，使用它
-        if let Some(ref event_handler) = self.event_handler {
-            use crate::common::protocol::flare::core::commands::notification_command::Type as NotifType;
-            if let Ok(notif_type) = NotifType::try_from(command.r#type) {
-                if let Ok(Some(response)) = event_handler
-                    .handle_notification_command_by_type(command, notif_type, connection_id)
-                    .await
-                {
-                    // 发送自定义回复
-                    let manager_trait =
-                        Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                    let conn_id = connection_id.to_string();
-                    let parser = self.parser.clone();
-                    tokio::spawn(async move {
-                        if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                            if let Ok(data) = parser.serialize(&response) {
-                                let conn_clone = Arc::clone(&conn);
-                                let mut c = conn_clone.lock().await;
-                                let _ = c.send(&data).await;
-                            }
-                        }
-                    });
-                    return Ok(());
+                    // Pipeline 失败不影响继续处理，继续调用 handle_frame
                 }
             }
         }
 
-        // 默认处理：使用 ConnectionHandler
-        let handler = Arc::clone(&self.handler);
-        let manager = Arc::clone(&self.manager);
-        let parser = self.parser.clone();
-        let conn_id = connection_id.to_string();
-        let frame_clone = frame.clone();
+        // 4. 继续调用 handle_frame 让 event_wrapper.rs 处理业务逻辑
+        // 这是必须的，因为所有消息最终都需要经过 event_wrapper.rs 处理
+        Self::handle_frame_safely(handler, &frame, &conn_id).await;
+    }
 
-        // 更新连接活跃时间
-        let manager_update = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-        let conn_id_update = conn_id.clone();
-        tokio::spawn(async move {
-            let _ = manager_update
-                .update_connection_active(&conn_id_update)
-                .await;
-        });
-
-        tokio::spawn(async move {
-            if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
-                // 发送回复
-                let manager_trait = Arc::clone(&manager) as Arc<dyn ConnectionManagerTrait>;
-                if let Some((conn, _)) = manager_trait.get_connection(&conn_id).await {
-                    if let Ok(data) = parser.serialize(&response) {
-                        let conn_clone = Arc::clone(&conn);
-                        let mut c = conn_clone.lock().await;
-                        let _ = c.send(&data).await;
+    /// 处理协商前的消息
+    async fn handle_pre_negotiation_message(
+        handler: &Arc<ServerMessageWrapper>,
+        data: Vec<u8>,
+        conn_id: Arc<str>,
+        manager: Arc<ConnectionManager>,
+        server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
+    ) {
+        // 使用全局共享的协商前 parser（避免每次创建）
+        match PRE_NEGOTIATION_PARSER.parse(&data) {
+            Ok(frame) => {
+                // 检查是否是 CONNECT 消息
+                if Self::is_connect_message(&frame) {
+                    // CONNECT 消息：调用 ServerCore 的 handle_connect_complete
+                    Self::handle_connect_message(handler, &frame, &conn_id, manager, server_core)
+                        .await; // CONNECT 消息处理完成
+                } else {
+                    // 非 CONNECT 消息但在协商完成前收到，记录警告并继续处理
+                    // 检查连接信息，确认协商状态
+                    if let Some((_, conn_info)) = (*manager).get_connection(&conn_id) {
+                        warn!(
+                            "[ConnectionHandlerObserverAdapter] 收到非 CONNECT 消息但协商未完成: connection_id={}, negotiation_completed={}, negotiation_confirmed={}, format={:?}, compression={:?}, encryption={:?}",
+                            conn_id,
+                            conn_info.negotiation_completed,
+                            conn_info.negotiation_confirmed,
+                            conn_info.serialization_format,
+                            conn_info.compression,
+                            conn_info.encryption
+                        );
+                    } else {
+                        warn!(
+                            "[ConnectionHandlerObserverAdapter] 收到非 CONNECT 消息但协商未完成: connection_id={}, 连接不存在",
+                            conn_id
+                        );
                     }
+                    // 继续使用 handle_frame 处理
+                    Self::handle_frame_safely(handler, &frame, &conn_id).await;
                 }
             }
-        });
+            Err(e) => {
+                error!(
+                    "[ConnectionHandlerObserverAdapter] 解析消息失败（协商前）: connection_id={}, error={}",
+                    conn_id, e
+                );
+            }
+        }
+    }
 
-        Ok(())
+    /// 安全地调用 handle_frame（统一错误处理）
+    async fn handle_frame_safely(
+        handler: &Arc<ServerMessageWrapper>,
+        frame: &crate::common::protocol::Frame,
+        conn_id: &str,
+    ) {
+        use crate::server::ConnectionHandler;
+        if let Err(e) = ConnectionHandler::handle_frame(handler.as_ref(), frame, conn_id).await {
+            error!(
+                "[ConnectionHandlerObserverAdapter] 处理消息失败: connection_id={}, error={}",
+                conn_id, e
+            );
+        }
+    }
+
+    /// 处理 CONNECT 消息
+    async fn handle_connect_message(
+        _handler: &Arc<ServerMessageWrapper>,
+        frame: &crate::common::protocol::Frame,
+        conn_id: &Arc<str>,
+        manager: Arc<ConnectionManager>,
+        server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
+    ) {
+        // 获取连接实例
+        let Some((connection, _)) = manager.get_connection(conn_id) else {
+            error!(
+                "[ConnectionHandlerObserverAdapter] 连接不存在，无法处理 CONNECT: connection_id={}",
+                conn_id
+            );
+            return;
+        };
+
+        // 获取 ServerCore 引用
+        let Some(server_core) = &server_core else {
+            error!(
+                "[ConnectionHandlerObserverAdapter] ServerCore 未初始化，无法处理 CONNECT: connection_id={}",
+                conn_id
+            );
+            return;
+        };
+
+        if let Err(e) = server_core
+            .handle_connect_complete(frame, conn_id, connection)
+            .await
+        {
+            error!(
+                "[ConnectionHandlerObserverAdapter] 处理 CONNECT 消息失败: connection_id={}, error={}",
+                conn_id, e
+            );
+        }
+        // CONNECT 消息已由 handle_connect_complete 处理，不需要再调用 handle_frame
+    }
+
+    /// 检查是否是 CONNECT 消息
+    fn is_connect_message(frame: &crate::common::protocol::Frame) -> bool {
+        frame.command.as_ref().and_then(|cmd| {
+            if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
+                Some(sys_cmd.r#type == SysType::Connect as i32)
+            } else {
+                None
+            }
+        }).unwrap_or(false)
+    }
+
+    /// 检查是否是 NEGOTIATION_READY 消息
+    fn is_negotiation_ready_message(frame: &crate::common::protocol::Frame) -> bool {
+        frame.command.as_ref().and_then(|cmd| {
+            if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
+                use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
+                Some(sys_cmd.r#type == SysType::NegotiationReady as i32)
+            } else {
+                None
+            }
+        }).unwrap_or(false)
     }
 }
 
-impl ConnectionObserver for DefaultServerMessageObserver {
+impl ConnectionObserver for ConnectionHandlerObserverAdapter {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                debug!(
-                    "[DefaultObserver] on_event: 收到消息, connection_id={}, data_len={}",
-                    self.connection_id,
-                    data.len()
-                );
-                match self.parser.parse(data) {
-                    Ok(frame) => {
-                        debug!(
-                            "[DefaultObserver] on_event: 解析 Frame 成功, connection_id={}, message_id={}",
-                            self.connection_id, frame.message_id
-                        );
-                        // 先克隆 frame，避免生命周期问题
-                        let frame_clone = frame.clone();
-                        if let Some(cmd) = &frame.command {
-                            match &cmd.r#type {
-                            Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) => {
-                                let sys_type = sys_cmd.r#type;
-                                let conn_id = self.connection_id.clone();
-                                let observer = self.clone();
-
-                                tokio::spawn(async move {
-                                    if let Err(e) = observer.handle_system_command(&frame_clone, sys_type, &conn_id).await {
-                                        error!("[DefaultObserver] 处理系统命令失败: {}", e);
-                                    }
-                                });
-                            }
-                            Some(crate::common::protocol::flare::core::commands::command::Type::Message(msg_cmd)) => {
-                                let conn_id = self.connection_id.clone();
-                                let msg_cmd_clone = msg_cmd.clone();
-                                let observer = self.clone();
-                                let message_id = msg_cmd_clone.message_id.clone();
-
-                                debug!(
-                                    "[DefaultObserver] 收到消息命令: connection_id={}, message_id={}, message_type={}",
-                                    conn_id, message_id, msg_cmd_clone.r#type
-                                );
-
-                                tokio::spawn(async move {
-                                    debug!(
-                                        "[DefaultObserver] 准备调用 handle_message_command: connection_id={}, message_id={}",
-                                        conn_id, message_id
-                                    );
-                                    match observer.handle_message_command(&frame_clone, &msg_cmd_clone, &conn_id).await {
-                                        Ok(_) => {
-                                            debug!(
-                                                "[DefaultObserver] handle_message_command 成功: connection_id={}, message_id={}",
-                                                conn_id, message_id
-                                            );
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "[DefaultObserver] 处理消息命令失败: connection_id={}, message_id={}, error={}",
-                                                conn_id, message_id, e
-                                            );
-                                        }
-                                    }
-                                });
-                            }
-                            Some(crate::common::protocol::flare::core::commands::command::Type::Notification(notif_cmd)) => {
-                                let conn_id = self.connection_id.clone();
-                                let notif_cmd_clone = notif_cmd.clone();
-                                let observer = self.clone();
-
-                                tokio::spawn(async move {
-                                    if let Err(e) = observer.handle_notification_command(&frame_clone, &notif_cmd_clone, &conn_id).await {
-                                        error!("[DefaultObserver] 处理通知命令失败: {}", e);
-                                    }
-                                });
-                            }
-                            Some(crate::common::protocol::flare::core::commands::command::Type::Custom(custom_cmd)) => {
-                                // 处理自定义命令（如 SyncMessages、ListSessions 等）
-                                let handler = Arc::clone(&self.handler);
-                                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                                let parser = self.parser.clone();
-                                let conn_id = self.connection_id.clone();
-                                let cmd_name = custom_cmd.name.clone();
-
-                                // 更新连接活跃时间
-                                let manager_update = Arc::clone(&manager);
-                                let conn_id_update = conn_id.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager_update.update_connection_active(&conn_id_update).await;
-                                });
-
-                                // 处理自定义命令并发送响应
-                                tokio::spawn(async move {
-                                    if let Ok(Some(response)) = handler.handle_frame(&frame_clone, &conn_id).await {
-                                        // 发送响应 Frame 回客户端
-                                        if let Some((conn, _)) = manager.get_connection(&conn_id).await {
-                                            if let Ok(data) = parser.serialize(&response) {
-                                                let conn_clone = Arc::clone(&conn);
-                                                let mut c = conn_clone.lock().await;
-                                                if let Err(e) = c.send(&data).await {
-                                                    error!("[DefaultObserver] 发送自定义命令响应失败: {}", e);
-                                                } else {
-                                                    debug!("[DefaultObserver] 自定义命令响应已发送: connection_id={}, command={}", conn_id, cmd_name);
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                            _ => {
-                                debug!("[DefaultObserver] 未处理的命令类型");
-                            }
-                        }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "[DefaultObserver] on_event: 解析 Frame 失败, connection_id={}, error={}, data_len={}",
-                            self.connection_id,
-                            e,
-                            data.len()
-                        );
-                    }
-                }
-            }
-            ConnectionEvent::Disconnected(reason) => {
                 let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                let device_manager = self.device_manager.clone();
-                let event_handler = self.event_handler.clone();
-                let reason_str = reason.clone();
+                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
+                let manager = Arc::clone(&self.connection_manager);
+                let server_core = self.server_core.clone();
+                // 克隆 data 以便在异步任务中使用
+                let data = data.to_vec();
 
-                debug!("[DefaultObserver] Connection disconnected: {}", conn_id);
                 tokio::spawn(async move {
-                    // 1. 获取连接信息（包括 user_id）
-                    let user_id =
-                        if let Some((_, conn_info)) = manager.get_connection(&conn_id).await {
-                            conn_info.user_id
-                        } else {
-                            None
-                        };
-
-                    // 2. 通知事件处理器
-                    if let Some(ref event_handler) = event_handler {
-                        let _ = event_handler
-                            .on_disconnect(&conn_id, Some(reason_str.as_str()))
-                            .await;
-                    }
-
-                    // 3. 通知连接处理器
-                    let _ = handler.on_disconnect(&conn_id).await;
-
-                    // 4. 从连接管理器中移除连接
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!(
-                                "[DefaultObserver] Successfully removed connection: {}",
-                                conn_id
-                            );
-                        }
-                        Err(e) => {
-                            debug!(
-                                "[DefaultObserver] Connection {} already removed or not found: {}",
-                                conn_id, e
-                            );
-                        }
-                    }
-
-                    // 5. 从设备管理器中移除设备（如果有 user_id）
-                    if let (Some(device_mgr), Some(user_id)) = (device_manager, user_id) {
-                        if let Err(e) = device_mgr.remove_device(&user_id, &conn_id).await {
-                            debug!(
-                                "[DefaultObserver] Failed to remove device from DeviceManager: {}",
-                                e
-                            );
-                        } else {
-                            info!(
-                                "[DefaultObserver] Successfully removed device from DeviceManager: user_id={}, connection_id={}",
-                                user_id, conn_id
-                            );
-                        }
-                    }
+                    Self::handle_message_event(&handler, data, conn_id, manager, server_core).await;
                 });
             }
             ConnectionEvent::Connected => {
-                // 连接已建立（在连接处理函数中已处理）
-            }
-            ConnectionEvent::Error(e) => {
-                error!(
-                    "[DefaultObserver] Connection error for {}: {:?}",
-                    self.connection_id, e
-                );
+                // 调用 on_connect
                 let handler = Arc::clone(&self.handler);
-                let manager = Arc::clone(&self.manager) as Arc<dyn ConnectionManagerTrait>;
-                let conn_id = self.connection_id.clone();
-                let device_manager = self.device_manager.clone();
-                let event_handler = self.event_handler.clone();
-                let error_msg = format!("{:?}", e);
-
-                debug!(
-                    "[DefaultObserver] Connection error detected, removing connection: {}",
-                    conn_id
-                );
+                // 使用 Arc<str> 避免 String clone，减少内存分配
+                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
                 tokio::spawn(async move {
-                    // 1. 获取连接信息（包括 user_id）
-                    let user_id =
-                        if let Some((_, conn_info)) = manager.get_connection(&conn_id).await {
-                            conn_info.user_id
-                        } else {
-                            None
-                        };
-
-                    // 2. 通知事件处理器
-                    if let Some(ref event_handler) = event_handler {
-                        let _ = event_handler.on_error(&conn_id, &error_msg).await;
+                    use crate::server::ConnectionHandler;
+                    if let Err(e) = ConnectionHandler::on_connect(handler.as_ref(), &conn_id).await
+                    {
+                        error!(
+                            "[ConnectionHandlerObserverAdapter] 处理连接事件失败: connection_id={}, error={}",
+                            conn_id, e
+                        );
                     }
-
-                    // 3. 通知连接处理器
-                    let _ = handler.on_disconnect(&conn_id).await;
-
-                    // 4. 从连接管理器中移除（如果连接存在）
-                    match manager.remove_connection(&conn_id).await {
-                        Ok(_) => {
-                            debug!(
-                                "[DefaultObserver] Successfully removed connection after error: {}",
-                                conn_id
-                            );
-                        }
-                        Err(e) => {
-                            debug!(
-                                "[DefaultObserver] Connection {} already removed or not found after error: {}",
-                                conn_id, e
-                            );
-                        }
+                });
+            }
+            ConnectionEvent::Disconnected(reason) => {
+                // 调用 on_disconnect
+                let handler = Arc::clone(&self.handler);
+                // 使用 Arc<str> 避免 String clone，减少内存分配
+                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
+                // 使用 Arc<str> 避免 String clone，减少内存分配
+                let reason_str: Arc<str> = Arc::from(reason.as_str());
+                tokio::spawn(async move {
+                    use crate::server::ConnectionHandler;
+                    if let Err(e) =
+                        ConnectionHandler::on_disconnect(handler.as_ref(), &conn_id).await
+                    {
+                        warn!(
+                            "[ConnectionHandlerObserverAdapter] 处理断开事件失败: connection_id={}, reason={}, error={}",
+                            conn_id, reason_str, e
+                        );
                     }
+                });
+            }
+            ConnectionEvent::Error(err) => {
+                // 处理错误事件
+                let handler = Arc::clone(&self.handler);
+                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
+                let error_msg = err.to_string();
+                let error_str: Arc<str> = Arc::from(error_msg.as_str());
 
-                    // 5. 从设备管理器中移除设备（如果有 user_id）
-                    if let (Some(device_mgr), Some(user_id)) = (device_manager, user_id) {
-                        if let Err(e) = device_mgr.remove_device(&user_id, &conn_id).await {
-                            debug!(
-                                "[DefaultObserver] Failed to remove device from DeviceManager: {}",
-                                e
-                            );
-                        } else {
-                            info!(
-                                "[DefaultObserver] Successfully removed device from DeviceManager: user_id={}, connection_id={}",
-                                user_id, conn_id
-                            );
-                        }
+                tokio::spawn(async move {
+                    if let Err(e) = handler.on_error(&conn_id, &error_str).await {
+                        error!(
+                            "[ConnectionHandlerObserverAdapter] 处理错误事件失败: connection_id={}, error={}",
+                            conn_id, e
+                        );
                     }
                 });
             }

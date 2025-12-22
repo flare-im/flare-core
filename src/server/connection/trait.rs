@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// 连接信息（Trait 版本，用于跨异步边界传递）
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectionInfo {
     /// 连接 ID（唯一标识符）
     pub connection_id: String,
@@ -31,10 +31,22 @@ pub struct ConnectionInfo {
     pub serialization_format: crate::common::protocol::SerializationFormat,
     /// 压缩算法（由客户端协商决定）
     pub compression: crate::common::compression::CompressionAlgorithm,
+    /// 加密方式（由客户端协商决定）
+    pub encryption: crate::common::encryption::EncryptionAlgorithm,
     /// 是否已验证（如果启用认证，只有已验证的连接才能收发消息）
     pub authenticated: bool,
     /// 认证时间戳（Unix 时间戳，秒，如果已验证）
     pub authenticated_at: Option<u64>,
+    /// 协商是否已完成（CONNECT 和 CONNECT_ACK 完成）
+    pub negotiation_completed: bool,
+    /// 协商是否已确认（客户端收到 CONNECT_ACK 后发送确认，服务端收到后标记）
+    /// 确认后，消息必须严格按照协商好的方式处理，不再容错
+    pub negotiation_confirmed: bool,
+    /// 缓存的 MessageParser（协商完成后创建，避免每次消息处理都创建新的 parser）
+    pub cached_parser: Option<std::sync::Arc<crate::common::MessageParser>>,
+    /// 缓存的 MessagePipeline（协商完成后创建，如果配置了中间件或处理器）
+    /// 可选，默认不创建以保持性能
+    pub cached_pipeline: Option<std::sync::Arc<crate::common::message::pipeline::MessagePipeline>>,
 }
 
 /// 连接管理器抽象 trait
@@ -121,13 +133,10 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         frame: &Frame,
         parser: Option<&MessageParser>,
     ) -> Result<()> {
-        // 检查连接是否存在且已验证（如果启用认证）
-        if let Some((_, info)) = self.get_connection(connection_id).await {
-            // 如果启用认证但连接未验证，拒绝发送消息
-            // 注意：系统命令（如 CONNECT_ACK, PING, PONG）可能在验证前发送，这里不检查
-            // 业务消息应该在验证后发送
+        let connection_info = self.get_connection(connection_id).await;
+
+        if let Some((_, info)) = &connection_info {
             if !info.authenticated {
-                // 检查是否是系统命令（允许系统命令在验证前发送）
                 let is_system_command = frame.command.as_ref().and_then(|cmd| {
                     if let Some(crate::common::protocol::flare::core::commands::command::Type::System(sys_cmd)) = &cmd.r#type {
                         Some(sys_cmd.r#type == crate::common::protocol::flare::core::commands::system_command::Type::ConnectAck as i32
@@ -152,20 +161,17 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
             ));
         }
 
-        // 如果提供了 parser，使用它；否则从连接的协商信息创建 parser
         let data = if let Some(p) = parser {
             p.serialize(frame)?
+        } else if let Some((_, info)) = connection_info {
+            let connection_parser =
+                MessageParser::new(info.serialization_format, info.compression, info.encryption);
+            connection_parser.serialize(frame)?
         } else {
-            // 从连接的协商信息创建 parser
-            if let Some((_, info)) = self.get_connection(connection_id).await {
-                let connection_parser =
-                    MessageParser::new(info.serialization_format, info.compression);
-                connection_parser.serialize(frame)?
-            } else {
-                // 如果连接不存在，使用默认 JSON parser
-                MessageParser::json().serialize(frame)?
-            }
+            use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+            PRE_NEGOTIATION_PARSER.serialize(frame)?
         };
+
         self.send_to_connection(connection_id, &data).await?;
         self.update_connection_active(connection_id).await?;
         Ok(())

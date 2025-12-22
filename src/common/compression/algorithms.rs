@@ -6,7 +6,9 @@ use super::traits::Compressor;
 use crate::common::error::{FlareError, Result};
 
 /// 压缩算法类型枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// 支持内置算法和自定义算法扩展
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CompressionAlgorithm {
     /// 不使用压缩
     None,
@@ -14,25 +16,86 @@ pub enum CompressionAlgorithm {
     Gzip,
     /// Zstd 压缩（待实现）
     Zstd,
+    /// 自定义压缩算法（通过字符串标识符）
+    ///
+    /// 使用此变体可以注册和使用自定义压缩算法
+    /// 自定义算法必须通过 `CompressionUtil::register_custom` 注册
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::compression::{CompressionAlgorithm, CompressionUtil, Compressor};
+    /// use std::sync::Arc;
+    ///
+    /// // 注册自定义压缩器
+    /// struct MyCustomCompressor;
+    /// impl Compressor for MyCustomCompressor { /* ... */ }
+    ///
+    /// CompressionUtil::register_custom(Arc::new(MyCustomCompressor));
+    ///
+    /// // 使用自定义算法
+    /// let algo = CompressionAlgorithm::Custom("my_custom".to_string());
+    /// ```
+    Custom(String),
 }
 
 impl CompressionAlgorithm {
     /// 从字符串转换为压缩算法
+    ///
+    /// 如果字符串匹配内置算法，返回对应的枚举值
+    /// 否则返回 `Custom(String)` 变体
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::compression::CompressionAlgorithm;
+    ///
+    /// assert_eq!(CompressionAlgorithm::from_str("none"), Some(CompressionAlgorithm::None));
+    /// assert_eq!(CompressionAlgorithm::from_str("gzip"), Some(CompressionAlgorithm::Gzip));
+    /// assert_eq!(
+    ///     CompressionAlgorithm::from_str("my_custom"),
+    ///     Some(CompressionAlgorithm::Custom("my_custom".to_string()))
+    /// );
+    /// ```
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "none" | "" => Some(CompressionAlgorithm::None),
             "gzip" => Some(CompressionAlgorithm::Gzip),
             "zstd" => Some(CompressionAlgorithm::Zstd),
-            _ => None,
+            custom => Some(CompressionAlgorithm::Custom(custom.to_string())),
         }
     }
 
-    /// 转换为字符串
-    pub fn as_str(&self) -> &'static str {
+    /// 转换为字符串标识符
+    ///
+    /// 返回算法的字符串表示，可用于注册表查找
+    ///
+    /// # 示例
+    /// ```rust
+    /// use flare_core::common::compression::CompressionAlgorithm;
+    ///
+    /// assert_eq!(CompressionAlgorithm::None.as_str(), "none");
+    /// assert_eq!(CompressionAlgorithm::Gzip.as_str(), "gzip");
+    /// assert_eq!(CompressionAlgorithm::Custom("my_custom".to_string()).as_str(), "my_custom");
+    /// ```
+    pub fn as_str(&self) -> String {
         match self {
-            CompressionAlgorithm::None => "none",
-            CompressionAlgorithm::Gzip => "gzip",
-            CompressionAlgorithm::Zstd => "zstd",
+            CompressionAlgorithm::None => "none".to_string(),
+            CompressionAlgorithm::Gzip => "gzip".to_string(),
+            CompressionAlgorithm::Zstd => "zstd".to_string(),
+            CompressionAlgorithm::Custom(name) => name.clone(),
+        }
+    }
+
+    /// 检查是否是自定义算法
+    pub fn is_custom(&self) -> bool {
+        matches!(self, CompressionAlgorithm::Custom(_))
+    }
+
+    /// 获取自定义算法名称（如果是自定义算法）
+    pub fn custom_name(&self) -> Option<&str> {
+        match self {
+            CompressionAlgorithm::Custom(name) => Some(name),
+            _ => None,
         }
     }
 }

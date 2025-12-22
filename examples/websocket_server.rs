@@ -6,20 +6,20 @@
 //! 注意：此示例使用纯 WebSocket 连接（ws://），不使用 TLS/SSL
 //!
 //! 此示例展示了如何：
-//! 1. 实现 ConnectionHandler trait 来处理消息
-//! 2. 使用 HybridServer::new() 直接创建服务器
+//! 1. 实现 ServerEventHandler trait 来处理消息
+//! 2. 使用 HybridServer::with_connection_manager() 创建服务器
 //! 3. 使用 DefaultServerHandle 进行消息发送和连接管理
 
 use async_trait::async_trait;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::error::Result;
-use flare_core::common::protocol::flare::core::commands::command::Type;
 use flare_core::common::protocol::{
-    Frame, Reliability, frame_with_message_command, generate_message_id, send_message,
+    Frame, MessageCommand, Reliability, frame_with_message_command, generate_message_id,
+    send_message,
 };
 use flare_core::server::HybridServer;
 use flare_core::server::handle::{DefaultServerHandle, ServerHandle};
-use flare_core::server::{ConnectionHandler, Server, ServerConfig};
+use flare_core::server::{Server, ServerConfig, ServerEventHandler};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -67,97 +67,58 @@ impl ChatRoomHandler {
         }
         debug!("broadcast_message_except 完成");
     }
-
-    // 广播消息给所有连接的客户端
-    async fn broadcast_message(&self, frame: &Frame) {
-        debug!("broadcast_message 开始");
-        let handle = {
-            let handle_guard = self.server_handle.lock().await;
-            handle_guard.clone()
-        };
-
-        if let Some(ref handle) = handle {
-            if let Err(e) = handle.broadcast(frame).await {
-                error!("[聊天室] 广播消息失败: {}", e);
-            }
-        } else {
-            warn!("[聊天室] 警告：服务器处理器未设置，无法广播消息");
-        }
-    }
-
-    async fn broadcast_notification(&self, message: String, notification_type: &str) {
-        let mut metadata = HashMap::new();
-        metadata.insert("username".to_string(), "系统".as_bytes().to_vec());
-        metadata.insert("type".to_string(), notification_type.as_bytes().to_vec());
-
-        let notification = send_message(
-            generate_message_id(),
-            message.into_bytes(),
-            Some(metadata),
-            None,
-        );
-
-        let notification_frame = frame_with_message_command(notification, Reliability::BestEffort);
-
-        self.broadcast_message(&notification_frame).await;
-    }
 }
 
 #[async_trait]
-impl ConnectionHandler for ChatRoomHandler {
-    async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        // 检查是否是消息命令
-        if let Some(cmd) = &frame.command {
-            if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                // 提取消息内容
-                let message_text = String::from_utf8_lossy(&msg_cmd.payload);
+impl ServerEventHandler for ChatRoomHandler {
+    async fn handle_message(
+        &self,
+        command: &MessageCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        // 提取消息内容
+        let message_text = String::from_utf8_lossy(&command.payload);
 
-                // 获取或创建用户名
-                let username = {
-                    let mut usernames = self.usernames.lock().await;
-                    usernames
-                        .entry(connection_id.to_string())
-                        .or_insert_with(|| {
-                            // 如果消息包含用户名信息，提取用户名
-                            if let Some(username_bytes) = msg_cmd.metadata.get("username") {
-                                String::from_utf8_lossy(username_bytes).to_string()
-                            } else {
-                                format!("用户_{}", &connection_id[..8.min(connection_id.len())])
-                            }
-                        })
-                        .clone()
-                };
+        // 获取或创建用户名
+        let username = {
+            let mut usernames = self.usernames.lock().await;
+            usernames
+                .entry(connection_id.to_string())
+                .or_insert_with(|| {
+                    // 如果消息包含用户名信息，提取用户名
+                    if let Some(username_bytes) = command.metadata.get("username") {
+                        String::from_utf8_lossy(username_bytes).to_string()
+                    } else {
+                        format!("用户_{}", &connection_id[..8.min(connection_id.len())])
+                    }
+                })
+                .clone()
+        };
 
-                info!("[聊天室] {} 说: {}", username, message_text);
+        info!("[聊天室] {} 说: {}", username, message_text);
 
-                // 构建广播消息（包含用户名）
-                let mut broadcast_metadata = HashMap::new();
-                broadcast_metadata.insert("username".to_string(), username.as_bytes().to_vec());
-                broadcast_metadata.insert(
-                    "connection_id".to_string(),
-                    connection_id.as_bytes().to_vec(),
-                );
+        // 构建广播消息（包含用户名）
+        let mut broadcast_metadata = HashMap::new();
+        broadcast_metadata.insert("username".to_string(), username.as_bytes().to_vec());
+        broadcast_metadata.insert(
+            "connection_id".to_string(),
+            connection_id.as_bytes().to_vec(),
+        );
 
-                let broadcast_msg = send_message(
-                    generate_message_id(),
-                    format!("[{}] {}", username, message_text).into_bytes(),
-                    Some(broadcast_metadata),
-                    None,
-                );
+        let broadcast_msg = send_message(
+            generate_message_id(),
+            format!("[{}] {}", username, message_text).into_bytes(),
+            Some(broadcast_metadata),
+            None,
+        );
 
-                let broadcast_frame =
-                    frame_with_message_command(broadcast_msg, Reliability::BestEffort);
+        let broadcast_frame = frame_with_message_command(broadcast_msg, Reliability::BestEffort);
 
-                // 广播给除发送者外的所有连接
-                self.broadcast_message_except(&broadcast_frame, connection_id)
-                    .await;
+        // 广播给除发送者外的所有连接
+        self.broadcast_message_except(&broadcast_frame, connection_id)
+            .await;
 
-                // 不返回给单个连接，因为已经广播了
-                return Ok(None);
-            }
-        }
-
-        // 其他类型的消息不处理
+        // 不返回给单个连接，因为已经广播了
         Ok(None)
     }
 
@@ -172,7 +133,7 @@ impl ConnectionHandler for ChatRoomHandler {
         Ok(())
     }
 
-    async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
+    async fn on_disconnect(&self, connection_id: &str, _reason: Option<&str>) -> Result<()> {
         let username = {
             let mut usernames = self.usernames.lock().await;
             usernames.remove(connection_id)
@@ -200,17 +161,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     info!("=== WebSocket 聊天室服务端 ===");
 
-    // 创建 handler
-    let handler = Arc::new(ChatRoomHandler::new());
-    let handler_for_setup = Arc::clone(&handler);
+    // 创建 event handler
+    let event_handler = Arc::new(ChatRoomHandler::new());
+    let handler_for_setup = Arc::clone(&event_handler);
 
     // 仅监听 WebSocket 协议（无 TLS）
     let ws_config = ServerConfig::new("0.0.0.0:8080".to_string())
         .with_protocols(vec![TransportProtocol::WebSocket])
         .with_max_connections(2000);
 
-    let mut ws_server =
-        HybridServer::new(ws_config, handler.clone() as Arc<dyn ConnectionHandler>)?;
+    let mut ws_server = HybridServer::with_connection_manager(
+        ws_config,
+        None,
+        None,
+        Some(event_handler.clone() as Arc<dyn ServerEventHandler>),
+        None,
+    )?;
 
     // 从 HybridServer 获取 ServerCore，创建 DefaultServerHandle
     let server_handle: Arc<dyn ServerHandle> = if let Some(core) = ws_server.core() {

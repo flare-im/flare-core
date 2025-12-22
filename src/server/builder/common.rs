@@ -1,6 +1,12 @@
 //! 服务端构建器通用组件
 //!
-//! 提供所有构建器共享的辅助类型和函数
+//! 提供所有构建器共享的辅助类型和函数，体现"公共逻辑统一处理"的设计原则。
+//!
+//! ## 设计原则
+//!
+//! - **统一包装接口**：`ServerWrapper` 为所有构建模式提供统一的 `ServerHandle` 访问接口
+//! - **共享底层实现**：所有模式都基于 `HybridServer`，共享核心能力
+//! - **零成本抽象**：包装层不带来运行时开销
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
@@ -12,7 +18,13 @@ use tokio::sync::Mutex;
 
 /// 服务端包装器
 ///
-/// 提供统一的 ServerHandle 访问接口
+/// 提供统一的 `ServerHandle` 访问接口，所有构建模式都使用此包装器。
+///
+/// ## 设计原则
+///
+/// - **统一接口**：所有模式（简单、观察者、Flare）都通过 `ServerWrapper` 访问服务端功能
+/// - **共享底层**：基于 `HybridServer`，共享所有核心能力
+/// - **类型安全**：通过 Rust 类型系统保证接口的正确性
 pub struct ServerWrapper {
     server: Arc<Mutex<HybridServer>>,
 }
@@ -37,11 +49,7 @@ impl ServerWrapper {
     pub fn get_server_handle_components(&self) -> Option<Arc<dyn ConnectionManagerTrait>> {
         tokio::task::block_in_place(|| {
             let s = self.server.blocking_lock();
-            if let Some(core) = s.core() {
-                Some(core.connection_manager_trait())
-            } else {
-                None
-            }
+            s.core().map(|core| core.connection_manager_trait())
         })
     }
 
@@ -130,4 +138,35 @@ impl ServerWrapper {
             s.protocols().to_vec()
         })
     }
+}
+
+/// 验证认证配置
+///
+/// 如果启用了认证但未提供认证器，返回配置错误
+/// 这体现了"公共逻辑统一处理"的原则：所有需要认证的模式共享相同的验证逻辑
+pub fn validate_auth_config(
+    config: &crate::server::config::ServerConfig,
+    authenticator: &Option<Arc<dyn crate::server::auth::Authenticator>>,
+) -> Result<()> {
+    if config.auth_enabled && authenticator.is_none() {
+        return Err(crate::common::error::FlareError::localized(
+            crate::common::error::ErrorCode::ConfigurationError,
+            "认证已启用但未提供认证器，请使用 with_authenticator() 设置认证器",
+        ));
+    }
+    Ok(())
+}
+
+/// 创建消息解析器
+///
+/// 根据配置中的默认序列化格式和压缩算法创建解析器
+/// 这体现了"公共逻辑统一处理"的原则：所有需要解析器的模式共享相同的创建逻辑
+pub fn create_message_parser(
+    config: &crate::server::config::ServerConfig,
+) -> crate::common::MessageParser {
+    crate::common::MessageParser::new(
+        config.default_serialization_format,
+        config.default_compression.clone(),
+        config.default_encryption.clone(),
+    )
 }

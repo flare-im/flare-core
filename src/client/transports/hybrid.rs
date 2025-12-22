@@ -8,7 +8,6 @@ use crate::client::transports::{Client, ClientCore};
 use crate::common::config_types::TransportProtocol;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::Frame;
-use crate::common::protocol::flare::core::commands::command::Type;
 use crate::transport::events::ArcObserver;
 use async_trait::async_trait;
 use futures_util::future::select_all;
@@ -201,7 +200,7 @@ impl HybridClient {
                 let elapsed = start_time.elapsed();
 
                 // 将网络连接结果转换为 ConnectionResult 格式
-                let client_result = network_result.map(|(client, _)| client).map_err(|e| e);
+                let client_result = network_result.map(|(client, _)| client);
 
                 (protocol_clone, protocol_index, client_result, elapsed)
             });
@@ -358,10 +357,9 @@ impl HybridClient {
                                 );
                                 tracing::debug!("第一个连接成功，立即返回，不再等待其他连接");
                                 break;
-                            } else {
+                            } else if let Some((_, _, _, first_elapsed)) = &first_success {
                                 // 检查是否在时间阈值内（几乎同时成功）
-                                let first_elapsed = first_success.as_ref().unwrap().3;
-                                if elapsed <= first_elapsed + TIME_THRESHOLD {
+                                if elapsed <= *first_elapsed + TIME_THRESHOLD {
                                     successful_clients.push((
                                         protocol_index,
                                         protocol,
@@ -696,51 +694,32 @@ impl HybridClient {
                 "message_id is empty".to_string(),
             ));
         }
-        
+
         tracing::debug!(
             "[HybridClient] send_frame_and_wait: 注册等待响应, message_id={}, frame.message_id={}",
             frame.message_id,
             frame.message_id
         );
-        
-        // 检查 MessageCommand 中的 message_id（用于调试）
-        if let Some(cmd) = &frame.command {
-            if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                tracing::debug!(
-                    "[HybridClient] send_frame_and_wait: MessageCommand.message_id={}, Frame.message_id={}",
-                    msg_cmd.message_id,
-                    frame.message_id
-                );
-                // 确保 MessageCommand.message_id 和 Frame.message_id 一致
-                if msg_cmd.message_id != frame.message_id {
-                    tracing::warn!(
-                        "[HybridClient] send_frame_and_wait: MessageCommand.message_id 和 Frame.message_id 不一致! MessageCommand.message_id={}, Frame.message_id={}",
-                        msg_cmd.message_id,
-                        frame.message_id
-                    );
-                }
-            }
-        }
-        
+
         // 在发送前注册等待器
         let rx = self.core.register_pending_response(&frame.message_id).await;
         tracing::debug!(
             "[HybridClient] send_frame_and_wait: 已注册等待响应, message_id={}",
             frame.message_id
         );
-        
+
         // 发送消息
         {
             let mut client = self.inner.lock().await;
             client.send_frame(frame).await?;
         }
-        
+
         tracing::debug!(
             "[HybridClient] send_frame_and_wait: 消息已发送, 等待响应, message_id={}, timeout={:?}",
             frame.message_id,
             timeout
         );
-        
+
         // 等待响应或超时
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => {
@@ -753,7 +732,7 @@ impl HybridClient {
             }
             Ok(Err(_)) => {
                 // 发送失败（通道已关闭），清理等待项
-                tracing::warn!(
+                tracing::debug!(
                     "[HybridClient] send_frame_and_wait: 响应通道已关闭, message_id={}",
                     frame.message_id
                 );

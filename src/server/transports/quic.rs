@@ -5,9 +5,9 @@
 use crate::common::error::Result;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
+use crate::server::transports::Server;
 use crate::server::transports::common::ServerConnectionHelper;
 use crate::server::transports::server_core::ServerCore;
-use crate::server::transports::{ConnectionHandler, Server};
 use crate::transport::connection::Connection;
 use crate::transport::quic::QUICTransport;
 use async_trait::async_trait;
@@ -23,47 +23,36 @@ use tracing::debug;
 pub struct QUICServer {
     config: ServerConfig,
     core: Arc<ServerCore>,
-    handler: Arc<dyn ConnectionHandler>,
     endpoint: Option<Endpoint>,
     is_running: Arc<Mutex<bool>>,
 }
 
 impl QUICServer {
     /// 创建新的 QUIC 服务端
-    pub fn new(config: ServerConfig, handler: Arc<dyn ConnectionHandler>) -> Result<Self> {
-        Self::with_connection_manager(config, handler, None)
+    pub fn new(config: ServerConfig) -> Result<Self> {
+        Self::with_connection_manager(config, None)
     }
 
     /// 使用指定的连接管理器创建 QUIC 服务端
     pub fn with_connection_manager(
         config: ServerConfig,
-        handler: Arc<dyn ConnectionHandler>,
         connection_manager: Option<Arc<ConnectionManager>>,
     ) -> Result<Self> {
-        // 初始化 rustls CryptoProvider
         Self::init_rustls();
 
-        // 创建 ServerCore
         let core = Arc::new(ServerCore::new(&config, connection_manager));
-
-        // 创建 QUIC 端点
         let endpoint = Self::create_quic_endpoint(&config)?;
 
         Ok(Self {
             config,
             core,
-            handler,
             endpoint: Some(endpoint),
             is_running: Arc::new(Mutex::new(false)),
         })
     }
 
     /// 使用指定的 ServerCore 创建 QUIC 服务端（用于共享 ServerCore）
-    pub fn with_shared_core(
-        config: ServerConfig,
-        handler: Arc<dyn ConnectionHandler>,
-        core: Arc<ServerCore>,
-    ) -> Result<Self> {
+    pub fn with_shared_core(config: ServerConfig, core: Arc<ServerCore>) -> Result<Self> {
         Self::init_rustls();
 
         let endpoint = Self::create_quic_endpoint(&config)?;
@@ -71,7 +60,6 @@ impl QUICServer {
         Ok(Self {
             config,
             core,
-            handler,
             endpoint: Some(endpoint),
             is_running: Arc::new(Mutex::new(false)),
         })
@@ -156,7 +144,6 @@ impl Server for QUICServer {
         })?;
 
         // 准备共享资源
-        let handler = Arc::clone(&self.handler);
         let manager = Arc::clone(&self.core.connection_manager);
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
@@ -167,7 +154,6 @@ impl Server for QUICServer {
             while *is_running.lock().await {
                 if let Some(conn) = endpoint.accept().await {
                     debug!("[QUIC Server] 收到新连接，等待握手");
-                    let handler_clone = Arc::clone(&handler);
                     let manager_clone = Arc::clone(&manager);
                     let config_clone = config.clone();
                     let core_clone = Arc::clone(&core);
@@ -178,7 +164,6 @@ impl Server for QUICServer {
                                 debug!("[QUIC Server] 握手完成，处理连接");
                                 handle_quic_connection(
                                     connecting,
-                                    handler_clone,
                                     manager_clone,
                                     config_clone,
                                     core_clone,
@@ -219,7 +204,6 @@ impl Server for QUICServer {
 /// 处理 QUIC 连接（内部函数）
 async fn handle_quic_connection(
     connection: quinn::Connection,
-    handler: Arc<dyn ConnectionHandler>,
     manager: Arc<ConnectionManager>,
     config: ServerConfig,
     core: Arc<ServerCore>,
@@ -252,7 +236,6 @@ async fn handle_quic_connection(
     let connection_id = match ServerConnectionHelper::setup_new_connection(
         connection,
         manager.clone(),
-        handler.clone(),
         &config,
         core.clone(),
     )

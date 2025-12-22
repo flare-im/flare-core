@@ -178,7 +178,7 @@ use std::str::FromStr;
 
 /// 会话类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionType {
+pub enum ConversationType {
     /// 单聊（一对一）- 前缀：1
     Single = 1,
     /// 群聊 - 前缀：2
@@ -193,45 +193,45 @@ pub enum SessionType {
     Temp = 6,
 }
 
-impl FromStr for SessionType {
+impl FromStr for ConversationType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
         // 支持数字前缀和字符串前缀（向后兼容）
         match s {
-            "1" | "single" => Ok(SessionType::Single),
-            "2" | "group" => Ok(SessionType::Group),
-            "3" | "ai" => Ok(SessionType::Ai),
-            "4" | "system" => Ok(SessionType::System),
-            "5" | "customer" => Ok(SessionType::Customer),
-            "6" | "temp" => Ok(SessionType::Temp),
+            "1" | "single" => Ok(ConversationType::Single),
+            "2" | "group" => Ok(ConversationType::Group),
+            "3" | "ai" => Ok(ConversationType::Ai),
+            "4" | "system" => Ok(ConversationType::System),
+            "5" | "customer" => Ok(ConversationType::Customer),
+            "6" | "temp" => Ok(ConversationType::Temp),
             _ => Err(anyhow::anyhow!("Unknown session type: {}", s)),
         }
     }
 }
 
-impl SessionType {
+impl ConversationType {
     /// 获取类型前缀（数字格式）
     pub fn prefix(&self) -> &'static str {
         match self {
-            SessionType::Single => "1",
-            SessionType::Group => "2",
-            SessionType::Ai => "3",
-            SessionType::System => "4",
-            SessionType::Customer => "5",
-            SessionType::Temp => "6",
+            ConversationType::Single => "1",
+            ConversationType::Group => "2",
+            ConversationType::Ai => "3",
+            ConversationType::System => "4",
+            ConversationType::Customer => "5",
+            ConversationType::Temp => "6",
         }
     }
 
     /// 从数字前缀解析会话类型
     pub fn from_prefix(prefix: &str) -> Result<Self> {
         match prefix {
-            "1" => Ok(SessionType::Single),
-            "2" => Ok(SessionType::Group),
-            "3" => Ok(SessionType::Ai),
-            "4" => Ok(SessionType::System),
-            "5" => Ok(SessionType::Customer),
-            "6" => Ok(SessionType::Temp),
+            "1" => Ok(ConversationType::Single),
+            "2" => Ok(ConversationType::Group),
+            "3" => Ok(ConversationType::Ai),
+            "4" => Ok(ConversationType::System),
+            "5" => Ok(ConversationType::Customer),
+            "6" => Ok(ConversationType::Temp),
             _ => Err(anyhow::anyhow!("Unknown session type prefix: {}", prefix)),
         }
     }
@@ -255,15 +255,15 @@ impl SessionType {
 ///
 /// # 示例
 /// ```
-/// use flare_core::common::session_id::generate_single_chat_session_id;
+/// use flare_core::common::conversation_id::generate_single_chat_conversation_id;
 ///
-/// let id1 = generate_single_chat_session_id("user1", "user2");
-/// let id2 = generate_single_chat_session_id("user2", "user1");
+/// let id1 = generate_single_chat_conversation_id("user1", "user2");
+/// let id2 = generate_single_chat_conversation_id("user2", "user1");
 /// assert_eq!(id1, id2); // 无论顺序如何，生成的ID相同
 /// assert!(id1.starts_with("1A"));
 /// assert_eq!(id1.len(), 18); // "1A" + 16字符
 /// ```
-pub fn generate_single_chat_session_id(user1: &str, user2: &str) -> String {
+pub fn generate_single_chat_conversation_id(user1: &str, user2: &str) -> String {
     use sha2::{Digest, Sha256};
 
     // 排序用户ID（保证一致性）
@@ -303,7 +303,7 @@ pub fn generate_single_chat_session_id(user1: &str, user2: &str) -> String {
 ///
 /// # 返回
 /// 格式化的会话ID：`2A{16字符Base32编码}`
-pub fn generate_group_session_id(group_id: &str) -> String {
+pub fn generate_group_conversation_id(group_id: &str) -> String {
     use sha2::{Digest, Sha256};
 
     // 输入：GROUP:v1:{group_id}
@@ -338,7 +338,7 @@ pub fn generate_group_session_id(group_id: &str) -> String {
 ///
 /// # 返回
 /// 格式化的会话ID：`3A{16字符Base32编码}`
-pub fn generate_ai_session_id(user_id: &str, ai_scope: &str) -> String {
+pub fn generate_ai_conversation_id(user_id: &str, ai_scope: &str) -> String {
     use sha2::{Digest, Sha256};
 
     // 输入：AI:v1:{user_id}:{ai_scope}
@@ -373,7 +373,7 @@ pub fn generate_ai_session_id(user_id: &str, ai_scope: &str) -> String {
 ///
 /// # 返回
 /// 格式化的会话ID：`5A{16字符Base32编码}`
-pub fn generate_customer_session_id(customer_id: &str, channel: &str) -> String {
+pub fn generate_customer_conversation_id(customer_id: &str, channel: &str) -> String {
     use sha2::{Digest, Sha256};
 
     // 输入：CS:v1:{customer_id}:{channel}
@@ -408,7 +408,7 @@ pub fn generate_customer_session_id(customer_id: &str, channel: &str) -> String 
 ///
 /// # 返回
 /// 格式化的会话ID：`4A{16字符Base32编码}`
-pub fn generate_system_session_id(system_id: &str, scope: Option<String>) -> String {
+pub fn generate_system_conversation_id(system_id: &str, scope: Option<String>) -> String {
     use sha2::{Digest, Sha256};
 
     // 输入：SYS:v1:{system_id}:{scope}
@@ -439,13 +439,13 @@ pub fn generate_system_session_id(system_id: &str, scope: Option<String>) -> Str
 /// # 返回
 /// 格式化的会话ID：`6A{26字符ULID}`
 #[cfg(not(target_arch = "wasm32"))]
-pub fn generate_temp_session_id() -> String {
+pub fn generate_temp_conversation_id() -> String {
     use ulid::Ulid;
     format!("6A{}", Ulid::new().to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn generate_temp_session_id() -> String {
+pub fn generate_temp_conversation_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = std::time::SystemTime::now()
@@ -458,16 +458,16 @@ pub fn generate_temp_session_id() -> String {
 
 /// 生成服务端会话ID（向后兼容，使用ULID）
 ///
-/// 注意：推荐使用具体的生成函数（如 `generate_temp_session_id`）
-#[deprecated(note = "Use specific generation functions like generate_temp_session_id()")]
+/// 注意：推荐使用具体的生成函数（如 `generate_temp_conversation_id`）
+#[deprecated(note = "Use specific generation functions like generate_temp_conversation_id()")]
 #[cfg(not(target_arch = "wasm32"))]
-pub fn generate_server_session_id(session_type: SessionType) -> String {
+pub fn generate_server_conversation_id(conversation_type: ConversationType) -> String {
     use ulid::Ulid;
-    format!("{}-{}", session_type.prefix(), Ulid::new().to_string())
+    format!("{}-{}", conversation_type.prefix(), Ulid::new().to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn generate_server_session_id(session_type: SessionType) -> String {
+pub fn generate_server_conversation_id(conversation_type: ConversationType) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = std::time::SystemTime::now()
@@ -475,7 +475,7 @@ pub fn generate_server_session_id(session_type: SessionType) -> String {
         .unwrap()
         .as_millis();
     let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{}-{}", session_type.prefix(), ts, c)
+    format!("{}-{}-{}", conversation_type.prefix(), ts, c)
 }
 
 /// 验证会话ID格式（CID格式：TypePrefix + Version + OpaqueID）
@@ -491,23 +491,23 @@ pub fn generate_server_session_id(session_type: SessionType) -> String {
 /// - 临时会话：`6A{26字符ULID}`
 ///
 /// # 参数
-/// * `session_id` - 要验证的会话ID
+/// * `conversation_id` - 要验证的会话ID
 ///
 /// # 返回
-/// 如果格式正确，返回 `Ok(SessionType)`
+/// 如果格式正确，返回 `Ok(ConversationType)`
 /// 如果格式错误，返回 `Err`
-pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
-    if session_id.is_empty() {
+pub fn validate_conversation_id(conversation_id: &str) -> Result<ConversationType> {
+    if conversation_id.is_empty() {
         return Err(anyhow::anyhow!("Session ID cannot be empty"));
     }
 
     // CID格式：TypePrefix(1) + Version(1) + OpaqueID
-    if session_id.len() < 3 {
+    if conversation_id.len() < 3 {
         return Err(anyhow::anyhow!("Session ID too short, expected CID format"));
     }
 
-    let prefix = &session_id[..1];
-    let version = &session_id[1..2];
+    let prefix = &conversation_id[..1];
+    let version = &conversation_id[1..2];
 
     // 验证版本号（当前只支持 A）
     if version != "A" {
@@ -518,13 +518,13 @@ pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
     }
 
     // 验证类型前缀并获取会话类型
-    let session_type = SessionType::from_prefix(prefix)
+    let conversation_type = ConversationType::from_prefix(prefix)
         .with_context(|| format!("Invalid CID type prefix: {}", prefix))?;
 
     // 验证 OpaqueID 长度
-    let opaque_id = &session_id[2..];
-    match session_type {
-        SessionType::Temp => {
+    let opaque_id = &conversation_id[2..];
+    match conversation_type {
+        ConversationType::Temp => {
             // 临时会话：6A + ULID（26字符）
             if opaque_id.len() != 26 {
                 return Err(anyhow::anyhow!(
@@ -552,7 +552,7 @@ pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
         }
     }
 
-    Ok(session_type)
+    Ok(conversation_type)
 }
 
 /// 从会话ID中提取会话类型
@@ -560,34 +560,40 @@ pub fn validate_session_id(session_id: &str) -> Result<SessionType> {
 /// 如果会话ID格式正确，返回会话类型；否则返回None
 ///
 /// # 参数
-/// * `session_id` - 会话ID
+/// * `conversation_id` - 会话ID
 ///
 /// # 返回
-/// 如果格式正确，返回 `Some(SessionType)`；否则返回 `None`
-pub fn extract_session_type(session_id: &str) -> Option<SessionType> {
-    validate_session_id(session_id).ok()
+/// 如果格式正确，返回 `Some(ConversationType)`；否则返回 `None`
+pub fn extract_conversation_type(conversation_id: &str) -> Option<ConversationType> {
+    validate_conversation_id(conversation_id).ok()
 }
 
 /// 检查会话ID是否为单聊格式
 ///
 /// # 参数
-/// * `session_id` - 会话ID
+/// * `conversation_id` - 会话ID
 ///
 /// # 返回
 /// 如果是单聊格式，返回 `true`；否则返回 `false`
-pub fn is_single_chat(session_id: &str) -> bool {
-    matches!(extract_session_type(session_id), Some(SessionType::Single))
+pub fn is_single_chat_conversation(conversation_id: &str) -> bool {
+    matches!(
+        extract_conversation_type(conversation_id),
+        Some(ConversationType::Single)
+    )
 }
 
 /// 检查会话ID是否为群聊格式
 ///
 /// # 参数
-/// * `session_id` - 会话ID
+/// * `conversation_id` - 会话ID
 ///
 /// # 返回
 /// 如果是群聊格式，返回 `true`；否则返回 `false`
-pub fn is_group_chat(session_id: &str) -> bool {
-    matches!(extract_session_type(session_id), Some(SessionType::Group))
+pub fn is_group_chat_conversation(conversation_id: &str) -> bool {
+    matches!(
+        extract_conversation_type(conversation_id),
+        Some(ConversationType::Group)
+    )
 }
 
 // 注意：CID 是不可逆的，无法从 CID 中提取用户/群/角色信息
@@ -598,9 +604,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_single_chat_session_id_consistency() {
-        let id1 = generate_single_chat_session_id("user1", "user2");
-        let id2 = generate_single_chat_session_id("user2", "user1");
+    fn test_single_chat_conversation_id_consistency() {
+        let id1 = generate_single_chat_conversation_id("user1", "user2");
+        let id2 = generate_single_chat_conversation_id("user2", "user1");
 
         // 两个用户无论顺序如何，生成的ID应该相同
         assert_eq!(id1, id2);
@@ -608,61 +614,62 @@ mod tests {
         assert_eq!(id1.len(), 18); // "1A" + 16字符Base32
 
         // 不同用户对应该生成不同ID
-        let id3 = generate_single_chat_session_id("user1", "user3");
+        let id3 = generate_single_chat_conversation_id("user1", "user3");
         assert_ne!(id1, id3);
     }
 
     #[test]
-    fn test_group_session_id_generation() {
-        let id1 = generate_group_session_id("group_12345");
-        let id2 = generate_group_session_id("group_12345");
+    fn test_group_conversation_id_generation() {
+        let id1 = generate_group_conversation_id("group_12345");
+        let id2 = generate_group_conversation_id("group_12345");
 
         assert!(id1.starts_with("2A"));
         assert_eq!(id1.len(), 18); // "2A" + 16字符Base32
         // 相同群组ID应该生成相同的会话ID
         assert_eq!(id1, id2);
 
-        let id3 = generate_group_session_id("group_67890");
+        let id3 = generate_group_conversation_id("group_67890");
         assert_ne!(id1, id3);
     }
 
     #[test]
-    fn test_ai_session_id_generation() {
-        let id1 = generate_ai_session_id("user_001", "openai:gpt-4");
-        let id2 = generate_ai_session_id("user_001", "openai:gpt-4");
+    fn test_ai_conversation_id_generation() {
+        let id1 = generate_ai_conversation_id("user_001", "openai:gpt-4");
+        let id2 = generate_ai_conversation_id("user_001", "openai:gpt-4");
 
         assert!(id1.starts_with("3A"));
         assert_eq!(id1.len(), 18); // "3A" + 16字符Base32
         // 相同参数应该生成相同的ID
         assert_eq!(id1, id2);
 
-        let id3 = generate_ai_session_id("user_001", "claude:sonnet");
+        let id3 = generate_ai_conversation_id("user_001", "claude:sonnet");
         assert_ne!(id1, id3);
     }
 
     #[test]
-    fn test_customer_session_id_generation() {
-        let id1 = generate_customer_session_id("customer_001", "channel_001");
+    fn test_customer_conversation_id_generation() {
+        let id1 = generate_customer_conversation_id("customer_001", "channel_001");
         assert!(id1.starts_with("5A"));
         assert_eq!(id1.len(), 18); // "5A" + 16字符Base32
     }
 
     #[test]
-    fn test_system_session_id_generation() {
-        let id1 = generate_system_session_id("system_notification", None);
+    fn test_system_conversation_id_generation() {
+        let id1 = generate_system_conversation_id("system_notification", None);
         assert!(id1.starts_with("4A"));
         assert_eq!(id1.len(), 18); // "4A" + 16字符Base32
 
-        let id2 = generate_system_session_id("system_announcement", Some("scope1".to_string()));
+        let id2 =
+            generate_system_conversation_id("system_announcement", Some("scope1".to_string()));
         assert!(id2.starts_with("4A"));
         assert_eq!(id2.len(), 18);
         assert_ne!(id1, id2);
     }
 
     #[test]
-    fn test_temp_session_id_generation() {
-        let id1 = generate_temp_session_id();
-        let id2 = generate_temp_session_id();
+    fn test_temp_conversation_id_generation() {
+        let id1 = generate_temp_conversation_id();
+        let id2 = generate_temp_conversation_id();
 
         assert!(id1.starts_with("6A"));
         assert!(id2.starts_with("6A"));
@@ -671,78 +678,96 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_session_id() {
+    fn test_validate_conversation_id() {
         // 有效的单聊ID
-        let single_id = generate_single_chat_session_id("user1", "user2");
-        assert!(validate_session_id(&single_id).is_ok());
+        let single_id = generate_single_chat_conversation_id("user1", "user2");
+        assert!(validate_conversation_id(&single_id).is_ok());
         assert_eq!(
-            validate_session_id(&single_id).unwrap(),
-            SessionType::Single
+            validate_conversation_id(&single_id).unwrap(),
+            ConversationType::Single
         );
 
         // 有效的群聊ID
-        let group_id = generate_group_session_id("group_12345");
-        assert!(validate_session_id(&group_id).is_ok());
-        assert_eq!(validate_session_id(&group_id).unwrap(), SessionType::Group);
+        let group_id = generate_group_conversation_id("group_12345");
+        assert!(validate_conversation_id(&group_id).is_ok());
+        assert_eq!(
+            validate_conversation_id(&group_id).unwrap(),
+            ConversationType::Group
+        );
 
         // 有效的AI助手ID（格式：3-user_id-ai_service）
-        let ai_id = generate_ai_session_id("user_001", "gpt-4");
-        assert!(validate_session_id(&ai_id).is_ok());
-        assert_eq!(validate_session_id(&ai_id).unwrap(), SessionType::Ai);
+        let ai_id = generate_ai_conversation_id("user_001", "gpt-4");
+        assert!(validate_conversation_id(&ai_id).is_ok());
+        assert_eq!(
+            validate_conversation_id(&ai_id).unwrap(),
+            ConversationType::Ai
+        );
 
         // 有效的系统通知ID
         let system_id =
-            generate_system_session_id("system_notification", Some("1734567890".to_string()));
-        assert!(validate_session_id(&system_id).is_ok());
+            generate_system_conversation_id("system_notification", Some("1734567890".to_string()));
+        assert!(validate_conversation_id(&system_id).is_ok());
         assert_eq!(
-            validate_session_id(&system_id).unwrap(),
-            SessionType::System
+            validate_conversation_id(&system_id).unwrap(),
+            ConversationType::System
         );
 
         // 有效的临时会话ID
-        let temp_id = generate_temp_session_id();
-        assert!(validate_session_id(&temp_id).is_ok());
-        assert_eq!(validate_session_id(&temp_id).unwrap(), SessionType::Temp);
+        let temp_id = generate_temp_conversation_id();
+        assert!(validate_conversation_id(&temp_id).is_ok());
+        assert_eq!(
+            validate_conversation_id(&temp_id).unwrap(),
+            ConversationType::Temp
+        );
 
         // 无效格式
-        assert!(validate_session_id("").is_err());
-        assert!(validate_session_id("1A").is_err()); // OpaqueID太短
-        assert!(validate_session_id("1B1234567890123456").is_err()); // 不支持的版本
-        assert!(validate_session_id("0A1234567890123456").is_err()); // 未知前缀
-        assert!(validate_session_id("1A123456789012345").is_err()); // OpaqueID长度错误
+        assert!(validate_conversation_id("").is_err());
+        assert!(validate_conversation_id("1A").is_err()); // OpaqueID太短
+        assert!(validate_conversation_id("1B1234567890123456").is_err()); // 不支持的版本
+        assert!(validate_conversation_id("0A1234567890123456").is_err()); // 未知前缀
+        assert!(validate_conversation_id("1A123456789012345").is_err()); // OpaqueID长度错误
     }
 
     #[test]
-    fn test_extract_session_type() {
-        let single_id = generate_single_chat_session_id("user1", "user2");
-        assert_eq!(extract_session_type(&single_id), Some(SessionType::Single));
+    fn test_extract_conversation_type() {
+        let single_id = generate_single_chat_conversation_id("user1", "user2");
+        assert_eq!(
+            extract_conversation_type(&single_id),
+            Some(ConversationType::Single)
+        );
 
-        let group_id = generate_group_session_id("group_12345");
-        assert_eq!(extract_session_type(&group_id), Some(SessionType::Group));
+        let group_id = generate_group_conversation_id("group_12345");
+        assert_eq!(
+            extract_conversation_type(&group_id),
+            Some(ConversationType::Group)
+        );
 
-        let ai_id = generate_ai_session_id("user_001", "ai_001");
-        assert_eq!(extract_session_type(&ai_id), Some(SessionType::Ai));
+        let ai_id = generate_ai_conversation_id("user_001", "ai_001");
+        assert_eq!(
+            extract_conversation_type(&ai_id),
+            Some(ConversationType::Ai)
+        );
 
         // 无效格式返回None
-        assert_eq!(extract_session_type("invalid"), None);
-        assert_eq!(extract_session_type("1B1234567890123456"), None); // 不支持的版本
+        assert_eq!(extract_conversation_type("invalid"), None);
+        assert_eq!(extract_conversation_type("1B1234567890123456"), None); // 不支持的版本
     }
 
     #[test]
-    fn test_is_single_chat() {
-        let single_id = generate_single_chat_session_id("user1", "user2");
-        assert!(is_single_chat(&single_id));
+    fn test_is_single_chat_conversation() {
+        let single_id = generate_single_chat_conversation_id("user1", "user2");
+        assert!(is_single_chat_conversation(&single_id));
 
-        let group_id = generate_group_session_id("group_12345");
-        assert!(!is_single_chat(&group_id));
+        let group_id = generate_group_conversation_id("group_12345");
+        assert!(!is_single_chat_conversation(&group_id));
     }
 
     #[test]
-    fn test_is_group_chat() {
-        let single_id = generate_single_chat_session_id("user1", "user2");
-        assert!(!is_group_chat(&single_id));
+    fn test_is_group_chat_conversation() {
+        let single_id = generate_single_chat_conversation_id("user1", "user2");
+        assert!(!is_group_chat_conversation(&single_id));
 
-        let group_id = generate_group_session_id("group_12345");
-        assert!(is_group_chat(&group_id));
+        let group_id = generate_group_conversation_id("group_12345");
+        assert!(is_group_chat_conversation(&group_id));
     }
 }

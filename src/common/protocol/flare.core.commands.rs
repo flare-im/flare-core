@@ -96,6 +96,8 @@ pub mod system_command {
         AuthAck = 9,
         /// 被踢下线（需要 message 说明原因，可选 metadata）
         Kicked = 10,
+        /// 协商完成确认（客户端收到 CONNECT_ACK 后发送，表示已准备好使用协商好的加密方式）
+        NegotiationReady = 11,
     }
     impl Type {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -115,6 +117,7 @@ pub mod system_command {
                 Self::Auth => "AUTH",
                 Self::AuthAck => "AUTH_ACK",
                 Self::Kicked => "KICKED",
+                Self::NegotiationReady => "NEGOTIATION_READY",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -131,6 +134,7 @@ pub mod system_command {
                 "AUTH" => Some(Self::Auth),
                 "AUTH_ACK" => Some(Self::AuthAck),
                 "KICKED" => Some(Self::Kicked),
+                "NEGOTIATION_READY" => Some(Self::NegotiationReady),
                 _ => None,
             }
         }

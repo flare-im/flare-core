@@ -421,7 +421,7 @@ pub fn frame_with_system_command(system_command: SystemCommand, reliability: Rel
 }
 
 /// 创建包含消息命令的 Frame
-/// 
+///
 /// 注意：Frame 的 message_id 会使用 MessageCommand.message_id，以确保客户端和服务端能正确匹配响应
 /// 如果 MessageCommand.message_id 为空，则自动生成一个并更新 MessageCommand
 pub fn frame_with_message_command(
@@ -432,10 +432,10 @@ pub fn frame_with_message_command(
     if message_command.message_id.is_empty() {
         message_command.message_id = generate_message_id();
     }
-    
+
     // 使用 MessageCommand.message_id 作为 Frame 的 message_id，确保两者一致
     let message_id = message_command.message_id.clone();
-    
+
     FrameBuilder::new()
         .with_command(Command {
             r#type: Some(CommandType::Message(message_command)),

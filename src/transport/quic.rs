@@ -75,7 +75,7 @@ impl QUICTransport {
             }
 
             // 读取完整消息（带长度前缀）
-            match Self::read_stream(&mut *recv).await {
+            match Self::read_stream(&mut recv).await {
                 Ok(data) => {
                     if !data.is_empty() {
                         debug!("[QUIC Transport] Received message: {} bytes", data.len());

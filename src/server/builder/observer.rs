@@ -1,48 +1,72 @@
-//! 观察者模式服务端构建器（基本装修）
+//! 观察者模式服务端构建器
 //!
-//! 提供基本实现，用户可以自定义观察器和处理器
+//! 提供基本功能实现，使用 `ServerEventHandler` trait 处理消息和事件。
 //!
 //! ## 特点
-//! - ✅ 自定义观察器：实现 `ConnectionHandler` trait 自定义消息处理
-//! - ✅ 设备管理：支持设备冲突策略和多端管理
-//! - ✅ 事件处理：支持自定义事件处理器
-//! - ✅ 连接管理：支持共享连接管理器
-//! - ✅ 灵活扩展：可以添加自定义的观察器和处理器
+//! - ✅ **实现 `ServerEventHandler` trait（必需）**：提供细化的命令处理方法
+//! - ✅ **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
+//! - ✅ **自动 ACK 处理**：框架自动处理 ACK 和错误响应
+//! - ✅ **设备管理**：支持设备冲突策略和多端管理
+//! - ✅ **认证机制**：支持 Token 认证
+//! - ✅ **连接管理**：支持共享连接管理器（多服务器实例）
 //!
 //! ## 适用场景
-//! - 需要自定义消息处理逻辑
+//! - 需要自定义消息处理逻辑但不需要完整功能集
 //! - 需要设备管理和多端控制
 //! - 需要事件驱动的架构
 //! - 需要共享连接状态（多服务器实例）
+//!
+//! ## 架构说明
+//!
+//! 观察者模式基于 `HybridServer`，使用 `ServerMessageWrapper` 作为消息处理器。
+//! `ServerMessageWrapper` 自动将消息路由到 `ServerEventHandler` 的对应方法，
+//! 并处理 ACK 和错误响应。
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
+use crate::server::HybridServer;
 use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
 use crate::server::connection::ConnectionManager;
 use crate::server::handle::ServerHandle;
-use crate::server::{ConnectionHandler, HybridServer};
 use std::sync::Arc;
+use tracing::{error, info};
 
 /// 观察者模式服务端构建器
 ///
-/// 使用实现了 ConnectionHandler trait 的处理器
+/// 提供基本功能实现，使用 `ServerEventHandler` trait 处理消息和事件。
+///
+/// ## 设计原则
+///
+/// - **公共逻辑统一处理**：基于 `HybridServer`，共享所有核心能力
+/// - **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到 `ServerEventHandler` 的对应方法
+/// - **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
+/// - **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
+///
+/// ## 使用方式
+///
+/// 用户只需要实现 `ServerEventHandler` trait，框架会自动处理消息路由和 ACK。
 pub struct ObserverServerBuilder {
     base: BaseServerBuilderConfig,
-    handler: Option<Arc<dyn ConnectionHandler>>,
     connection_manager: Option<Arc<ConnectionManager>>,
     device_manager: Option<Arc<crate::server::device::DeviceManager>>,
-    event_handler: Option<Arc<dyn crate::server::events::handler::ServerEventHandler>>,
+    event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
 }
 
 impl ObserverServerBuilder {
     /// 创建新的观察者模式构建器
-    pub fn new(bind_address: impl Into<String>) -> Self {
+    ///
+    /// # 参数
+    /// - `bind_address`: 绑定地址
+    /// - `event_handler`: 事件处理器（必须），用户只需要实现 `ServerEventHandler` 的 `handle_message` 方法即可
+    pub fn new(
+        bind_address: impl Into<String>,
+        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
+    ) -> Self {
         Self {
             base: BaseServerBuilderConfig::new(bind_address),
-            handler: None,
             connection_manager: None,
             device_manager: None,
-            event_handler: None,
+            event_handler,
         }
     }
 
@@ -79,21 +103,6 @@ impl ObserverServerBuilder {
         device_manager: Arc<crate::server::device::DeviceManager>,
     ) -> Self {
         self.device_manager = Some(device_manager);
-        self
-    }
-
-    /// 设置事件处理器（可选，用于细化的命令处理）
-    pub fn with_event_handler(
-        mut self,
-        event_handler: Arc<dyn crate::server::events::handler::ServerEventHandler>,
-    ) -> Self {
-        self.event_handler = Some(event_handler);
-        self
-    }
-
-    /// 设置连接处理器（必须）
-    pub fn with_handler(mut self, handler: Arc<dyn ConnectionHandler>) -> Self {
-        self.handler = Some(handler);
         self
     }
 
@@ -171,22 +180,43 @@ impl ObserverServerBuilder {
     }
 
     /// 构建服务端
+    ///
+    /// # 错误处理
+    /// - 如果配置无效（如启用了认证但未提供认证器），返回配置错误
+    /// - 如果服务器初始化失败，返回相应的错误
+    ///
+    /// # 返回
+    /// - `Ok(ObserverServer)` - 成功构建的服务端实例
+    /// - `Err(FlareError)` - 构建失败的错误信息
     pub fn build(self) -> Result<ObserverServer> {
-        let handler = self.handler.ok_or_else(|| {
-            crate::common::error::FlareError::general_error("Handler is required")
-        })?;
-
-        // 在创建 HybridServer 时就传入设备管理器和事件处理器
-        // 这样确保 ServerCore 在创建时就有正确的配置，避免后续修改 Arc 的问题
-        let server = HybridServer::with_connection_manager(
-            self.base.config,
-            handler,
-            self.connection_manager,
-            self.device_manager,
-            self.event_handler,
-            self.base.authenticator,
+        // 验证配置（使用公共验证逻辑）
+        crate::server::builder::common::validate_auth_config(
+            &self.base.config,
+            &self.base.authenticator,
         )?;
 
+        // 创建消息解析器（使用公共创建逻辑）
+        // let parser = crate::server::builder::common::create_message_parser(&self.base.config);
+
+        info!(
+            "[ObserverServerBuilder] 开始构建服务端: bind_address={}, protocols={:?}",
+            self.base.config.bind_address,
+            self.base.config.get_protocols()
+        );
+
+        let server = HybridServer::with_connection_manager(
+            self.base.config,
+            self.connection_manager,
+            self.device_manager,
+            Some(self.event_handler),
+            self.base.authenticator,
+        )
+        .map_err(|e| {
+            error!("[ObserverServerBuilder] 构建服务端失败: {}", e);
+            e
+        })?;
+
+        info!("[ObserverServerBuilder] 服务端构建成功");
         Ok(ObserverServer {
             wrapper: ServerWrapper::new(server),
         })

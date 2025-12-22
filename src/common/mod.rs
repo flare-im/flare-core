@@ -14,6 +14,7 @@ pub mod cert;
 pub mod compression;
 pub mod config_types;
 pub mod constants;
+pub mod conversation;
 pub mod device;
 pub mod encryption;
 pub mod error;
@@ -21,7 +22,6 @@ pub mod message;
 pub mod message_observer;
 pub mod protocol;
 pub mod serializer;
-pub mod session_id;
 pub mod utils;
 
 // 重新导出常用类型和函数，方便使用
@@ -29,6 +29,7 @@ pub mod utils;
 pub use compression::{CompressionAlgorithm, CompressionUtil, Compressor};
 pub use config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
 pub use constants::*;
+pub use conversation::*;
 pub use device::{
     DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceInfo, DevicePlatform,
 };
@@ -45,5 +46,4 @@ pub use protocol::{
     SerializationFormat, SystemCommand,
 };
 pub use serializer::{SerializationUtil, Serializer};
-pub use session_id::*;
 pub use utils::*;

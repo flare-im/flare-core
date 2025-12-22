@@ -314,9 +314,7 @@ impl Client for QUICClient {
         if !self.is_connected()
             && ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts)
         {
-            if let Err(e) = self.try_reconnect().await {
-                return Err(e);
-            }
+            self.try_reconnect().await?;
         }
 
         self.send_frame_internal(frame).await

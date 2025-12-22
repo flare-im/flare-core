@@ -4,7 +4,9 @@
 
 use crate::common::MessageParser;
 use crate::common::compression::CompressionAlgorithm;
+use crate::common::encryption::EncryptionAlgorithm;
 use crate::common::error::Result;
+use crate::common::message::pipeline::{ArcMessageMiddleware, ArcMessageProcessor};
 use crate::common::protocol::{Frame, Reliability, SerializationFormat, frame_with_system_command};
 use crate::server::auth::Authenticator;
 use crate::server::config::ServerConfig;
@@ -16,11 +18,10 @@ use crate::server::events::factory::ServerMessageObserverFactory;
 use crate::server::events::handler::ServerEventHandler;
 use crate::server::handle::ServerHandle;
 use crate::server::heartbeat::HeartbeatDetector;
-use crate::server::transports::ConnectionHandler;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// 服务器核心功能
 ///
@@ -46,8 +47,16 @@ pub struct ServerCore {
     default_serialization_format: SerializationFormat,
     /// 默认压缩算法（用于协商）
     default_compression: CompressionAlgorithm,
+    /// 默认加密算法（用于协商）
+    default_encryption: EncryptionAlgorithm,
     /// 观察者工厂（用于创建连接观察者）
     observer_factory: Arc<dyn ServerMessageObserverFactory>,
+    /// 共享的中间件列表（可选，用于消息处理管道）
+    /// 如果配置了中间件，每个连接在协商完成时会创建自己的 pipeline
+    shared_middlewares: Vec<ArcMessageMiddleware>,
+    /// 共享的处理器列表（可选，用于消息处理管道）
+    /// 如果配置了处理器，每个连接在协商完成时会创建自己的 pipeline
+    shared_processors: Vec<ArcMessageProcessor>,
 }
 
 impl ServerCore {
@@ -58,7 +67,7 @@ impl ServerCore {
 
     /// 获取默认压缩算法
     pub fn default_compression(&self) -> CompressionAlgorithm {
-        self.default_compression
+        self.default_compression.clone()
     }
 
     /// 设置默认序列化格式
@@ -107,9 +116,11 @@ impl ServerCore {
         let connection_manager =
             connection_manager.unwrap_or_else(|| Arc::new(ConnectionManager::new()));
 
+        // 初始parser用于解析CONNECT消息，应该不使用加密（协商阶段）
         let parser = MessageParser::new(
             config.default_serialization_format,
-            config.default_compression,
+            config.default_compression.clone(),
+            EncryptionAlgorithm::None, // CONNECT消息不使用加密
         );
 
         Self {
@@ -122,8 +133,11 @@ impl ServerCore {
             auth_enabled: config.auth_enabled,
             auth_timeout: config.auth_timeout,
             default_serialization_format: config.default_serialization_format,
-            default_compression: config.default_compression,
+            default_compression: config.default_compression.clone(),
+            default_encryption: config.default_encryption.clone(),
             observer_factory,
+            shared_middlewares: Vec::new(), // 默认不配置中间件，避免性能开销
+            shared_processors: Vec::new(),  // 默认不配置处理器，避免性能开销
         }
     }
 
@@ -165,15 +179,16 @@ impl ServerCore {
     /// 创建连接观察者
     ///
     /// # 参数
-    /// - `handler`: 连接处理器
     /// - `connection_id`: 连接 ID
     /// - `core_arc`: ServerCore 的 Arc 包装（由调用方提供，避免循环引用）
     ///
     /// # 返回
     /// 创建的观察者实例
+    ///
+    /// # Panics
+    /// 如果 `event_handler` 未设置，此方法会 panic
     pub fn create_observer_with_core(
         &self,
-        handler: Arc<dyn ConnectionHandler>,
         connection_id: String,
         core_arc: Arc<ServerCore>,
     ) -> Arc<dyn crate::transport::events::ConnectionObserver> {
@@ -183,10 +198,15 @@ impl ServerCore {
             event_handler: self.event_handler.clone(),
         });
 
+        let event_handler = self
+            .event_handler
+            .clone()
+            .expect("ServerEventHandler is required for creating observer");
+
         self.observer_factory.create_observer(
-            handler,
             Arc::clone(&self.connection_manager),
             self.parser.clone(),
+            event_handler,
             connection_id,
             core_ref,
             core_arc,
@@ -233,6 +253,28 @@ impl ServerCore {
     /// 获取认证超时时间
     pub fn auth_timeout(&self) -> Duration {
         self.auth_timeout
+    }
+
+    /// 添加中间件（用于消息处理管道）
+    ///
+    /// 中间件会在消息处理前后执行，可以用于日志、监控、验证等。
+    /// 中间件按添加顺序执行，优先级高的中间件会先执行。
+    ///
+    /// # 参数
+    /// - `middleware`: 中间件实例
+    pub async fn add_middleware(&mut self, middleware: ArcMessageMiddleware) {
+        self.shared_middlewares.push(middleware);
+    }
+
+    /// 添加处理器（用于消息处理管道）
+    ///
+    /// 处理器用于处理具体的业务逻辑。
+    /// 如果处理器返回响应，后续处理器不会执行。
+    ///
+    /// # 参数
+    /// - `processor`: 处理器实例
+    pub async fn add_processor(&mut self, processor: ArcMessageProcessor) {
+        self.shared_processors.push(processor);
     }
 
     /// 启动心跳检测
@@ -345,28 +387,40 @@ impl ServerCore {
         // 1. 解析协商信息
         let negotiation = negotiation::parse_connect_message(frame)?;
 
-        // 2. 确定最终使用的序列化格式和压缩算法
-        let (final_format, final_compression) = self.determine_negotiation_result(&negotiation);
+        // 2. 确定最终使用的序列化格式、压缩算法和加密方式
+        let (final_format, final_compression, final_encryption) =
+            self.determine_negotiation_result(&negotiation);
 
-        self.log_negotiation_details(connection_id, &negotiation, final_format, final_compression);
+        self.log_negotiation_details(
+            connection_id,
+            &negotiation,
+            final_format,
+            final_compression.clone(),
+            final_encryption.clone(),
+        );
 
         // 3. Token 验证（如果启用认证）- 先完成认证
         let auth_user_id = self
             .authenticate_connection(frame, connection_id, &negotiation)
             .await?;
 
+        // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
+        // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
+        let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
+
         // 4. 更新连接信息（在认证后）
         self.update_connection_info(
             connection_id,
             &negotiation,
             final_format,
-            final_compression,
-            &auth_user_id,
+            final_compression.clone(),
+            final_encryption.clone(),
+            &user_id,
         )
         .await;
 
         // 5. 标记连接为已验证
-        self.mark_connection_authenticated(connection_id, &auth_user_id)
+        self.mark_connection_authenticated(connection_id, &user_id)
             .await;
 
         // 6. 延迟处理设备冲突（在认证完成后，避免同时踢掉两个连接）
@@ -377,11 +431,16 @@ impl ServerCore {
             .await;
 
         // 7. 创建 CONNECT_ACK
-        let ack_frame =
-            self.create_connect_ack(final_format, final_compression, &conflict_connections);
+        let ack_frame = self.create_connect_ack(
+            final_format,
+            final_compression.clone(),
+            final_encryption.clone(),
+            &conflict_connections,
+        );
 
         // 8. 创建基于协商结果的 MessageParser
-        let parser = MessageParser::new(final_format, final_compression);
+        // 使用配置的默认加密算法（协商时不改变加密算法，保持配置值）
+        let parser = MessageParser::new(final_format, final_compression, final_encryption);
 
         Ok((ack_frame, parser))
     }
@@ -394,31 +453,36 @@ impl ServerCore {
     /// - `frame`: CONNECT 消息的 Frame
     /// - `connection_id`: 连接 ID
     /// - `connection`: 连接实例（用于发送 CONNECT_ACK）
-    /// - `handler`: 连接处理器（用于调用 on_connect）
     ///
     /// # 返回
     /// 处理成功返回 `Ok(())`，失败返回错误
+    ///
+    /// # Panics
+    /// 如果 `event_handler` 未设置，此方法会 panic
     pub async fn handle_connect_complete(
         &self,
         frame: &Frame,
         connection_id: &str,
         connection: Arc<tokio::sync::Mutex<Box<dyn crate::transport::connection::Connection>>>,
-        handler: Arc<dyn ConnectionHandler>,
     ) -> Result<()> {
-        // 1. 处理协商（内部会处理设备冲突、更新连接信息等）
+        // 1. 处理协商（但不立即标记协商完成，等 CONNECT_ACK 发送完成后再标记）
         let (ack_frame, negotiation_parser) =
             self.handle_connect_message(frame, connection_id).await?;
 
         // 记录最终协商结果
         let final_format = negotiation_parser.default_format();
         let final_compression = negotiation_parser.default_compression();
+        let final_encryption = negotiation_parser.default_encryption();
         debug!(
-            "[ServerCore] ✅ 协商完成: connection_id={}, 最终序列化方式={:?}, 最终压缩方式={:?}",
-            connection_id, final_format, final_compression
+            "[ServerCore] ✅ 协商完成: connection_id={}, 最终序列化方式={:?}, 最终压缩方式={:?},最终加密方式={:?}",
+            connection_id, final_format, final_compression, final_encryption
         );
 
-        // 2. 使用协商后的解析器序列化 CONNECT_ACK 并发送
-        let ack_data = negotiation_parser.serialize(&ack_frame)?;
+        // 2. 序列化 CONNECT_ACK 并发送
+        // CONNECT_ACK 使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
+        // 这样客户端在收到 CONNECT_ACK 时可以使用相同的 parser 解析
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        let ack_data = PRE_NEGOTIATION_PARSER.serialize(&ack_frame)?;
         {
             let mut conn = connection.lock().await;
             conn.send(&ack_data).await?;
@@ -428,10 +492,105 @@ impl ServerCore {
             connection_id
         );
 
-        // 3. 通知连接建立（在协商完成后）
-        handler.on_connect(connection_id).await?;
+        // 3. CONNECT_ACK 发送完成后，才标记协商完成并更新连接信息
+        // 这样可以确保客户端在收到 CONNECT_ACK 之前发送的消息不会被错误地按加密方式解析
+        self.finalize_negotiation_after_ack(
+            connection_id,
+            final_format,
+            final_compression,
+            final_encryption,
+        )
+        .await;
+
+        // 4. 通知连接建立（在协商完成后）
+        // 使用 ServerEventHandler.on_connect
+        let event_handler = self
+            .event_handler
+            .as_ref()
+            .expect("ServerEventHandler is required");
+        if let Err(e) = event_handler.on_connect(connection_id).await {
+            error!(
+                "[ServerCore] ServerEventHandler.on_connect 失败: connection_id={}, error={}",
+                connection_id, e
+            );
+            return Err(e);
+        }
 
         Ok(())
+    }
+
+    /// 在 CONNECT_ACK 发送完成后，最终完成协商（标记协商完成并更新连接信息）
+    ///
+    /// 这样可以确保客户端在收到 CONNECT_ACK 之前发送的消息不会被错误地按加密方式解析
+    async fn finalize_negotiation_after_ack(
+        &self,
+        connection_id: &str,
+        final_format: SerializationFormat,
+        final_compression: CompressionAlgorithm,
+        final_encryption: EncryptionAlgorithm,
+    ) {
+        let manager = Arc::clone(&self.connection_manager);
+
+        // 获取连接信息（应该已经存在，因为 handle_connect_message 已经创建了）
+        let info = match manager.get_connection(connection_id) {
+            Some((_, conn_info)) => conn_info,
+            None => {
+                error!(
+                    "[ServerCore] 连接不存在，无法完成协商: connection_id={}",
+                    connection_id
+                );
+                return;
+            }
+        };
+
+        // 创建 parser（用于协商和 pipeline）
+        let compression_clone = final_compression.clone();
+        let encryption_clone = final_encryption.clone();
+        let parser = crate::common::MessageParser::new(
+            final_format,
+            compression_clone.clone(),
+            encryption_clone.clone(),
+        );
+
+        // 如果配置了中间件或处理器，创建 pipeline
+        let pipeline = if !self.shared_middlewares.is_empty() || !self.shared_processors.is_empty()
+        {
+            let pipeline = crate::common::message::pipeline::MessagePipeline::new(parser.clone());
+
+            // 添加共享的中间件（使用 Arc 克隆，避免重复创建）
+            for middleware in &self.shared_middlewares {
+                pipeline.add_middleware(Arc::clone(middleware)).await;
+            }
+
+            // 添加共享的处理器（使用 Arc 克隆，避免重复创建）
+            for processor in &self.shared_processors {
+                pipeline.add_processor(Arc::clone(processor)).await;
+            }
+
+            Some(std::sync::Arc::new(pipeline))
+        } else {
+            None
+        };
+
+        // 更新连接信息，标记协商完成并设置 parser/pipeline
+        if let Err(e) = manager.update_connection_negotiation_with_pipeline(
+            connection_id,
+            info.device_info.clone(),
+            final_format,
+            final_compression,
+            final_encryption,
+            info.user_id.clone(),
+            parser,
+            pipeline,
+        ) {
+            error!("[ServerCore] 最终完成协商失败: {}", e);
+            return;
+        }
+
+        debug!(
+            "[ServerCore] ✅ 协商最终完成（CONNECT_ACK 已发送）: connection_id={}",
+            connection_id
+        );
     }
 
     // ============================================================================
@@ -442,28 +601,39 @@ impl ServerCore {
     fn determine_negotiation_result(
         &self,
         negotiation: &negotiation::NegotiationResult,
-    ) -> (SerializationFormat, CompressionAlgorithm) {
+    ) -> (
+        SerializationFormat,
+        CompressionAlgorithm,
+        EncryptionAlgorithm,
+    ) {
         // 协商规则：
         // - 如果客户端强制指定（force_format=true），使用客户端格式
         // - 如果客户端指定了格式但未强制，优先使用客户端格式（如果服务端支持）
         // - 如果客户端未指定格式，使用服务端默认格式（JSON）
-        let final_format = if negotiation.is_forced {
-            negotiation.serialization_format
-        } else if negotiation.serialization_format != SerializationFormat::Json {
+        let final_format = if negotiation.is_forced
+            || negotiation.serialization_format != SerializationFormat::Json
+        {
             negotiation.serialization_format
         } else {
             self.default_serialization_format
         };
 
-        let final_compression = if negotiation.is_forced {
-            negotiation.compression
-        } else if negotiation.compression != CompressionAlgorithm::None {
-            negotiation.compression
+        let final_compression = if negotiation.is_forced
+            || negotiation.compression != CompressionAlgorithm::None
+        {
+            negotiation.compression.clone()
         } else {
-            self.default_compression
+            self.default_compression.clone()
         };
 
-        (final_format, final_compression)
+        // 加密方式
+        let final_encryption = if negotiation.encryption != EncryptionAlgorithm::None {
+            negotiation.encryption.clone()
+        } else {
+            self.default_encryption.clone()
+        };
+
+        (final_format, final_compression, final_encryption)
     }
 
     /// 记录协商详情（内部辅助方法）
@@ -473,13 +643,14 @@ impl ServerCore {
         negotiation: &negotiation::NegotiationResult,
         final_format: SerializationFormat,
         final_compression: CompressionAlgorithm,
+        final_encryption: EncryptionAlgorithm,
     ) {
         debug!(
             "[ServerCore] 📥 收到 CONNECT 消息: connection_id={}",
             connection_id
         );
-        info!(
-            "[ServerCore] 📋 协商详情: 客户端请求={:?}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?}, device={:?}, user_id={:?}",
+        debug!(
+            "[ServerCore] 📋 协商详情: 客户端请求={:?}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?},最终加密={:?} device={:?}, user_id={:?}",
             negotiation.serialization_format,
             negotiation.compression,
             negotiation.is_forced,
@@ -487,6 +658,7 @@ impl ServerCore {
             self.default_compression,
             final_format,
             final_compression,
+            final_encryption,
             negotiation.device_info.as_ref().map(|d| &d.platform),
             negotiation.user_id
         );
@@ -692,29 +864,40 @@ impl ServerCore {
     }
 
     /// 更新连接信息（内部辅助方法）
+    ///
+    /// 注意：此方法不标记协商完成，只更新基本信息
+    /// 协商完成将在 CONNECT_ACK 发送完成后由 finalize_negotiation_after_ack 标记
     async fn update_connection_info(
         &self,
         connection_id: &str,
         negotiation: &negotiation::NegotiationResult,
         final_format: SerializationFormat,
         final_compression: CompressionAlgorithm,
+        final_encryption: EncryptionAlgorithm,
         auth_user_id: &Option<String>,
     ) {
         let manager = Arc::clone(&self.connection_manager);
 
+        // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
+        // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
+        let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
+
+        // 只更新基本信息，不标记协商完成，也不创建 parser/pipeline
+        // parser/pipeline 将在 CONNECT_ACK 发送完成后创建
         if let Err(e) = manager.update_connection_negotiation(
             connection_id,
             negotiation.device_info.clone(),
             final_format,
             final_compression,
-            auth_user_id.clone(),
+            final_encryption,
+            user_id.clone(),
         ) {
             error!("[ServerCore] 更新连接协商信息失败: {}", e);
             return;
         }
 
         // 验证更新是否成功
-        if let Some(user_id) = auth_user_id {
+        if let Some(user_id) = &user_id {
             debug!(
                 "[ServerCore] 已更新连接协商信息: connection_id={}, user_id={}",
                 connection_id, user_id
@@ -730,6 +913,11 @@ impl ServerCore {
                     error!("[ServerCore] ❌ 验证失败: 连接信息中的 user_id 仍为 None");
                 }
             }
+        } else {
+            warn!(
+                "[ServerCore] ⚠️  连接信息中没有 user_id: connection_id={}, negotiation.user_id={:?}, auth_user_id={:?}",
+                connection_id, negotiation.user_id, auth_user_id
+            );
         }
     }
 
@@ -769,6 +957,7 @@ impl ServerCore {
         &self,
         final_format: SerializationFormat,
         final_compression: CompressionAlgorithm,
+        final_encryption: EncryptionAlgorithm,
         conflict_connections: &[String],
     ) -> Frame {
         let mut ack_metadata = std::collections::HashMap::new();
@@ -784,11 +973,10 @@ impl ServerCore {
         }
 
         // 创建 CONNECT_ACK，包含完整的协商结果：格式、压缩、加密
-        // 加密方式目前为 "none"（传输层TLS已提供加密，应用层暂不加密）
         let connect_ack_cmd = negotiation::create_connect_ack(
             final_format,
             final_compression,
-            Some("none"), // 加密方式：目前为 none，为未来扩展预留
+            final_encryption, // 使用配置的默认加密算法
             Some(ack_metadata),
         );
 

@@ -26,6 +26,7 @@ pub enum DevicePlatform {
 
 impl DevicePlatform {
     /// 从字符串转换为平台类型
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             s if s.eq_ignore_ascii_case("web") => DevicePlatform::Web,
@@ -133,9 +134,10 @@ impl DeviceInfo {
 }
 
 /// 设备冲突处理策略
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DeviceConflictStrategy {
     /// 允许所有设备同时在线（不检查冲突）
+    #[default]
     AllowAll,
     /// 移动端互斥（同一用户只能有一个移动端设备在线）
     /// 例如：Android 和 iOS 互斥，但 PC 和移动端可以同时在线
@@ -157,12 +159,6 @@ pub enum DeviceConflictStrategy {
         /// 例如：[{Android, IOS, HarmonyOS}] 表示移动端互斥
         exclusive_groups: Vec<HashSet<DevicePlatform>>,
     },
-}
-
-impl Default for DeviceConflictStrategy {
-    fn default() -> Self {
-        DeviceConflictStrategy::AllowAll
-    }
 }
 
 impl DeviceConflictStrategy {

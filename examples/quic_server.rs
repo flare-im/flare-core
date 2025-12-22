@@ -14,21 +14,21 @@
 //! - 统计信息：实时显示连接数和用户数
 //!
 //! 此示例展示了如何：
-//! 1. 实现 ConnectionHandler trait 来处理消息
-//! 2. 使用 HybridServer::new() 直接创建服务器
+//! 1. 实现 ServerEventHandler trait 来处理消息
+//! 2. 使用 HybridServer::with_connection_manager() 创建服务器
 //! 3. 使用 DefaultServerHandle 进行消息发送和连接管理
 //! 4. 完整的聊天室功能实现
 
 use async_trait::async_trait;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::error::Result;
-use flare_core::common::protocol::flare::core::commands::command::Type;
 use flare_core::common::protocol::{
-    Frame, Reliability, frame_with_message_command, generate_message_id, send_message,
+    Frame, MessageCommand, Reliability, frame_with_message_command, generate_message_id,
+    send_message,
 };
 use flare_core::server::HybridServer;
 use flare_core::server::handle::{DefaultServerHandle, ServerHandle};
-use flare_core::server::{ConnectionHandler, Server, ServerConfig};
+use flare_core::server::{Server, ServerConfig, ServerEventHandler};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -141,64 +141,59 @@ impl ChatRoomHandler {
 }
 
 #[async_trait]
-impl ConnectionHandler for ChatRoomHandler {
-    async fn handle_frame(&self, frame: &Frame, connection_id: &str) -> Result<Option<Frame>> {
-        // 检查是否是消息命令
-        if let Some(cmd) = &frame.command {
-            if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                // 更新消息计数
-                self.message_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+impl ServerEventHandler for ChatRoomHandler {
+    async fn handle_message(
+        &self,
+        command: &MessageCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        // 更新消息计数
+        self.message_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // 提取消息内容
-                let message_text = String::from_utf8_lossy(&msg_cmd.payload);
+        // 提取消息内容
+        let message_text = String::from_utf8_lossy(&command.payload);
 
-                // 获取或创建用户名
-                let username = {
-                    let mut usernames = self.usernames.lock().await;
-                    usernames
-                        .entry(connection_id.to_string())
-                        .or_insert_with(|| {
-                            // 如果消息包含用户名信息，提取用户名
-                            if let Some(username_bytes) = msg_cmd.metadata.get("username") {
-                                String::from_utf8_lossy(username_bytes).to_string()
-                            } else {
-                                format!("用户_{}", &connection_id[..8.min(connection_id.len())])
-                            }
-                        })
-                        .clone()
-                };
+        // 获取或创建用户名
+        let username = {
+            let mut usernames = self.usernames.lock().await;
+            usernames
+                .entry(connection_id.to_string())
+                .or_insert_with(|| {
+                    // 如果消息包含用户名信息，提取用户名
+                    if let Some(username_bytes) = command.metadata.get("username") {
+                        String::from_utf8_lossy(username_bytes).to_string()
+                    } else {
+                        format!("用户_{}", &connection_id[..8.min(connection_id.len())])
+                    }
+                })
+                .clone()
+        };
 
-                info!("[聊天室] {} 说: {}", username, message_text);
+        info!("[聊天室] {} 说: {}", username, message_text);
 
-                // 构建广播消息（包含用户名）
-                let mut broadcast_metadata = HashMap::new();
-                broadcast_metadata.insert("username".to_string(), username.as_bytes().to_vec());
-                broadcast_metadata.insert(
-                    "connection_id".to_string(),
-                    connection_id.as_bytes().to_vec(),
-                );
+        // 构建广播消息（包含用户名）
+        let mut broadcast_metadata = HashMap::new();
+        broadcast_metadata.insert("username".to_string(), username.as_bytes().to_vec());
+        broadcast_metadata.insert(
+            "connection_id".to_string(),
+            connection_id.as_bytes().to_vec(),
+        );
 
-                let broadcast_msg = send_message(
-                    generate_message_id(),
-                    format!("[{}] {}", username, message_text).into_bytes(),
-                    Some(broadcast_metadata),
-                    None,
-                );
+        let broadcast_msg = send_message(
+            generate_message_id(),
+            format!("[{}] {}", username, message_text).into_bytes(),
+            Some(broadcast_metadata),
+            None,
+        );
 
-                let broadcast_frame =
-                    frame_with_message_command(broadcast_msg, Reliability::BestEffort);
+        let broadcast_frame = frame_with_message_command(broadcast_msg, Reliability::BestEffort);
 
-                // 广播给除发送者外的所有连接
-                self.broadcast_message_except(&broadcast_frame, connection_id)
-                    .await;
+        // 广播给除发送者外的所有连接
+        self.broadcast_message_except(&broadcast_frame, connection_id)
+            .await;
 
-                // 不返回给单个连接，因为已经广播了
-                return Ok(None);
-            }
-        }
-
-        // 其他类型的消息不处理
+        // 不返回给单个连接，因为已经广播了
         Ok(None)
     }
 
@@ -225,7 +220,7 @@ impl ConnectionHandler for ChatRoomHandler {
         Ok(())
     }
 
-    async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
+    async fn on_disconnect(&self, connection_id: &str, _reason: Option<&str>) -> Result<()> {
         let username = {
             let mut usernames = self.usernames.lock().await;
             usernames.remove(connection_id)
@@ -265,19 +260,24 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("  - 统计信息：实时显示连接数和用户数");
     info!("");
 
-    // 创建 handler
-    let handler = Arc::new(ChatRoomHandler::new());
-    let handler_for_setup = Arc::clone(&handler);
-    let handler_for_stats = Arc::clone(&handler);
-    let handler_for_final_stats = Arc::clone(&handler);
+    // 创建 event handler
+    let event_handler = Arc::new(ChatRoomHandler::new());
+    let handler_for_setup = Arc::clone(&event_handler);
+    let handler_for_stats = Arc::clone(&event_handler);
+    let handler_for_final_stats = Arc::clone(&event_handler);
 
     // 仅监听 QUIC 协议
     let quic_config = ServerConfig::new("0.0.0.0:8081".to_string())
         .with_protocols(vec![TransportProtocol::QUIC])
         .with_max_connections(2000);
 
-    let mut quic_server =
-        HybridServer::new(quic_config, handler.clone() as Arc<dyn ConnectionHandler>)?;
+    let mut quic_server = HybridServer::with_connection_manager(
+        quic_config,
+        None,
+        None,
+        Some(event_handler.clone() as Arc<dyn ServerEventHandler>),
+        None,
+    )?;
 
     // 从 HybridServer 获取 ServerCore，创建 DefaultServerHandle
     let server_handle: Arc<dyn ServerHandle> = if let Some(core) = quic_server.core() {
@@ -328,7 +328,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            let (msg_count, conn_count, online_conn, online_users) =
+            let (msg_count, conn_count, _online_conn, _online_users) =
                 handler_for_periodic_stats.get_stats().await;
             let handle_guard = server_handle_clone.lock().await;
             if let Some(ref handle) = *handle_guard {
@@ -352,13 +352,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("\n正在停止服务器...");
 
     // 显示最终统计
-    let (final_msg_count, final_conn_count, final_online_conn, final_online_users) =
+    let (final_msg_count, final_conn_count, final_online_conn, _final_online_users) =
         handler_for_final_stats.get_stats().await;
     info!("");
     info!("📊 最终统计:");
     info!(
         "   - 当前在线连接: {} (用户: {})",
-        final_online_conn, final_online_users
+        final_online_conn, _final_online_users
     );
     info!("   - 累计连接数: {}", final_conn_count);
     info!("   - 累计消息数: {}", final_msg_count);

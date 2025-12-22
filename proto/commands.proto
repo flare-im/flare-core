@@ -35,6 +35,7 @@ message SystemCommand {
     AUTH           = 8; // 鉴权请求（需要 metadata，可选 data）
     AUTH_ACK       = 9; // 鉴权响应（可选 message、metadata）
     KICKED         = 10; // 被踢下线（需要 message 说明原因，可选 metadata）
+    NEGOTIATION_READY = 11; // 协商完成确认（客户端收到 CONNECT_ACK 后发送，表示已准备好使用协商好的加密方式）
   }
 
   // 序列化格式（仅在 CONNECT/CONNECT_ACK 时使用）

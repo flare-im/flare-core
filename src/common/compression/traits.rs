@@ -68,7 +68,17 @@ pub trait Compressor: Send + Sync {
     ///
     /// 名称应该是唯一的，用于在注册表中标识压缩器
     fn name(&self) -> &'static str {
-        self.algorithm().as_str()
+        // 注意：由于 algorithm() 返回的 CompressionAlgorithm 可能包含 Custom(String)，
+        // 这里需要特殊处理。对于内置算法，返回静态字符串；对于自定义算法，需要在实现中覆盖此方法
+        match self.algorithm() {
+            CompressionAlgorithm::None => "none",
+            CompressionAlgorithm::Gzip => "gzip",
+            CompressionAlgorithm::Zstd => "zstd",
+            CompressionAlgorithm::Custom(_) => {
+                // 自定义算法必须在实现中覆盖 name() 方法
+                panic!("Custom compression algorithm must override name() method")
+            }
+        }
     }
 
     /// 检测数据是否使用此压缩算法（通过魔数等）
