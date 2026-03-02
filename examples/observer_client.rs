@@ -67,7 +67,13 @@ impl ConnectionObserver for ChatObserver {
                     if let Some(cmd) = &frame.command {
                         if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
                             // 提取消息内容
-                            let message_text = String::from_utf8_lossy(&msg_cmd.payload);
+                            let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
+                                Ok(text) => text,
+                                Err(_) => {
+                                    // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                    format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                                }
+                            };
 
                             // 提取用户名（如果有）
                             let username = msg_cmd

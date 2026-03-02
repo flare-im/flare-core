@@ -79,10 +79,34 @@ async fn main() -> Result<()> {
     // ============================================================
     // 1. 注册加密器（可选，用于加密通信）
     // ============================================================
-    // 注意：在生产环境中，密钥应该从安全配置中读取，不要硬编码
-    // 这里使用与服务端相同的示例密钥（32 字节）
-    let encryption_key = b"01234567890123456789012345678901"; // 32 bytes for AES-256
-    let encryptor = Aes256GcmEncryptor::new(encryption_key)?;
+    // ⚠️  安全警告：当前示例使用硬编码密钥，仅用于演示！
+    // 生产环境必须使用安全的密钥管理方案，不要硬编码密钥。
+    // 详细说明请参考：doc/ENCRYPTION_SECURITY.md
+    //
+    // 推荐方案：
+    // 1. 传输层加密（推荐）：使用 TLS/QUIC，不需要应用层加密
+    // 2. 从服务端协商密钥：通过安全通道获取会话密钥
+    // 3. 从安全存储读取：iOS Keychain、Android Keystore 等
+    //
+    // 当前实现仅用于功能演示，生产环境请替换为安全的密钥管理方案
+    let encryption_key = if let Ok(key) = std::env::var("ENCRYPTION_KEY") {
+        // 优先使用环境变量（如果设置）
+        info!("🔐 使用环境变量 ENCRYPTION_KEY");
+        key.as_bytes().to_vec()
+    } else {
+        // 否则使用默认示例密钥（仅用于演示，需要与服务端一致）
+        warn!("⚠️  使用默认示例密钥，仅用于演示！生产环境请设置 ENCRYPTION_KEY 环境变量或使用密钥协商");
+        b"01234567890123456789012345678901".to_vec() // 32 bytes for AES-256
+    };
+    
+    if encryption_key.len() != 32 {
+        return Err(flare_core::common::error::FlareError::protocol_error(format!(
+            "Encryption key must be exactly 32 bytes, got {} bytes",
+            encryption_key.len()
+        )));
+    }
+    
+    let encryptor = Aes256GcmEncryptor::new(&encryption_key)?;
     EncryptionUtil::register_custom(Arc::new(encryptor));
     info!("🔐 已注册 AES-256-GCM 加密器");
 
@@ -404,7 +428,14 @@ impl MessageListener for ChatListener {
         // 解析消息（消息管道已自动处理序列化、压缩等）
         if let Some(cmd) = &frame.command {
             if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                let message_text = String::from_utf8_lossy(&msg_cmd.payload);
+                // 尝试解析protobuf消息内容
+                let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        // 如果不是有效的UTF-8，则显示十六进制调试信息
+                        format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                    }
+                };
                 let count = self
                     .message_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

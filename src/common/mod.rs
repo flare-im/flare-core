@@ -22,6 +22,7 @@ pub mod message;
 pub mod message_observer;
 pub mod protocol;
 pub mod serializer;
+pub mod protobuf_decoder;
 pub mod utils;
 
 // 重新导出常用类型和函数，方便使用

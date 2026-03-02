@@ -202,7 +202,14 @@ impl ServerEventHandler for CustomExtensionsServer {
         command: &flare_core::common::protocol::MessageCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
-        let payload_str = String::from_utf8_lossy(&command.payload);
+        // 尝试解析protobuf消息内容
+        let payload_str = match String::from_utf8(command.payload.clone()) {
+            Ok(text) => text,
+            Err(_) => {
+                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                format!("<protobuf_binary_data: {} bytes>", command.payload.len())
+            }
+        };
         info!(
             "📨 [服务端] 收到消息: connection_id={}, payload={}",
             connection_id, payload_str
@@ -271,7 +278,14 @@ impl MessageListener for SimpleMessageListener {
                 ),
             ) = &cmd.r#type
             {
-                let payload_str = String::from_utf8_lossy(&msg_cmd.payload);
+                // 尝试解析protobuf消息内容
+                let payload_str = match String::from_utf8(msg_cmd.payload.clone()) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        // 如果不是有效的UTF-8，则显示十六进制调试信息
+                        format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                    }
+                };
                 info!("📨 [客户端] 收到消息: payload={}", payload_str);
             }
         }

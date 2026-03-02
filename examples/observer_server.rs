@@ -77,7 +77,13 @@ impl ServerEventHandler for ChatRoomHandler {
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 提取消息内容
-        let message_text = String::from_utf8_lossy(&command.payload);
+        let message_text = match String::from_utf8(command.payload.clone()) {
+            Ok(text) => text,
+            Err(_) => {
+                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                format!("<protobuf_binary_data: {} bytes>", command.payload.len())
+            }
+        };
 
         // 获取或创建用户名
         let username = {
@@ -87,7 +93,13 @@ impl ServerEventHandler for ChatRoomHandler {
                 .or_insert_with(|| {
                     // 如果消息包含用户名信息，提取用户名
                     if let Some(username_bytes) = command.metadata.get("username") {
-                        String::from_utf8_lossy(username_bytes).to_string()
+                        match String::from_utf8(username_bytes.clone()) {
+                            Ok(username) => username,
+                            Err(_) => {
+                                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                format!("<invalid_username_{}>", hex::encode(username_bytes))
+                            }
+                        }
                     } else {
                         format!("用户_{}", &connection_id[..8.min(connection_id.len())])
                     }

@@ -573,13 +573,13 @@ mod tests {
             EncryptionAlgorithm::Aes256Gcm
         );
 
-        // 测试无效加密 metadata
+        // 测试无效加密 metadata（应返回 Custom 算法）
         let frame = FrameBuilder::new()
             .with_metadata("encryption".to_string(), b"invalid".to_vec())
             .build();
         assert_eq!(
             MessageParser::get_encryption_from_frame(&frame),
-            EncryptionAlgorithm::None
+            EncryptionAlgorithm::Custom("invalid".to_string())
         );
     }
 }

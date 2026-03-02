@@ -50,7 +50,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 if let Some(cmd) = &frame.command {
                     if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
                         // 提取消息内容
-                        let message_text = String::from_utf8_lossy(&msg_cmd.payload);
+                        let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
+                            Ok(text) => text,
+                            Err(_) => {
+                                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                            }
+                        };
 
                         // 获取或创建用户名
                         let username = {
@@ -60,7 +66,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 .or_insert_with(|| {
                                     // 如果消息包含用户名信息，提取用户名
                                     if let Some(username_bytes) = msg_cmd.metadata.get("username") {
-                                        String::from_utf8_lossy(username_bytes).to_string()
+                                        match String::from_utf8(username_bytes.clone()) {
+                                            Ok(username) => username,
+                                            Err(_) => {
+                                                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                                format!("<invalid_username_{}>", hex::encode(username_bytes))
+                                            }
+                                        }
                                     } else {
                                         format!(
                                             "用户_{}",

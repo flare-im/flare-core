@@ -91,11 +91,23 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 // 检查是否是消息命令
                 if let Some(cmd) = &frame.command {
                     if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
-                        let message = String::from_utf8_lossy(&msg_cmd.payload);
+                        let message = match String::from_utf8(msg_cmd.payload.clone()) {
+                            Ok(text) => text,
+                            Err(_) => {
+                                // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                            }
+                        };
 
                         // 检查是否是系统通知
                         if let Some(type_bytes) = msg_cmd.metadata.get("type") {
-                            let msg_type = String::from_utf8_lossy(type_bytes);
+                            let msg_type = match String::from_utf8(type_bytes.clone()) {
+                                Ok(text) => text,
+                                Err(_) => {
+                                    // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                    format!("<invalid_type_{}>", hex::encode(type_bytes))
+                                }
+                            };
                             if msg_type == "join" || msg_type == "leave" {
                                 println!("\n[系统] {}", message);
                             } else {
