@@ -133,15 +133,16 @@ impl MessageRouter {
                         _ => "system.unknown".to_string(),
                     }
                 }
-                Some(crate::common::protocol::command::Type::Message(msg_cmd)) => {
+                Some(crate::common::protocol::command::Type::Payload(msg_cmd)) => {
                     // 使用消息类型作为路由键（使用 TryFrom 替代已弃用的 from_i32）
-                    use crate::common::protocol::message_command::Type as MsgType;
+                    use crate::common::protocol::payload_command::Type as MsgType;
                     use std::convert::TryFrom;
                     match MsgType::try_from(msg_cmd.r#type) {
-                        Ok(MsgType::Send) => "message.send".to_string(),
-                        Ok(MsgType::Ack) => "message.ack".to_string(),
-                        Ok(MsgType::Data) => "message.data".to_string(),
-                        _ => format!("message.{}", msg_cmd.r#type),
+                        Ok(MsgType::Message) => "payload.message".to_string(),
+                        Ok(MsgType::Event) => "payload.event".to_string(),
+                        Ok(MsgType::Ack) => "payload.ack".to_string(),
+                        Ok(MsgType::Data) => "payload.data".to_string(),
+                        _ => format!("payload.{}", msg_cmd.r#type),
                     }
                 }
                 Some(crate::common::protocol::command::Type::Notification(notif_cmd)) => {

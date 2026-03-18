@@ -15,9 +15,9 @@ pub mod command {
         /// 系统命令（连接、心跳、错误等）
         #[prost(message, tag = "1")]
         System(super::SystemCommand),
-        /// 消息命令（发送、确认）
+        /// 载荷命令（message/event/ack/data）
         #[prost(message, tag = "2")]
-        Message(super::MessageCommand),
+        Payload(super::PayloadCommand),
         /// 通知命令（广播、用户状态等）
         #[prost(message, tag = "3")]
         Notification(super::NotificationCommand),
@@ -183,31 +183,31 @@ pub mod system_command {
 }
 /// ---
 ///
-/// ## 消息命令
+/// ## 载荷命令（信道层：在信道上传输的四类载荷）
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MessageCommand {
-    #[prost(enumeration = "message_command::Type", tag = "1")]
+pub struct PayloadCommand {
+    #[prost(enumeration = "payload_command::Type", tag = "1")]
     pub r#type: i32,
-    /// 消息唯一ID
+    /// 消息/请求唯一 ID（MESSAGE/ACK 必填，EVENT 可选）
     #[prost(string, tag = "2")]
     pub message_id: ::prost::alloc::string::String,
-    /// 消息内容
+    /// 载荷内容
     #[prost(bytes = "vec", tag = "3")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
-    /// 元信息（统一为bytes类型）
+    /// 元信息（统一为 bytes 类型）
     #[prost(map = "string, bytes", tag = "4")]
     pub metadata: ::std::collections::HashMap<
         ::prost::alloc::string::String,
         ::prost::alloc::vec::Vec<u8>,
     >,
-    /// 序列号（可用于有序传输）
+    /// 序列号（可用于有序传输，MESSAGE 常用）
     #[prost(uint64, tag = "5")]
     pub seq: u64,
 }
-/// Nested message and enum types in `MessageCommand`.
-pub mod message_command {
+/// Nested message and enum types in `PayloadCommand`.
+pub mod payload_command {
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     #[derive(
@@ -223,12 +223,15 @@ pub mod message_command {
     )]
     #[repr(i32)]
     pub enum Type {
-        /// 发送消息（需ACK）
-        Send = 0,
-        /// 确认消息
-        Ack = 1,
-        /// 普通数据传输（无需ACK，type已隐含need_ack）
-        Data = 2,
+        Unspecified = 0,
+        /// 业务消息（需 ACK，有序）
+        Message = 1,
+        /// 事件（状态变更、通知等，可选 message_id/seq）
+        Event = 2,
+        /// 确认（对 MESSAGE 或请求的确认）
+        Ack = 3,
+        /// 普通数据传输（无需 ACK）
+        Data = 4,
     }
     impl Type {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -237,7 +240,9 @@ pub mod message_command {
         /// (if the ProtoBuf definition does not change) and safe for programmatic use.
         pub fn as_str_name(&self) -> &'static str {
             match self {
-                Self::Send => "SEND",
+                Self::Unspecified => "UNSPECIFIED",
+                Self::Message => "MESSAGE",
+                Self::Event => "EVENT",
                 Self::Ack => "ACK",
                 Self::Data => "DATA",
             }
@@ -245,7 +250,9 @@ pub mod message_command {
         /// Creates an enum from field names used in the ProtoBuf definition.
         pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
             match value {
-                "SEND" => Some(Self::Send),
+                "UNSPECIFIED" => Some(Self::Unspecified),
+                "MESSAGE" => Some(Self::Message),
+                "EVENT" => Some(Self::Event),
                 "ACK" => Some(Self::Ack),
                 "DATA" => Some(Self::Data),
                 _ => None,

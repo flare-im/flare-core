@@ -46,7 +46,7 @@ pub trait MessageObserver: Send + Sync {
                     self.handle_system_command(sys_cmd, frame, connection_id)
                         .await
                 }
-                Some(crate::common::protocol::flare::core::commands::command::Type::Message(
+                Some(crate::common::protocol::flare::core::commands::command::Type::Payload(
                     msg_cmd,
                 )) => {
                     self.handle_message_command(msg_cmd, frame, connection_id)
@@ -90,7 +90,7 @@ pub trait MessageObserver: Send + Sync {
     /// 默认实现返回 None，子类可以重写此方法
     async fn handle_message_command(
         &self,
-        _msg_cmd: &crate::common::protocol::MessageCommand,
+        _msg_cmd: &crate::common::protocol::PayloadCommand,
         _frame: &Frame,
         _connection_id: Option<&str>,
     ) -> Result<Option<Frame>> {

@@ -21,7 +21,7 @@
 //! 但消息处理逻辑通过闭包定义，不依赖高级抽象。
 
 use crate::common::error::Result;
-use crate::common::protocol::{Frame, MessageCommand};
+use crate::common::protocol::{Frame, PayloadCommand};
 use crate::server::HybridServer;
 use crate::server::builder::{BaseServerBuilderConfig, ServerWrapper};
 use crate::server::events::handler::ServerEventHandler;
@@ -143,7 +143,7 @@ struct SimpleEventHandlerAdapter {
 impl ServerEventHandler for SimpleEventHandlerAdapter {
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         let handle = {
@@ -163,7 +163,7 @@ impl ServerEventHandler for SimpleEventHandlerAdapter {
             message_id: command.message_id.clone(),
             command: Some(crate::common::protocol::flare::core::commands::Command {
                 r#type: Some(
-                    crate::common::protocol::flare::core::commands::command::Type::Message(
+                    crate::common::protocol::flare::core::commands::command::Type::Payload(
                         command.clone(),
                     ),
                 ),

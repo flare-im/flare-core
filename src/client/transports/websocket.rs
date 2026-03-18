@@ -197,6 +197,10 @@ impl Client for WebSocketClient {
         }
     }
 
+    fn set_disconnect_requested(&mut self, value: bool) {
+        self.core.set_disconnect_requested(value);
+    }
+
     async fn disconnect(&mut self) -> Result<()> {
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await
     }

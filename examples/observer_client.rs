@@ -65,7 +65,7 @@ impl ConnectionObserver for ChatObserver {
                 // 解析接收到的消息（默认使用JSON，parse()会自动检测实际格式）
                 if let Ok(frame) = flare_core::common::MessageParser::json().parse(data) {
                     if let Some(cmd) = &frame.command {
-                        if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
+                        if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
                             // 提取消息内容
                             let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
                                 Ok(text) => text,

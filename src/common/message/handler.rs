@@ -4,11 +4,12 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::flare::core::commands::{
-    message_command::Type as MessageType, notification_command::Type as NotificationType,
+    notification_command::Type as NotificationType,
+    payload_command::Type as PayloadType,
     system_command::Type as SystemType,
 };
 use crate::common::protocol::{
-    CustomCommand, Frame, MessageCommand, NotificationCommand, SystemCommand,
+    CustomCommand, Frame, NotificationCommand, PayloadCommand, SystemCommand,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,11 +23,11 @@ pub enum MessageEvent {
         command: SystemCommand,
         command_type: SystemType,
     },
-    /// 消息命令事件
+    /// 载荷命令事件
     Message {
         frame: Frame,
-        command: MessageCommand,
-        command_type: MessageType,
+        command: PayloadCommand,
+        command_type: PayloadType,
     },
     /// 通知命令事件
     Notification {
@@ -58,12 +59,12 @@ pub trait MessageObserver: Send + Sync {
         Ok(())
     }
 
-    /// 处理消息命令
+    /// 处理载荷命令
     fn on_message_command(
         &self,
         frame: &Frame,
-        command: &MessageCommand,
-        command_type: MessageType,
+        command: &PayloadCommand,
+        command_type: PayloadType,
     ) -> Result<()> {
         let _ = (frame, command, command_type);
         Ok(())
@@ -224,16 +225,18 @@ impl MessageHandler {
                     command_type,
                 })
             }
-            Some(crate::common::protocol::flare::core::commands::command::Type::Message(
+            Some(crate::common::protocol::flare::core::commands::command::Type::Payload(
                 msg_cmd,
             )) => {
                 let command_type = match msg_cmd.r#type {
-                    0 => MessageType::Send,
-                    1 => MessageType::Ack,
-                    2 => MessageType::Data,
+                    0 => PayloadType::Unspecified,
+                    1 => PayloadType::Message,
+                    2 => PayloadType::Event,
+                    3 => PayloadType::Ack,
+                    4 => PayloadType::Data,
                     _ => {
                         return Err(crate::common::error::FlareError::protocol_error(
-                            "Invalid message command type",
+                            "Invalid payload command type",
                         ));
                     }
                 };

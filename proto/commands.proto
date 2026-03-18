@@ -7,15 +7,15 @@ package flare.core.commands;
 // 设计目标：
 // 1. 结构简单明了
 // 2. 去除重复命令
-// 3. 保留系统命令、消息命令、通知命令、自定义命令
+// 3. 保留系统命令、载荷命令、通知命令、自定义命令
 // ============================================================
 
 message Command {
   oneof type {
-    SystemCommand      system       = 1; // 系统命令（连接、心跳、错误等）
-    MessageCommand     message      = 2; // 消息命令（发送、确认）
+    SystemCommand       system       = 1; // 系统命令（连接、心跳、错误等）
+    PayloadCommand      payload      = 2; // 载荷命令（message/event/ack/data）
     NotificationCommand notification = 3; // 通知命令（广播、用户状态等）
-    CustomCommand      custom       = 4; // 自定义命令（业务扩展）
+    CustomCommand       custom       = 4; // 自定义命令（业务扩展）
   }
 }
 
@@ -54,20 +54,22 @@ message SystemCommand {
 }
 
 // ------------------------------------------------------------
-// 消息命令
+// 载荷命令（信道层：在信道上传输的四类载荷）
 // ------------------------------------------------------------
-message MessageCommand {
+message PayloadCommand {
   enum Type {
-    SEND = 0; // 发送消息（需ACK）
-    ACK  = 1; // 确认消息
-    DATA = 2; // 普通数据传输（无需ACK，type已隐含need_ack）
+    UNSPECIFIED = 0;
+    MESSAGE     = 1; // 业务消息（需 ACK，有序）
+    EVENT       = 2; // 事件（状态变更、通知等，可选 message_id/seq）
+    ACK         = 3; // 确认（对 MESSAGE 或请求的确认）
+    DATA        = 4; // 普通数据传输（无需 ACK）
   }
 
   Type type = 1;
-  string message_id = 2;               // 消息唯一ID
-  bytes payload = 3;                   // 消息内容
-  map<string, bytes> metadata = 4;     // 元信息（统一为bytes类型）
-  uint64 seq = 5;                      // 序列号（可用于有序传输）
+  string message_id = 2;               // 消息/请求唯一 ID（MESSAGE/ACK 必填，EVENT 可选）
+  bytes payload = 3;                   // 载荷内容
+  map<string, bytes> metadata = 4;     // 元信息（统一为 bytes 类型）
+  uint64 seq = 5;                      // 序列号（可用于有序传输，MESSAGE 常用）
 }
 
 // ------------------------------------------------------------

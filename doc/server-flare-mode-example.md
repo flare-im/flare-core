@@ -35,8 +35,8 @@ use flare_core::common::device::{DeviceConflictStrategyBuilder, DeviceManager};
 use flare_core::common::encryption::{Aes256GcmEncryptor, EncryptionAlgorithm, EncryptionUtil};
 use flare_core::common::error::Result;
 use flare_core::common::protocol::{
-    Frame, MessageCommand, Reliability, SerializationFormat,
-    frame_with_message_command, generate_message_id,
+    Frame, PayloadCommand, Reliability, SerializationFormat,
+    frame_with_payload_command, generate_message_id,
 };
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
 use flare_core::server::events::handler::ServerEventHandler;
@@ -88,7 +88,7 @@ impl ServerEventHandler for ChatRoomHandler {
     // ============================================================
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 提取消息内容
@@ -127,7 +127,7 @@ impl ServerEventHandler for ChatRoomHandler {
         );
 
         let broadcast_frame =
-            frame_with_message_command(broadcast_msg, Reliability::BestEffort);
+            frame_with_payload_command(broadcast_msg, Reliability::BestEffort);
 
         // 广播给除发送者外的所有连接
         self.broadcast_message_except(&broadcast_frame, connection_id)
@@ -142,7 +142,7 @@ impl ServerEventHandler for ChatRoomHandler {
     // ============================================================
     async fn handle_ack(
         &self,
-        _command: &MessageCommand,
+        _command: &PayloadCommand,
         _connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 处理 ACK 消息（如果需要）

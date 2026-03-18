@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::error::Result;
 use flare_core::common::protocol::{
-    Frame, MessageCommand, Reliability, SerializationFormat,
+    Frame, PayloadCommand, Reliability, SerializationFormat,
     frame_with_message_command, generate_message_id,
 };
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
@@ -80,7 +80,7 @@ impl ServerEventHandler for ChatRoomHandler {
     // ============================================================
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 提取消息内容
@@ -260,7 +260,7 @@ async fn main() -> Result<()> {
 必须实现 `ServerEventHandler` trait，包含以下方法：
 
 - **`handle_message`**：处理消息命令（发送消息）
-  - 参数：`command: &MessageCommand` - 消息命令，`connection_id: &str` - 连接ID
+  - 参数：`command: &PayloadCommand` - 载荷命令，`connection_id: &str` - 连接ID
   - 返回值：`Result<Option<Frame>>` - 返回 `None` 表示使用自动 ACK，或返回自定义响应 Frame
 
 - **`on_connect`**：连接建立完成时调用

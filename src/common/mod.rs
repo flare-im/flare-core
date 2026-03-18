@@ -43,7 +43,7 @@ pub use message::{
 };
 pub use message_observer::{ArcMessageObserver, MessageObserver};
 pub use protocol::{
-    Command, CustomCommand, Frame, MessageCommand, NotificationCommand, Reliability,
+    Command, CustomCommand, Frame, NotificationCommand, PayloadCommand, Reliability,
     SerializationFormat, SystemCommand,
 };
 pub use serializer::{SerializationUtil, Serializer};

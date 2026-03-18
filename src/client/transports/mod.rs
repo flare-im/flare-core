@@ -102,6 +102,9 @@ pub trait Client: Send + Sync {
     fn connection_id(&self) -> Option<String> {
         None
     }
+
+    /// 标记「我方即将断开」（协议竞速关闭未选中连接前调用，该连接读循环后续收到 KICK 时不向观察者通知被踢）
+    fn set_disconnect_requested(&mut self, _value: bool) {}
 }
 
 pub mod client_core;

@@ -455,8 +455,9 @@ impl HybridClient {
                 total_ms
             );
 
-            // 关闭其他未选中的连接
-            Self::disconnect_unselected_clients(successful_clients);
+            // 先由客户端主动断开所有未选中连接（await 完成），再在选中连接上发 CONNECT，
+            // 避免未选中连接仍在线时服务端对其发 KICK 导致误报「被踢」和前端断连
+            Self::disconnect_unselected_clients(successful_clients).await;
 
             // 现在发送 CONNECT 消息（网络连接已建立）
             tracing::debug!(
@@ -558,14 +559,18 @@ impl HybridClient {
         }
     }
 
-    /// 关闭未选中的连接
-    fn disconnect_unselected_clients(clients: Vec<SuccessfulConnection>) {
+    /// 关闭未选中的连接（客户端主动断开，并等待全部关闭完成）
+    ///
+    /// 先对每个未选中 client 置位 set_disconnect_requested(true)，再并行 await 各 disconnect，
+    /// 确保在选中连接发送 CONNECT 之前未选中连接已关闭，避免服务端对未选中连接发 KICK 导致误报「被踢」。
+    async fn disconnect_unselected_clients(clients: Vec<SuccessfulConnection>) {
         if clients.is_empty() {
             return;
         }
 
-        tracing::info!("正在关闭 {} 个未选中的连接...", clients.len());
+        tracing::info!("正在主动关闭 {} 个未选中的连接（客户端先断）...", clients.len());
 
+        let mut handles = Vec::with_capacity(clients.len());
         for (index, protocol, mut client, elapsed) in clients {
             tracing::debug!(
                 "关闭未选中的连接: {:?} (优先级: {}, 耗时: {:?})",
@@ -573,18 +578,24 @@ impl HybridClient {
                 index,
                 elapsed
             );
-
-            // 异步关闭，不阻塞
-            tokio::spawn(async move {
-                if let Err(e) = client.disconnect().await {
-                    tracing::warn!("关闭 {:?} 连接时出错: {}", protocol, e);
-                } else {
-                    tracing::debug!("✅ {:?} 连接已关闭", protocol);
-                }
+            client.set_disconnect_requested(true);
+            let handle = tokio::spawn(async move {
+                let res = client.disconnect().await;
+                (protocol, res)
             });
+            handles.push(handle);
         }
 
-        tracing::info!("所有未选中的连接已关闭");
+        for handle in handles {
+            if let Ok((protocol, res)) = handle.await {
+                match res {
+                    Ok(()) => tracing::debug!("✅ {:?} 未选中连接已关闭", protocol),
+                    Err(e) => tracing::warn!("关闭 {:?} 连接时出错: {}", protocol, e),
+                }
+            }
+        }
+
+        tracing::info!("所有未选中的连接已主动关闭");
     }
 
     /// 构建所有协议都失败的错误信息

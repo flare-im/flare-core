@@ -257,7 +257,7 @@ impl ClientEventHandler for MyEventHandler {
         Ok(())
     }
     
-    async fn handle_message_command(&self, cmd_type: MessageCommandType, frame: &Frame) -> Result<()> {
+    async fn handle_message_command(&self, cmd_type: PayloadCommandType, frame: &Frame) -> Result<()> {
         // 处理消息命令
         Ok(())
     }

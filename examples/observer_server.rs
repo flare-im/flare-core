@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use flare_core::common::config_types::TransportProtocol;
 use flare_core::common::error::Result;
 use flare_core::common::protocol::{
-    Frame, MessageCommand, Reliability, SerializationFormat, frame_with_message_command,
+    Frame, PayloadCommand, Reliability, SerializationFormat, frame_with_message_command,
     generate_message_id,
 };
 use flare_core::server::ObserverServerBuilder;
@@ -73,7 +73,7 @@ impl ChatRoomHandler {
 impl ServerEventHandler for ChatRoomHandler {
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 提取消息内容

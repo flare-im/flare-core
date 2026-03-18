@@ -199,7 +199,7 @@ struct CustomExtensionsServer;
 impl ServerEventHandler for CustomExtensionsServer {
     async fn handle_message(
         &self,
-        command: &flare_core::common::protocol::MessageCommand,
+        command: &flare_core::common::protocol::PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 尝试解析protobuf消息内容
@@ -273,7 +273,7 @@ impl MessageListener for SimpleMessageListener {
     async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
         if let Some(cmd) = &frame.command {
             if let Some(
-                flare_core::common::protocol::flare::core::commands::command::Type::Message(
+                flare_core::common::protocol::flare::core::commands::command::Type::Payload(
                     msg_cmd,
                 ),
             ) = &cmd.r#type

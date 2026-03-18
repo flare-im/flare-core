@@ -76,7 +76,7 @@ impl FlareServerBuilder {
     /// # 示例
     /// ```rust,no_run
     /// use flare_core::server::events::handler::ServerEventHandler;
-    /// use flare_core::common::protocol::MessageCommand;
+    /// use flare_core::common::protocol::PayloadCommand;
     /// use flare_core::common::error::Result;
     /// use flare_core::common::protocol::Frame;
     /// use async_trait::async_trait;
@@ -88,7 +88,7 @@ impl FlareServerBuilder {
     /// impl ServerEventHandler for MyHandler {
     ///     async fn handle_message(
     ///         &self,
-    ///         command: &MessageCommand,
+    ///         command: &PayloadCommand,
     ///         connection_id: &str,
     ///     ) -> Result<Option<Frame>> {
     ///         // 处理消息

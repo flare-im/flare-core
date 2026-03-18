@@ -73,8 +73,8 @@ impl ServerMessageWrapper {
                     message_id
                 );
                 use crate::common::protocol::Reliability;
-                use crate::common::protocol::builder::{ack_message, frame_with_message_command};
-                frame_with_message_command(ack_message(message_id, None), Reliability::AtLeastOnce)
+                use crate::common::protocol::builder::{ack_message, frame_with_payload_command};
+                frame_with_payload_command(ack_message(message_id, None), Reliability::AtLeastOnce)
             }
             Err(e) => {
                 // Handler 处理失败，发送包含错误信息的 ACK
@@ -86,7 +86,7 @@ impl ServerMessageWrapper {
                     e
                 );
                 use crate::common::protocol::Reliability;
-                use crate::common::protocol::builder::{ack_message, frame_with_message_command};
+                use crate::common::protocol::builder::{ack_message, frame_with_payload_command};
                 use std::collections::HashMap;
 
                 // 在 metadata 中放入错误信息
@@ -94,7 +94,7 @@ impl ServerMessageWrapper {
                 metadata.insert("error".to_string(), b"true".to_vec());
                 metadata.insert("error_message".to_string(), e.to_string().into_bytes());
 
-                frame_with_message_command(
+                frame_with_payload_command(
                     ack_message(message_id, Some(metadata)),
                     Reliability::AtLeastOnce,
                 )
@@ -332,23 +332,30 @@ impl ServerMessageWrapper {
         Ok(())
     }
 
-    /// 处理消息命令
+    /// 处理载荷命令
     async fn handle_message_command(
         &self,
         _frame: &Frame,
-        command: &crate::common::protocol::MessageCommand,
+        command: &crate::common::protocol::PayloadCommand,
         connection_id: &str,
     ) -> crate::client::Result<()> {
         let message_id = command.message_id.clone();
 
-        use crate::common::protocol::flare::core::commands::message_command::Type as MsgType;
+        use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadType;
 
-        if let Ok(msg_type) = MsgType::try_from(command.r#type) {
-            // 根据消息类型调用对应的处理方法并发送响应
-            let handler_future = match msg_type {
-                MsgType::Send => self.event_handler.handle_message(command, connection_id),
-                MsgType::Ack => self.event_handler.handle_ack(command, connection_id),
-                MsgType::Data => self.event_handler.handle_data(command, connection_id),
+        if let Ok(payload_type) = PayloadType::try_from(command.r#type) {
+            let handler_future = match payload_type {
+                PayloadType::Message => self.event_handler.handle_message(command, connection_id),
+                PayloadType::Event => self.event_handler.handle_event(command, connection_id),
+                PayloadType::Ack => self.event_handler.handle_ack(command, connection_id),
+                PayloadType::Data => self.event_handler.handle_data(command, connection_id),
+                PayloadType::Unspecified => {
+                    tracing::warn!(
+                        "[ServerMessageWrapper] handle_message_command: Unspecified payload type, connection_id={}",
+                        connection_id
+                    );
+                    return Ok(());
+                }
             };
 
             // 统一处理并发送响应
@@ -364,7 +371,7 @@ impl ServerMessageWrapper {
         }
 
         tracing::error!(
-            "[ServerMessageWrapper] handle_message_command: 无法识别消息类型, connection_id={}, message_id={}",
+            "[ServerMessageWrapper] handle_message_command: 无法识别载荷类型, connection_id={}, message_id={}",
             connection_id,
             message_id
         );
@@ -465,10 +472,10 @@ impl ConnectionHandler for ServerMessageWrapper {
                         });
                     }
                 }
-                Some(crate::common::protocol::flare::core::commands::command::Type::Message(
+                Some(crate::common::protocol::flare::core::commands::command::Type::Payload(
                     msg_cmd,
                 )) => {
-                    // 处理消息命令
+                    // 处理载荷命令
                     let wrapper = self.clone_for_async();
                     let msg_cmd_clone = msg_cmd.clone();
                     let frame_clone = frame.clone();

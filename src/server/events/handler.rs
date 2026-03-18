@@ -4,7 +4,7 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::{
-    Frame, MessageCommand, NotificationCommand, flare::core::commands::CustomCommand,
+    Frame, NotificationCommand, PayloadCommand, flare::core::commands::CustomCommand,
 };
 use async_trait::async_trait;
 
@@ -38,51 +38,40 @@ pub trait ServerEventHandler: Send + Sync {
         Ok(None)
     }
 
-    /// 处理 SEND 消息命令（发送消息）
-    ///
-    /// # 参数
-    /// - `command`: 消息命令
-    /// - `connection_id`: 连接 ID
-    ///
-    /// # 返回
-    /// 可选回复 Frame（如果返回 None，框架会自动发送 ACK）
+    /// 处理 MESSAGE 载荷命令（业务消息，需 ACK）
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         let _ = (command, connection_id);
         Ok(None)
     }
 
-    /// 处理 ACK 消息命令（确认消息）
-    ///
-    /// # 参数
-    /// - `command`: ACK 消息命令
-    /// - `connection_id`: 连接 ID
-    ///
-    /// # 返回
-    /// 可选回复 Frame
+    /// 处理 EVENT 载荷命令（事件）
+    async fn handle_event(
+        &self,
+        command: &PayloadCommand,
+        connection_id: &str,
+    ) -> Result<Option<Frame>> {
+        let _ = (command, connection_id);
+        Ok(None)
+    }
+
+    /// 处理 ACK 载荷命令（确认）
     async fn handle_ack(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         let _ = (command, connection_id);
         Ok(None)
     }
 
-    /// 处理 DATA 消息命令（普通数据传输）
-    ///
-    /// # 参数
-    /// - `command`: DATA 消息命令
-    /// - `connection_id`: 连接 ID
-    ///
-    /// # 返回
-    /// 可选回复 Frame
+    /// 处理 DATA 载荷命令（普通数据传输）
     async fn handle_data(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         let _ = (command, connection_id);

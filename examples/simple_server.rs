@@ -48,7 +48,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             Box::pin(async move {
                 // 检查是否是消息命令
                 if let Some(cmd) = &frame.command {
-                    if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
+                    if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
                         // 提取消息内容
                         let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
                             Ok(text) => text,

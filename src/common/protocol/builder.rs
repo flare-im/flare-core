@@ -3,13 +3,13 @@
 
 use super::flare::core::commands::{
     command::Type as CommandType,
-    message_command::Type as MessageType,
     notification_command::Type as NotificationType,
+    payload_command::Type as PayloadType,
     system_command::{SerializationFormat, Type as SystemType},
 };
 use super::flare::core::{
     Frame, Reliability,
-    commands::{Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand},
+    commands::{Command, CustomCommand, NotificationCommand, PayloadCommand, SystemCommand},
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -311,18 +311,18 @@ pub fn kicked(
 }
 
 // ============================================================================
-// 消息命令构建方法
+// 载荷命令构建方法
 // ============================================================================
 
-/// 创建消息命令（内部辅助函数）
-fn create_message_command(
-    r#type: MessageType,
+/// 创建载荷命令（内部辅助函数）
+fn create_payload_command(
+    r#type: PayloadType,
     message_id: String,
     payload: Vec<u8>,
     metadata: Option<HashMap<String, Vec<u8>>>,
     seq: Option<u64>,
-) -> MessageCommand {
-    MessageCommand {
+) -> PayloadCommand {
+    PayloadCommand {
         r#type: r#type as i32,
         message_id,
         payload,
@@ -331,23 +331,33 @@ fn create_message_command(
     }
 }
 
-/// 创建 SEND 消息命令
+/// 创建 MESSAGE 载荷命令（业务消息，需 ACK）
 pub fn send_message(
     message_id: String,
     payload: Vec<u8>,
     metadata: Option<HashMap<String, Vec<u8>>>,
     seq: Option<u64>,
-) -> MessageCommand {
-    create_message_command(MessageType::Send, message_id, payload, metadata, seq)
+) -> PayloadCommand {
+    create_payload_command(PayloadType::Message, message_id, payload, metadata, seq)
 }
 
-/// 创建 ACK 消息命令
+/// 创建 EVENT 载荷命令（事件）
+pub fn event_message(
+    message_id: String,
+    payload: Vec<u8>,
+    metadata: Option<HashMap<String, Vec<u8>>>,
+    seq: Option<u64>,
+) -> PayloadCommand {
+    create_payload_command(PayloadType::Event, message_id, payload, metadata, seq)
+}
+
+/// 创建 ACK 载荷命令（确认）
 pub fn ack_message(
     message_id: String,
     metadata: Option<HashMap<String, Vec<u8>>>,
-) -> MessageCommand {
-    MessageCommand {
-        r#type: MessageType::Ack as i32,
+) -> PayloadCommand {
+    PayloadCommand {
+        r#type: PayloadType::Ack as i32,
         message_id,
         payload: Vec::new(),
         metadata: metadata.unwrap_or_default(),
@@ -355,14 +365,14 @@ pub fn ack_message(
     }
 }
 
-/// 创建 DATA 消息命令（无需 ACK）
+/// 创建 DATA 载荷命令（无需 ACK）
 pub fn data_message(
     message_id: String,
     payload: Vec<u8>,
     metadata: Option<HashMap<String, Vec<u8>>>,
     seq: Option<u64>,
-) -> MessageCommand {
-    create_message_command(MessageType::Data, message_id, payload, metadata, seq)
+) -> PayloadCommand {
+    create_payload_command(PayloadType::Data, message_id, payload, metadata, seq)
 }
 
 // ============================================================================
@@ -420,30 +430,26 @@ pub fn frame_with_system_command(system_command: SystemCommand, reliability: Rel
     create_frame_with_command(CommandType::System(system_command), reliability)
 }
 
-/// 创建包含消息命令的 Frame
+/// 创建包含载荷命令的 Frame（载荷类型：MESSAGE/EVENT/ACK/DATA）
 ///
-/// 注意：Frame 的 message_id 会使用 MessageCommand.message_id，以确保客户端和服务端能正确匹配响应
-/// 如果 MessageCommand.message_id 为空，则自动生成一个并更新 MessageCommand
-pub fn frame_with_message_command(
-    mut message_command: MessageCommand,
+/// Frame 的 message_id 使用 PayloadCommand.message_id；若为空则自动生成并回写。
+pub fn frame_with_payload_command(
+    mut payload_command: PayloadCommand,
     reliability: Reliability,
 ) -> Frame {
-    // 如果 message_id 为空，自动生成一个并更新 MessageCommand
-    if message_command.message_id.is_empty() {
-        message_command.message_id = generate_message_id();
+    if payload_command.message_id.is_empty() {
+        payload_command.message_id = generate_message_id();
     }
-
-    // 使用 MessageCommand.message_id 作为 Frame 的 message_id，确保两者一致
-    let message_id = message_command.message_id.clone();
-
+    let message_id = payload_command.message_id.clone();
     FrameBuilder::new()
         .with_command(Command {
-            r#type: Some(CommandType::Message(message_command)),
+            r#type: Some(CommandType::Payload(payload_command)),
         })
         .with_message_id(message_id)
         .with_reliability(reliability)
         .build()
 }
+
 
 /// 创建包含通知命令的 Frame
 pub fn frame_with_notification_command(

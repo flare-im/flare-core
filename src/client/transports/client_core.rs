@@ -8,7 +8,7 @@ use crate::client::heartbeat::HeartbeatManager;
 use crate::client::router::MessageRouter;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::flare::core::commands::command::Type;
-use crate::common::protocol::flare::core::commands::message_command::Type as MessageCommandType;
+use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadCommandType;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotificationCommandType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
 use crate::common::protocol::{Frame, Reliability, connect, frame_with_system_command};
@@ -53,6 +53,8 @@ pub struct ClientCore {
     /// 当收到 CONNECT_ACK 并更新 parser 后，设置为 true
     /// 用于判断是否应该使用协商后的 parser 解析消息
     negotiation_completed: Arc<AtomicBool>,
+    /// 我方已请求断开（disconnect_internal 中置位）：若随后读循环仍收到 KICK，不向观察者通知「被踢」，避免重复登录/协议竞速时误报
+    disconnect_requested: Arc<AtomicBool>,
 }
 
 impl ClientCore {
@@ -78,7 +80,13 @@ impl ClientCore {
             client_connection: Arc::new(std::sync::Mutex::new(None)),
             pending_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             negotiation_completed: Arc::new(AtomicBool::new(false)),
+            disconnect_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 标记「我方已请求断开」（disconnect_internal 调用前设置，收到 KICK 时不向观察者通知被踢）
+    pub fn set_disconnect_requested(&self, value: bool) {
+        self.disconnect_requested.store(value, Ordering::SeqCst);
     }
 
     /// 确定初始序列化格式和压缩算法
@@ -220,10 +228,10 @@ impl ClientCore {
             );
 
             if let Some(cmd) = &frame.command {
-                if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
+                if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
                     if msg_cmd.message_id != frame.message_id {
                         tracing::warn!(
-                            "[ClientCore] MessageCommand.message_id 和 Frame.message_id 不一致: cmd_id={}, frame_id={}",
+                            "[ClientCore] PayloadCommand.message_id 和 Frame.message_id 不一致: cmd_id={}, frame_id={}",
                             msg_cmd.message_id,
                             frame.message_id
                         );
@@ -436,10 +444,19 @@ impl ClientCore {
         // 主动断开连接
         self.disconnect_on_kicked().await;
 
-        // 通知观察者（被踢事件）
-        self.notify_observers(&ConnectionEvent::Disconnected(kick_reason.clone()));
-
-        tracing::info!("[ClientCore] 连接已断开（被踢）: {}", kick_reason);
+        // 仅在协商完成后且非我方主动断开时，向观察者通知「被踢」语义
+        // - 协议竞速：未协商完成的连接收到 KICK 不通知
+        // - 重复登录：上层先 disconnect 再建新连接时，disconnect_requested 已置位，读循环后续收到的 KICK 不通知
+        let should_notify = self.negotiation_completed.load(Ordering::SeqCst)
+            && !self.disconnect_requested.load(Ordering::SeqCst);
+        if should_notify {
+            self.notify_observers(&ConnectionEvent::Disconnected(kick_reason.clone()));
+            tracing::info!("[ClientCore] 连接已断开（被踢）: {}", kick_reason);
+        } else {
+            tracing::debug!(
+                "[ClientCore] 收到 KICKED 但不向观察者通知（协商未完成或我方已请求断开）"
+            );
+        }
     }
 
     /// 解析被踢原因（内部辅助函数）
@@ -493,8 +510,8 @@ impl ClientCore {
         };
 
         match &cmd.r#type {
-            Some(Type::Message(msg_cmd)) => {
-                if let Ok(cmd_type) = MessageCommandType::try_from(msg_cmd.r#type) {
+            Some(Type::Payload(msg_cmd)) => {
+                if let Ok(cmd_type) = PayloadCommandType::try_from(msg_cmd.r#type) {
                     let _ = handler.handle_message_command(cmd_type, frame).await;
                 }
             }
@@ -988,6 +1005,7 @@ impl Clone for ClientCore {
             client_connection: Arc::clone(&self.client_connection), // 共享连接引用
             pending_map: Arc::clone(&self.pending_map),
             negotiation_completed: Arc::clone(&self.negotiation_completed), // 共享协商完成标志
+            disconnect_requested: Arc::new(AtomicBool::new(false)), // 每个 clone 独立，避免互相影响
         }
     }
 }

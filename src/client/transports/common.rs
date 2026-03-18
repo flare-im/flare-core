@@ -174,6 +174,9 @@ impl ClientConnectionHelper {
         core.state_manager
             .set_state(crate::client::connection::ConnectionState::Disconnecting);
 
+        // 标记我方主动断开，后续读循环若收到 KICK 不再向观察者通知「被踢」（重复登录/协议竞速场景）
+        core.set_disconnect_requested(true);
+
         // 停止心跳
         core.stop_heartbeat();
 

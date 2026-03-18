@@ -22,7 +22,7 @@ use flare_core::common::device::DeviceConflictStrategyBuilder;
 use flare_core::common::encryption::{Aes256GcmEncryptor, EncryptionAlgorithm, EncryptionUtil};
 use flare_core::common::message::{LogLevel, LoggingMiddleware};
 use flare_core::common::protocol::{
-    Frame, MessageCommand, Reliability, SerializationFormat, frame_with_message_command,
+    Frame, PayloadCommand, Reliability, SerializationFormat, frame_with_message_command,
     generate_message_id,
 };
 use flare_core::common::*;
@@ -236,7 +236,7 @@ impl ServerEventHandler for ChatRoomHandler {
     /// 处理 SEND 消息（聊天消息）
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         let username = self
@@ -259,8 +259,8 @@ impl ServerEventHandler for ChatRoomHandler {
         info!("💬 [{}]: {}", username, message_text);
 
         // 广播消息给所有用户（排除发送者）
-        let broadcast_cmd = MessageCommand {
-            r#type: 0, // SEND
+        let broadcast_cmd = PayloadCommand {
+            r#type: 1, // MESSAGE
             message_id: generate_message_id(),
             payload: format!("[{}]: {}", username, message_text).into_bytes(),
             metadata: std::collections::HashMap::new(),
@@ -286,7 +286,7 @@ impl ServerEventHandler for ChatRoomHandler {
     /// 处理 ACK 消息（客户端确认）
     async fn handle_ack(
         &self,
-        _command: &MessageCommand,
+        _command: &PayloadCommand,
         _connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 聊天室不需要处理 ACK
@@ -296,7 +296,7 @@ impl ServerEventHandler for ChatRoomHandler {
     /// 处理 DATA 消息
     async fn handle_data(
         &self,
-        _command: &MessageCommand,
+        _command: &PayloadCommand,
         _connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 聊天室不需要处理 DATA
@@ -342,8 +342,8 @@ impl ServerEventHandler for ChatRoomHandler {
         info!("📝 用户ID: {} (连接ID: {})", username, connection_id);
 
         // 发送欢迎消息
-        let welcome_cmd = MessageCommand {
-            r#type: 0, // SEND
+        let welcome_cmd = PayloadCommand {
+            r#type: 1, // MESSAGE
             message_id: generate_message_id(),
             payload: format!("欢迎 {} 加入聊天室！", username).into_bytes(),
             metadata: std::collections::HashMap::new(),

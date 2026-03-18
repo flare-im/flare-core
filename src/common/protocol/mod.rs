@@ -26,7 +26,7 @@ pub mod flare {
 
         // 重新导出常用类型
         pub use commands::{
-            Command, CustomCommand, MessageCommand, NotificationCommand, SystemCommand,
+            Command, CustomCommand, NotificationCommand, PayloadCommand, SystemCommand,
         };
     }
 }

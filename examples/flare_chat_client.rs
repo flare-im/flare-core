@@ -427,7 +427,7 @@ impl MessageListener for ChatListener {
     async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
         // 解析消息（消息管道已自动处理序列化、压缩等）
         if let Some(cmd) = &frame.command {
-            if let Some(Type::Message(msg_cmd)) = &cmd.r#type {
+            if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
                 // 尝试解析protobuf消息内容
                 let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
                     Ok(text) => text,

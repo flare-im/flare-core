@@ -52,7 +52,7 @@ Flare Core 提供三种构建模式，从简单到完整，按需选择：
 ```rust
 use async_trait::async_trait;
 use flare_core::server::events::handler::ServerEventHandler;
-use flare_core::common::protocol::{MessageCommand, Frame};
+use flare_core::common::protocol::{PayloadCommand, Frame};
 use flare_core::common::*;
 use flare_core::server::*;
 
@@ -62,7 +62,7 @@ struct MyHandler;
 impl ServerEventHandler for MyHandler {
     async fn handle_message(
         &self,
-        command: &MessageCommand,
+        command: &PayloadCommand,
         connection_id: &str,
     ) -> Result<Option<Frame>> {
         // 处理消息
