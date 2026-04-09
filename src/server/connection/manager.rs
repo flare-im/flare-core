@@ -419,6 +419,7 @@ impl ConnectionManager {
         compression: crate::common::compression::CompressionAlgorithm,
         encryption: crate::common::encryption::EncryptionAlgorithm,
         user_id: Option<String>,
+        metadata: Option<HashMap<String,String>>,
     ) -> Result<()> {
         let mut connections = self
             .connections
@@ -435,6 +436,12 @@ impl ConnectionManager {
         info.serialization_format = serialization_format;
         info.compression = compression;
         info.encryption = encryption;
+        // 若有传入 metadata，将其所有键值合并到 ConnectionInfo.metadata（同 key 覆盖）
+        if let Some(meta) = metadata {
+            for (k, v) in meta {
+                info.metadata.insert(k, v);
+            }
+        }
         // 注意：这里不设置 negotiation_completed = true
         // 也不创建 cached_parser，这些将在 CONNECT_ACK 发送完成后设置
 
@@ -445,12 +452,7 @@ impl ConnectionManager {
 
         // 添加调试日志
         if user_id_to_set.is_none() {
-            tracing::trace!(
-                connection_id = %connection_id,
-                incoming_user_id = ?user_id,
-                old_user_id = ?old_user_id,
-                "update_connection_negotiation: user_id_to_set is None, user_id will not be set"
-            );
+            tracing::trace!(connection_id = %connection_id,incoming_user_id = ?user_id,old_user_id = ?old_user_id,"update_connection_negotiation: user_id_to_set is None, user_id will not be set");
         }
 
         if let Some(user_id_val) = user_id_to_set {
