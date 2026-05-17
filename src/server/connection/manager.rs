@@ -419,7 +419,7 @@ impl ConnectionManager {
         compression: crate::common::compression::CompressionAlgorithm,
         encryption: crate::common::encryption::EncryptionAlgorithm,
         user_id: Option<String>,
-        metadata: Option<HashMap<String,String>>,
+        metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
         let mut connections = self
             .connections

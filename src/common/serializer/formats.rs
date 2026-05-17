@@ -4,9 +4,8 @@
 
 use super::traits::Serializer;
 use crate::common::error::{FlareError, Result};
+use crate::common::protobuf_decoder::{ProtobufDecoder, safe_protobuf_decode};
 use crate::common::protocol::{Frame, SerializationFormat};
-use crate::common::protobuf_decoder::{safe_protobuf_decode, ProtobufDecoder};
-
 
 /// Protobuf 序列化器
 pub struct ProtobufSerializer;
@@ -41,13 +40,13 @@ impl Serializer for ProtobufSerializer {
 }
 
 /// 带粘包处理的 Protobuf 序列化器
-/// 
+///
 /// 用于处理带长度前缀的 Protobuf 消息，防止将 varint 长度前缀误认为字符串内容
-/// 这解决了 protobuf string 字段前出现 "\x0c" 的问题，该问题是由于 length varint 
+/// 这解决了 protobuf string 字段前出现 "\x0c" 的问题，该问题是由于 length varint
 /// 被当成字符串解码导致的
 pub struct FramedProtobufSerializer {
     /// 用于处理粘包的解码器
-    _decoder: Option<ProtobufDecoder<Frame>>, 
+    _decoder: Option<ProtobufDecoder<Frame>>,
 }
 
 impl FramedProtobufSerializer {
@@ -68,22 +67,24 @@ impl FramedProtobufSerializer {
 impl Serializer for FramedProtobufSerializer {
     fn serialize(&self, frame: &Frame) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
-        prost::Message::encode(frame, &mut buf)
-            .map_err(|e| FlareError::encoding_error(format!("Framed Protobuf encode error: {}", e)))?;
-        
+        prost::Message::encode(frame, &mut buf).map_err(|e| {
+            FlareError::encoding_error(format!("Framed Protobuf encode error: {}", e))
+        })?;
+
         // 为消息添加长度前缀
         let mut prefixed_buf = Vec::new();
         prost::encoding::encode_varint(buf.len() as u64, &mut prefixed_buf);
         prefixed_buf.extend_from_slice(&buf);
-        
+
         Ok(prefixed_buf)
     }
 
     fn deserialize(&self, data: &[u8]) -> Result<Frame> {
         // 对于带前缀的protobuf消息，需要使用专用解码器
         // 这里我们直接使用安全解码函数，因为单次解码不需要维护状态
-        safe_protobuf_decode::<Frame>(data)
-            .map_err(|e| FlareError::deserialization_error(format!("Framed Protobuf decode error: {}", e)))
+        safe_protobuf_decode::<Frame>(data).map_err(|e| {
+            FlareError::deserialization_error(format!("Framed Protobuf decode error: {}", e))
+        })
     }
 
     fn format(&self) -> SerializationFormat {

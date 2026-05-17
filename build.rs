@@ -1,6 +1,8 @@
 use std::io::Result;
 
 fn main() -> Result<()> {
+    println!("cargo:rerun-if-env-changed=PROTOC");
+
     // 创建输出目录
     std::fs::create_dir_all("src/common/protocol")?;
 
@@ -12,9 +14,14 @@ fn main() -> Result<()> {
 
     // 检查是否有 PROTOC 环境变量
     let has_protoc = std::env::var("PROTOC").is_ok();
+    let has_protoc_on_path = std::process::Command::new("protoc")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
 
-    // 如果文件已存在且没有 protoc，跳过编译（使用已生成的文件）
-    if files_exist && !has_protoc {
+    // 如果文件已存在且没有可用 protoc，跳过编译（使用已生成的文件）
+    if files_exist && !has_protoc && !has_protoc_on_path {
         println!("cargo:warning=protoc not found, using pre-generated protobuf files");
         println!("cargo:warning=If you modify proto files, install protoc: brew install protobuf");
         println!("cargo:rerun-if-changed=proto/frame.proto");
@@ -23,7 +30,7 @@ fn main() -> Result<()> {
     }
 
     // 如果有 protoc 或文件不存在，尝试编译
-    if has_protoc || !files_exist {
+    if has_protoc || has_protoc_on_path || !files_exist {
         // 配置prost-build输出路径
         let mut config = prost_build::Config::new();
         config.out_dir("src/common/protocol");

@@ -420,20 +420,12 @@ impl ConnectionObserver for ConnectionHandlerObserverAdapter {
                 });
             }
             ConnectionEvent::Connected => {
-                // 调用 on_connect
-                let handler = Arc::clone(&self.handler);
-                // 使用 Arc<str> 避免 String clone，减少内存分配
-                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
-                tokio::spawn(async move {
-                    use crate::server::ConnectionHandler;
-                    if let Err(e) = ConnectionHandler::on_connect(handler.as_ref(), &conn_id).await
-                    {
-                        error!(
-                            "[ConnectionHandlerObserverAdapter] 处理连接事件失败: connection_id={}, error={}",
-                            conn_id, e
-                        );
-                    }
-                });
+                // 物理连接建立不等于 IM 会话建立。业务 on_connect 必须等 CONNECT
+                // 认证、协商、CONNECT_ACK 发送完成后由 ServerCore 统一触发。
+                debug!(
+                    "[ConnectionHandlerObserverAdapter] transport connected; wait for CONNECT negotiation: connection_id={}",
+                    self.connection_id
+                );
             }
             ConnectionEvent::Disconnected(reason) => {
                 // 调用 on_disconnect

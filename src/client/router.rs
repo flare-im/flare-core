@@ -49,10 +49,7 @@ impl MessageRouter {
     /// - `handler`: 消息处理器
     pub fn register(&mut self, route: impl Into<String>, handler: Arc<dyn MessageHandler>) {
         let route = route.into();
-        self.handlers
-            .entry(route)
-            .or_default()
-            .push(handler);
+        self.handlers.entry(route).or_default().push(handler);
     }
 
     /// 设置默认处理器

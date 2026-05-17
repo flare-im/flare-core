@@ -70,7 +70,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                             Ok(username) => username,
                                             Err(_) => {
                                                 // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                                format!("<invalid_username_{}>", hex::encode(username_bytes))
+                                                format!(
+                                                    "<invalid_username_{}>",
+                                                    hex::encode(username_bytes)
+                                                )
                                             }
                                         }
                                     } else {

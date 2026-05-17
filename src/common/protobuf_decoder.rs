@@ -1,9 +1,9 @@
 //! # 安全的 Protobuf 解码器（含粘包处理）
-//! 
+//!
 //! 用于处理带长度前缀的 Protobuf 消息，防止将 varint 长度前缀误认为字符串内容
-//! 这解决了 protobuf string 字段前出现 "\x0c" 的问题，该问题是由于 length varint 
+//! 这解决了 protobuf string 字段前出现 "\x0c" 的问题，该问题是由于 length varint
 //! 被当成字符串解码导致的
-//! 
+//!
 //! 此模块提供了专门的 Protobuf 序列化器实现，以替代基础的 ProtobufSerializer
 
 use bytes::BytesMut;
@@ -36,7 +36,7 @@ where
     }
 
     /// 解码下一个完整的消息
-    /// 
+    ///
     /// 返回 Ok(Some(message)) 如果有足够的数据解码一个完整的消息
     /// 返回 Ok(None) 如果数据不足（需要更多数据）
     /// 返回 Err 如果解码失败
@@ -69,7 +69,8 @@ where
         let mut result: u64 = 0;
         let mut shift = 0;
 
-        for _i in 0..10 { // varint 最多 10 个字节
+        for _i in 0..10 {
+            // varint 最多 10 个字节
             if cursor.position() as usize >= self.buffer.len() {
                 // 数据不足，无法读取完整的 varint
                 return Ok(None);
@@ -114,7 +115,7 @@ where
 }
 
 /// 安全的 protobuf 消息内容解码函数
-/// 
+///
 /// 此函数安全地尝试解码 protobuf 数据，如果解码失败则返回错误而不是崩溃
 pub fn safe_protobuf_decode<T>(data: &[u8]) -> Result<T, Box<dyn std::error::Error + Send + Sync>>
 where
@@ -127,7 +128,7 @@ where
 }
 
 /// 安全的字符串解码函数（用于调试目的）
-/// 
+///
 /// 此函数仅在确认数据是有效 UTF-8 时才进行转换
 pub fn safe_string_decode(data: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     match std::str::from_utf8(data) {

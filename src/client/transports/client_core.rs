@@ -8,8 +8,8 @@ use crate::client::heartbeat::HeartbeatManager;
 use crate::client::router::MessageRouter;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::flare::core::commands::command::Type;
-use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadCommandType;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotificationCommandType;
+use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadCommandType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
 use crate::common::protocol::{Frame, Reliability, connect, frame_with_system_command};
 use crate::common::{
@@ -444,6 +444,9 @@ impl ClientCore {
         // 主动断开连接
         self.disconnect_on_kicked().await;
 
+        // 被踢后立刻取消按 message_id 等待的 RPC，避免 send_frame_and_wait 空等至超时
+        self.cancel_all_pending_responses().await;
+
         // 仅在协商完成后且非我方主动断开时，向观察者通知「被踢」语义
         // - 协议竞速：未协商完成的连接收到 KICK 不通知
         // - 重复登录：上层先 disconnect 再建新连接时，disconnect_requested 已置位，读循环后续收到的 KICK 不通知
@@ -565,11 +568,33 @@ impl ClientCore {
                 self.state_manager.set_disconnected();
                 // 连接断开时，重置协商完成标志
                 self.negotiation_completed.store(false, Ordering::SeqCst);
+                let pending = Arc::clone(&self.pending_map);
+                tokio::spawn(async move {
+                    let mut map = pending.lock().await;
+                    if !map.is_empty() {
+                        tracing::debug!(
+                            count = map.len(),
+                            "[ClientCore] connection disconnected: clearing pending response waiters"
+                        );
+                        map.clear();
+                    }
+                });
             }
             ConnectionEvent::Error(_) => {
                 self.state_manager.set_failed();
                 // 连接错误时，重置协商完成标志
                 self.negotiation_completed.store(false, Ordering::SeqCst);
+                let pending = Arc::clone(&self.pending_map);
+                tokio::spawn(async move {
+                    let mut map = pending.lock().await;
+                    if !map.is_empty() {
+                        tracing::debug!(
+                            count = map.len(),
+                            "[ClientCore] connection error: clearing pending response waiters"
+                        );
+                        map.clear();
+                    }
+                });
             }
             ConnectionEvent::Message(_) => {
                 // 消息处理在 handle_message 中完成
@@ -988,6 +1013,18 @@ impl ClientCore {
     pub async fn cancel_pending_response(&self, message_id: &str) {
         let mut pending = self.pending_map.lock().await;
         pending.remove(message_id);
+    }
+
+    /// 连接丢失或被踢时取消全部等待，使 `send_frame_and_wait` 尽快收到通道关闭错误。
+    pub async fn cancel_all_pending_responses(&self) {
+        let mut pending = self.pending_map.lock().await;
+        if !pending.is_empty() {
+            tracing::debug!(
+                count = pending.len(),
+                "[ClientCore] clearing all pending response waiters"
+            );
+            pending.clear();
+        }
     }
 }
 

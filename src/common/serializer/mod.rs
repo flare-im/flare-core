@@ -6,6 +6,6 @@ pub mod formats;
 pub mod registry;
 pub mod traits;
 
-pub use formats::{JsonSerializer, ProtobufSerializer, FramedProtobufSerializer};
+pub use formats::{FramedProtobufSerializer, JsonSerializer, ProtobufSerializer};
 pub use registry::{SerializationRegistry, SerializationUtil};
 pub use traits::Serializer;

@@ -38,7 +38,10 @@ impl ConnectionObserver for ChatObserver {
                                 Ok(text) => text,
                                 Err(_) => {
                                     // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                    format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                                    format!(
+                                        "<protobuf_binary_data: {} bytes>",
+                                        msg_cmd.payload.len()
+                                    )
                                 }
                             };
 

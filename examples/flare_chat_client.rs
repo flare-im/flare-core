@@ -95,17 +95,21 @@ async fn main() -> Result<()> {
         key.as_bytes().to_vec()
     } else {
         // 否则使用默认示例密钥（仅用于演示，需要与服务端一致）
-        warn!("⚠️  使用默认示例密钥，仅用于演示！生产环境请设置 ENCRYPTION_KEY 环境变量或使用密钥协商");
+        warn!(
+            "⚠️  使用默认示例密钥，仅用于演示！生产环境请设置 ENCRYPTION_KEY 环境变量或使用密钥协商"
+        );
         b"01234567890123456789012345678901".to_vec() // 32 bytes for AES-256
     };
-    
+
     if encryption_key.len() != 32 {
-        return Err(flare_core::common::error::FlareError::protocol_error(format!(
-            "Encryption key must be exactly 32 bytes, got {} bytes",
-            encryption_key.len()
-        )));
+        return Err(flare_core::common::error::FlareError::protocol_error(
+            format!(
+                "Encryption key must be exactly 32 bytes, got {} bytes",
+                encryption_key.len()
+            ),
+        ));
     }
-    
+
     let encryptor = Aes256GcmEncryptor::new(&encryption_key)?;
     EncryptionUtil::register_custom(Arc::new(encryptor));
     info!("🔐 已注册 AES-256-GCM 加密器");

@@ -4,8 +4,8 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
-use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadType;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotifType;
+use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
 use crate::transport::events::ConnectionEvent;
 

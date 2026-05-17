@@ -2,7 +2,6 @@
 //!
 //! 提供统一的连接管理和心跳检测功能，简化服务器实现
 
-use std::collections::HashMap;
 use crate::common::MessageParser;
 use crate::common::compression::CompressionAlgorithm;
 use crate::common::encryption::EncryptionAlgorithm;
@@ -20,6 +19,7 @@ use crate::server::events::handler::ServerEventHandler;
 use crate::server::handle::ServerHandle;
 use crate::server::heartbeat::HeartbeatDetector;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -401,7 +401,7 @@ impl ServerCore {
         );
 
         // 3. Token 验证（如果启用认证）- 先完成认证
-        let (auth_user_id,meta_data) = self
+        let (auth_user_id, meta_data) = self
             .authenticate_connection(frame, connection_id, &negotiation)
             .await?;
 
@@ -410,7 +410,15 @@ impl ServerCore {
         let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
 
         // 4. 更新连接信息（在认证后）
-        self.update_connection_info(connection_id, &negotiation, final_format, final_compression.clone(), final_encryption.clone(), &user_id, meta_data)
+        self.update_connection_info(
+            connection_id,
+            &negotiation,
+            final_format,
+            final_compression.clone(),
+            final_encryption.clone(),
+            &user_id,
+            meta_data,
+        )
         .await;
 
         // 5. 标记连接为已验证
@@ -612,13 +620,12 @@ impl ServerCore {
             self.default_serialization_format
         };
 
-        let final_compression = if negotiation.is_forced
-            || negotiation.compression != CompressionAlgorithm::None
-        {
-            negotiation.compression.clone()
-        } else {
-            self.default_compression.clone()
-        };
+        let final_compression =
+            if negotiation.is_forced || negotiation.compression != CompressionAlgorithm::None {
+                negotiation.compression.clone()
+            } else {
+                self.default_compression.clone()
+            };
 
         // 加密方式
         let final_encryption = if negotiation.encryption != EncryptionAlgorithm::None {
@@ -750,39 +757,55 @@ impl ServerCore {
         frame: &Frame,
         connection_id: &str,
         negotiation: &negotiation::NegotiationResult,
-    ) -> Result<(Option<String>,Option<HashMap<String,String>>)> {
+    ) -> Result<(Option<String>, Option<HashMap<String, String>>)> {
         let auth_user_id = negotiation.user_id.clone();
         let auth_enabled = self.auth_enabled();
 
         if !auth_enabled {
             debug!("[ServerCore] 跳过 token 验证: 认证未启用");
-            return Ok((auth_user_id,Some(HashMap::new())));
+            return Ok((auth_user_id, Some(HashMap::new())));
         }
 
         let Some(authenticator) = &self.authenticator else {
-            return Ok((auth_user_id,Some(HashMap::new())));
+            return Ok((auth_user_id, Some(HashMap::new())));
         };
 
         // 从 CONNECT 消息的 metadata 中提取 token
         let token = Self::extract_token_from_frame(frame);
 
         let Some(token) = token else {
-            error!( "[ServerCore] ❌ 未提供 token: connection_id={}",connection_id);
+            error!(
+                "[ServerCore] ❌ 未提供 token: connection_id={}",
+                connection_id
+            );
             return Err(crate::common::error::FlareError::authentication_failed(
                 "未提供 token".to_string(),
             ));
         };
 
-        debug!( "[ServerCore] 🔐 开始验证 token: connection_id={}",connection_id);
+        debug!(
+            "[ServerCore] 🔐 开始验证 token: connection_id={}",
+            connection_id
+        );
 
         let metadata = Self::extract_system_command_metadata(frame);
 
-        match authenticator.authenticate(&token,connection_id,negotiation.device_info.as_ref(),metadata,).await
+        match authenticator
+            .authenticate(
+                &token,
+                connection_id,
+                negotiation.device_info.as_ref(),
+                metadata,
+            )
+            .await
         {
             Ok(auth_result) => {
                 if auth_result.authenticated {
-                    debug!("[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}", connection_id, auth_result.user_id);
-                    Ok((auth_result.user_id,auth_result.user_metadata))
+                    debug!(
+                        "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}",
+                        connection_id, auth_result.user_id
+                    );
+                    Ok((auth_result.user_id, auth_result.user_metadata))
                 } else {
                     let error_msg = auth_result
                         .error_message
@@ -853,7 +876,7 @@ impl ServerCore {
         final_compression: CompressionAlgorithm,
         final_encryption: EncryptionAlgorithm,
         auth_user_id: &Option<String>,
-        metadata: Option<HashMap<String,String>>
+        metadata: Option<HashMap<String, String>>,
     ) {
         let manager = Arc::clone(&self.connection_manager);
 

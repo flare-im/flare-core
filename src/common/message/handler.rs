@@ -4,8 +4,7 @@
 
 use crate::common::error::Result;
 use crate::common::protocol::flare::core::commands::{
-    notification_command::Type as NotificationType,
-    payload_command::Type as PayloadType,
+    notification_command::Type as NotificationType, payload_command::Type as PayloadType,
     system_command::Type as SystemType,
 };
 use crate::common::protocol::{

@@ -568,7 +568,10 @@ impl HybridClient {
             return;
         }
 
-        tracing::info!("正在主动关闭 {} 个未选中的连接（客户端先断）...", clients.len());
+        tracing::info!(
+            "正在主动关闭 {} 个未选中的连接（客户端先断）...",
+            clients.len()
+        );
 
         let mut handles = Vec::with_capacity(clients.len());
         for (index, protocol, mut client, elapsed) in clients {
