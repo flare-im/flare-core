@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::{debug, warn};
+use tracing::warn;
 
 // 使用枚举来支持两种类型的 WebSocketStream
 enum WebSocketSink {
@@ -35,34 +35,25 @@ impl WebSocketTransport {
     ///
     /// 使用单独的 Plain 类型，避免 unsafe transmute
     pub fn from_tcp_stream(stream: WebSocketStream<TcpStream>) -> Self {
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream 开始");
         let (sink_plain, receiver_plain) = stream.split();
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream: stream 已 split");
 
         let observers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink_arc = Arc::new(Mutex::new(sink_plain));
         let last_active = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream: Arc 已创建");
 
         let task_observers = Arc::clone(&observers);
         let task_sink = Arc::clone(&sink_arc);
         let task_last_active = Arc::clone(&last_active);
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream: 准备 spawn receiver_task");
         tokio::spawn(async move {
-            debug!("[DEBUG WebSocketTransport] receiver_task 开始 (Plain)");
             Self::receiver_task_plain(receiver_plain, task_observers, task_sink, task_last_active)
                 .await;
-            debug!("[DEBUG WebSocketTransport] receiver_task 结束 (Plain)");
         });
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream: receiver_task 已 spawn");
 
-        let result = Self {
+        Self {
             sink: WebSocketSink::Plain(sink_arc),
             observers,
             last_active,
-        };
-        debug!("[DEBUG WebSocketTransport] from_tcp_stream 完成");
-        result
+        }
     }
 
     fn from_stream(stream: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
@@ -94,9 +85,7 @@ impl WebSocketTransport {
         sink_arc: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
         last_active: Arc<std::sync::Mutex<std::time::Instant>>,
     ) {
-        debug!("[DEBUG WebSocketTransport] receiver_task: 进入循环 (TLS)");
         while let Some(message) = receiver.next().await {
-            debug!("[DEBUG WebSocketTransport] receiver_task: 收到消息 (TLS)");
             // 收到消息时更新活跃时间
             if let Ok(mut active) = last_active.lock() {
                 *active = std::time::Instant::now();
@@ -160,9 +149,7 @@ impl WebSocketTransport {
         sink_arc: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
         last_active: Arc<std::sync::Mutex<std::time::Instant>>,
     ) {
-        debug!("[DEBUG WebSocketTransport] receiver_task: 进入循环 (Plain)");
         while let Some(message) = receiver.next().await {
-            debug!("[DEBUG WebSocketTransport] receiver_task: 收到消息 (Plain)");
             // 收到消息时更新活跃时间
             if let Ok(mut active) = last_active.lock() {
                 *active = std::time::Instant::now();
@@ -211,22 +198,6 @@ impl WebSocketTransport {
                     ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
                 );
 
-                // 添加详细日志追踪消息处理
-                match &event {
-                    ConnectionEvent::Message(data) => {
-                        debug!(
-                            "[DEBUG WebSocketTransport] receiver_task_plain: 准备通知 observers, data_len={}",
-                            data.len()
-                        );
-                    }
-                    _ => {
-                        debug!(
-                            "[DEBUG WebSocketTransport] receiver_task_plain: 准备通知 observers, event={:?}",
-                            event
-                        );
-                    }
-                }
-
                 Self::_notify_observers(&observers_arc, &event);
 
                 if is_terminal {
@@ -244,25 +215,12 @@ impl WebSocketTransport {
         let observers = match observers_arc.lock() {
             Ok(obs) => obs,
             Err(e) => {
-                warn!(
-                    "[DEBUG WebSocketTransport] _notify_observers: 无法获取 observers 锁: {}",
-                    e
-                );
+                warn!("websocket observers lock poisoned: {e}");
                 return;
             }
         };
 
-        debug!(
-            "[DEBUG WebSocketTransport] _notify_observers: observer_count={}, event={:?}",
-            observers.len(),
-            event
-        );
-
-        for (idx, observer) in observers.iter().enumerate() {
-            debug!(
-                "[DEBUG WebSocketTransport] _notify_observers: 调用 observer[{}].on_event",
-                idx
-            );
+        for observer in observers.iter() {
             observer.on_event(event);
         }
     }
@@ -348,47 +306,38 @@ impl WebSocketTransport {
 impl Connection for WebSocketTransport {
     fn add_observer(&mut self, observer: ArcObserver) {
         observer.on_event(&ConnectionEvent::Connected);
-        self.observers.lock().unwrap().push(observer);
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.push(observer);
+        }
     }
 
     fn remove_observer(&mut self, observer: ArcObserver) {
-        self.observers
-            .lock()
-            .unwrap()
-            .retain(|o| !Arc::ptr_eq(o, &observer));
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.retain(|o| !Arc::ptr_eq(o, &observer));
+        }
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
-        debug!("[DEBUG WebSocketTransport] send: 开始发送数据");
-        // 发送消息时更新活跃时间
         if let Ok(mut active) = self.last_active.lock() {
             *active = std::time::Instant::now();
         }
 
         let message = Message::Binary(Bytes::from(data.to_vec()));
-        debug!("[DEBUG WebSocketTransport] send: 消息已创建，准备发送");
 
         match &mut self.sink {
             WebSocketSink::Tls(sink) => {
-                debug!("[DEBUG WebSocketTransport] send: 使用 TLS sink");
                 let mut s = sink.lock().await;
-                debug!("[DEBUG WebSocketTransport] send: TLS sink 锁已获取");
                 s.send(message)
                     .await
                     .map_err(|e| FlareError::connection_failed(e.to_string()))?;
-                debug!("[DEBUG WebSocketTransport] send: TLS 发送成功");
             }
             WebSocketSink::Plain(sink) => {
-                debug!("[DEBUG WebSocketTransport] send: 使用 Plain sink");
                 let mut s = sink.lock().await;
-                debug!("[DEBUG WebSocketTransport] send: Plain sink 锁已获取");
                 s.send(message)
                     .await
                     .map_err(|e| FlareError::connection_failed(e.to_string()))?;
-                debug!("[DEBUG WebSocketTransport] send: Plain 发送成功");
             }
         }
-        debug!("[DEBUG WebSocketTransport] send: 完成");
         Ok(())
     }
 
