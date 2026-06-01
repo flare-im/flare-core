@@ -158,6 +158,17 @@ impl ConnectionManager {
         }
     }
 
+    fn insert_user_connection_index(
+        user_connections: &mut HashMap<String, Vec<String>>,
+        user_id: String,
+        connection_id: &str,
+    ) {
+        let conn_ids = user_connections.entry(user_id).or_default();
+        if !conn_ids.iter().any(|id| id == connection_id) {
+            conn_ids.push(connection_id.to_string());
+        }
+    }
+
     /// 添加连接
     ///
     /// # 参数
@@ -201,10 +212,7 @@ impl ConnectionManager {
                 .user_connections
                 .write()
                 .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
-            user_connections
-                .entry(user_id)
-                .or_insert_with(Vec::new)
-                .push(connection_id);
+            Self::insert_user_connection_index(&mut user_connections, user_id, &connection_id);
         }
 
         Ok(())
@@ -316,10 +324,7 @@ impl ConnectionManager {
             .user_connections
             .write()
             .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
-        user_connections
-            .entry(user_id)
-            .or_insert_with(Vec::new)
-            .push(connection_id.to_string());
+        Self::insert_user_connection_index(&mut user_connections, user_id, connection_id);
 
         Ok(())
     }
@@ -392,18 +397,10 @@ impl ConnectionManager {
                 }
 
                 // 添加新映射（检查是否已存在，避免重复）
-                let conn_ids = user_connections
-                    .entry(user_id.clone())
-                    .or_insert_with(Vec::new);
-                if !conn_ids.contains(&connection_id.to_string()) {
-                    conn_ids.push(connection_id.to_string());
-                }
+                Self::insert_user_connection_index(&mut user_connections, user_id, connection_id);
             } else {
                 // user_id 没有变化，只需确保映射存在
-                let conn_ids = user_connections.entry(user_id).or_insert_with(Vec::new);
-                if !conn_ids.contains(&connection_id.to_string()) {
-                    conn_ids.push(connection_id.to_string());
-                }
+                Self::insert_user_connection_index(&mut user_connections, user_id, connection_id);
             }
         }
 
@@ -479,10 +476,7 @@ impl ConnectionManager {
                 .user_connections
                 .write()
                 .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
-            user_connections
-                .entry(user_id_val)
-                .or_insert_with(Vec::new)
-                .push(connection_id.to_string());
+            Self::insert_user_connection_index(&mut user_connections, user_id_val, connection_id);
         }
 
         Ok(())
@@ -560,10 +554,7 @@ impl ConnectionManager {
                 .user_connections
                 .write()
                 .map_err(|_| FlareError::general_error("Failed to lock user_connections"))?;
-            user_connections
-                .entry(user_id_val)
-                .or_insert_with(Vec::new)
-                .push(connection_id.to_string());
+            Self::insert_user_connection_index(&mut user_connections, user_id_val, connection_id);
         }
 
         Ok(())
