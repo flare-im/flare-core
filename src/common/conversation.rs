@@ -438,44 +438,18 @@ pub fn generate_system_conversation_id(system_id: &str, scope: Option<String>) -
 ///
 /// # 返回
 /// 格式化的会话ID：`6A{26字符ULID}`
-#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_temp_conversation_id() -> String {
     use ulid::Ulid;
     format!("6A{}", Ulid::new().to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn generate_temp_conversation_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("6A{}-{}", ts, c)
 }
 
 /// 生成服务端会话ID（向后兼容，使用ULID）
 ///
 /// 注意：推荐使用具体的生成函数（如 `generate_temp_conversation_id`）
 #[deprecated(note = "Use specific generation functions like generate_temp_conversation_id()")]
-#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_server_conversation_id(conversation_type: ConversationType) -> String {
     use ulid::Ulid;
     format!("{}-{}", conversation_type.prefix(), Ulid::new().to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn generate_server_conversation_id(conversation_type: ConversationType) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{}-{}", conversation_type.prefix(), ts, c)
 }
 
 /// 验证会话ID格式（CID格式：TypePrefix + Version + OpaqueID）

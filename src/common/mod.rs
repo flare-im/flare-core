@@ -9,7 +9,6 @@
 //! - 会话ID生成：客户端和服务端通用的会话ID生成和验证
 //! - 工具函数：常用工具和常量
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod cert;
 pub mod compression;
 pub mod config_types;

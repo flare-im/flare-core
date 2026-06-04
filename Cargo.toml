@@ -51,21 +51,14 @@ rand = "0.8"
  
 anyhow = "1.0"
 rcgen = "0.14"
-
-[build-dependencies]
-prost-build = "0.14"
-
-# 非 wasm 平台的网络依赖
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"
 ulid = "1.1"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom_compat = { package = "getrandom", version = "0.2", features = ["js"] }
+[build-dependencies]
+prost-build = "0.14"
 
 [dev-dependencies]
 
