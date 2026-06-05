@@ -13,7 +13,8 @@ use crate::transport::websocket::WebSocketTransport;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::time::timeout;
 use tokio_tungstenite::accept_async;
 use tracing::debug;
 
@@ -59,13 +60,12 @@ impl WebSocketServer {
 #[async_trait]
 impl Server for WebSocketServer {
     async fn start(&mut self) -> Result<()> {
-        let addr = self
+        let bind_address = self
             .config
-            .bind_address
-            .parse::<std::net::SocketAddr>()
-            .map_err(|e| {
-                crate::common::error::FlareError::protocol_error(format!("Invalid address: {}", e))
-            })?;
+            .get_protocol_address(&crate::common::config_types::TransportProtocol::WebSocket);
+        let addr = bind_address.parse::<std::net::SocketAddr>().map_err(|e| {
+            crate::common::error::FlareError::protocol_error(format!("Invalid address: {}", e))
+        })?;
 
         let listener = TcpListener::bind(addr).await.map_err(|e| {
             crate::common::error::FlareError::connection_failed(format!("Failed to bind: {}", e))
@@ -81,6 +81,7 @@ impl Server for WebSocketServer {
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
         let core = Arc::clone(&self.core);
+        let handshake_limiter = Arc::new(Semaphore::new(config.max_handshake_concurrency.max(1)));
 
         tokio::spawn(async move {
             debug!("[WebSocketServer] 开始监听连接");
@@ -91,8 +92,19 @@ impl Server for WebSocketServer {
                         let manager_clone = Arc::clone(&manager);
                         let config_clone = config.clone();
                         let core_clone = Arc::clone(&core);
+                        let permit = match Arc::clone(&handshake_limiter).try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                debug!(
+                                    "[WebSocketServer] 握手并发已满: {}",
+                                    config.max_handshake_concurrency
+                                );
+                                continue;
+                            }
+                        };
 
                         tokio::spawn(async move {
+                            let _permit = permit;
                             handle_websocket_connection(
                                 stream,
                                 manager_clone,
@@ -137,10 +149,17 @@ async fn handle_websocket_connection(
     core: Arc<ServerCore>,
 ) {
     // 建立 WebSocket 连接
-    let ws_stream = match accept_async(stream).await {
-        Ok(ws) => ws,
-        Err(e) => {
+    let ws_stream = match timeout(config.handshake_timeout, accept_async(stream)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
             debug!("[WebSocketServer] WebSocket 握手失败: {}", e);
+            return;
+        }
+        Err(_) => {
+            debug!(
+                "[WebSocketServer] WebSocket 握手超时: {:?}",
+                config.handshake_timeout
+            );
             return;
         }
     };

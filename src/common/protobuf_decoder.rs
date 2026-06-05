@@ -114,6 +114,15 @@ where
     }
 }
 
+impl<T> Default for ProtobufDecoder<T>
+where
+    T: Message + Default,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 安全的 protobuf 消息内容解码函数
 ///
 /// 此函数安全地尝试解码 protobuf 数据，如果解码失败则返回错误而不是崩溃

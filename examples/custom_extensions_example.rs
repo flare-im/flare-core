@@ -258,6 +258,13 @@ async fn run_server() -> Result<()> {
     info!("💡 使用自定义扩展: RLE 压缩 + XOR 加密");
 
     server.start().await?;
+    info!("✅ 自定义扩展服务端已启动，按 Ctrl+C 停止...");
+
+    tokio::signal::ctrl_c().await?;
+    info!("正在停止自定义扩展服务端...");
+    server.stop().await?;
+    info!("自定义扩展服务端已停止");
+
     Ok(())
 }
 

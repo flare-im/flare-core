@@ -3,17 +3,13 @@
 //! 提供常用的工具函数和辅助方法
 
 use crate::common::error::Result;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 生成唯一 ID（基于时间戳和随机数）
 pub fn generate_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+    let timestamp = crate::common::platform::wall_clock_ms();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}-{:016x}", timestamp, counter)
 }
@@ -29,18 +25,12 @@ pub fn generate_short_id() -> String {
 
 /// 获取当前时间戳（毫秒）
 pub fn current_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    crate::common::platform::wall_clock_ms()
 }
 
 /// 获取当前时间戳（秒）
 pub fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    crate::common::platform::wall_clock_secs()
 }
 
 /// 验证字符串是否为有效的连接 ID

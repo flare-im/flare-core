@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <title>flare-core WASM WebSocket Client</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      label {
+        display: block;
+        margin-top: 0.75rem;
+      }
+      input,
+      button {
+        font-size: 1rem;
+        padding: 0.4rem 0.6rem;
+      }
+      input[type="text"],
+      input[type="password"] {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      #log {
+        margin-top: 1.5rem;
+        padding: 0.75rem;
+        background: #111;
+        color: #eee;
+        min-height: 8rem;
+        white-space: pre-wrap;
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>flare-core WASM 客户端（FlareClientBuilder）</h1>
+    <p>
+      先在本机启动 <code>flare_chat_server</code>（必须，<code>simple_server</code>
+      不支持 CONNECT 协商）：
+    </p>
+    <pre>RUST_LOG=info cargo run --example flare_chat_server</pre>
+
+    <label>服务器地址</label>
+    <input id="server" type="text" value="ws://127.0.0.1:8080" />
+
+    <label>用户名</label>
+    <input id="username" type="text" value="wasm-user" />
+
+    <label>加密密钥 ENCRYPTION_KEY（32 字节 UTF-8，留空用演示密钥）</label>
+    <input
+      id="encryptionKey"
+      type="password"
+      placeholder="01234567890123456789012345678901"
+      autocomplete="off"
+    />
+
+    <div class="row">
+      <button id="connect" type="button" disabled>连接</button>
+      <button id="disconnect" type="button" disabled>断开</button>
+    </div>
+
+    <label>消息</label>
+    <div class="row">
+      <input id="message" type="text" placeholder="输入消息后发送" />
+      <button id="send" type="button" disabled>发送</button>
+    </div>
+
+    <div id="log">正在加载 WASM 模块…</div>
+
+    <script type="module">
+      const logEl = document.getElementById("log");
+      const connectBtn = document.getElementById("connect");
+      const disconnectBtn = document.getElementById("disconnect");
+      const sendBtn = document.getElementById("send");
+
+      const appendLog = (line) => {
+        logEl.textContent += line + "\n";
+      };
+      globalThis.__flareAppendLog = appendLog;
+
+      const setUiState = (state) => {
+        // ready | connecting | connected
+        connectBtn.disabled = state !== "ready";
+        disconnectBtn.disabled = state !== "connected";
+        sendBtn.disabled = state !== "connected";
+      };
+
+      let wasmApi = null;
+
+      connectBtn.addEventListener("click", async () => {
+        if (!wasmApi) {
+          appendLog("WASM 尚未就绪");
+          return;
+        }
+        const url = document.getElementById("server").value.trim();
+        const user = document.getElementById("username").value.trim();
+        const encKey = document.getElementById("encryptionKey").value.trim();
+        appendLog(`>>> 开始连接 ${url} ...`);
+        setUiState("connecting");
+        try {
+          if (encKey) {
+            wasmApi.flare_set_encryption_key(encKey);
+            appendLog("已设置 ENCRYPTION_KEY（JS）");
+          }
+          const promise = wasmApi.flare_connect(url, user, encKey || undefined);
+          if (!promise || typeof promise.then !== "function") {
+            throw new Error(
+              "flare_connect 未返回 Promise，请 ./build.sh 重建并 Cmd+Shift+R 硬刷新"
+            );
+          }
+          await promise;
+          appendLog(
+            `已连接并完成协商 (${url}) hasKey=${wasmApi.flare_has_encryption_key()}`
+          );
+          setUiState("connected");
+        } catch (e) {
+          appendLog("连接失败: " + e);
+          console.error(e);
+          setUiState("ready");
+        }
+      });
+
+      disconnectBtn.addEventListener("click", async () => {
+        if (!wasmApi) return;
+        try {
+          await wasmApi.flare_disconnect();
+          appendLog("已断开");
+          setUiState("ready");
+        } catch (e) {
+          appendLog("断开失败: " + e);
+        }
+      });
+
+      sendBtn.addEventListener("click", async () => {
+        if (!wasmApi) return;
+        const text = document.getElementById("message").value.trim();
+        if (!text) return;
+        try {
+          const connected = await wasmApi.flare_is_connected();
+          if (!connected) {
+            appendLog("未连接，请先连接服务器");
+            return;
+          }
+          await wasmApi.flare_send(text);
+          document.getElementById("message").value = "";
+          appendLog("已发送并收到 ACK: " + text);
+        } catch (e) {
+          appendLog("发送失败: " + e);
+        }
+      });
+
+      try {
+        const mod = await import(`./pkg/flare_core_wasm_example.js?v=${Date.now()}`);
+        await mod.default();
+        wasmApi = mod;
+        logEl.textContent = "WASM 已就绪。点击「连接」开始。\n";
+        appendLog(
+          `runtime=${mod.flare_runtime_id()} wall_clock=${mod.flare_wall_clock_ms()} now=${mod.flare_now_rfc3339()}`
+        );
+        setUiState("ready");
+      } catch (e) {
+        logEl.textContent = "WASM 加载失败。\n";
+        appendLog(String(e));
+        console.error(e);
+      }
+    </script>
+  </body>
+</html>

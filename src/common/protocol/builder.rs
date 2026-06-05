@@ -11,28 +11,22 @@ use super::flare::core::{
     Frame, Reliability,
     commands::{Command, CustomCommand, NotificationCommand, PayloadCommand, SystemCommand},
 };
+use crate::common::platform;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 生成唯一的消息 ID（基于时间戳和递增计数器）
 pub fn generate_message_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+    let timestamp = platform::wall_clock_ms();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}-{:016x}", timestamp, counter)
 }
 
 /// 获取当前时间戳（毫秒）
 pub fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    platform::wall_clock_ms()
 }
 
 // ============================================================================
@@ -448,6 +442,14 @@ pub fn frame_with_payload_command(
         .with_message_id(message_id)
         .with_reliability(reliability)
         .build()
+}
+
+/// Alias for [`frame_with_payload_command`] (backward compatibility for examples).
+pub fn frame_with_message_command(
+    payload_command: PayloadCommand,
+    reliability: Reliability,
+) -> Frame {
+    frame_with_payload_command(payload_command, reliability)
 }
 
 /// 创建包含通知命令的 Frame

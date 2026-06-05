@@ -1,9 +1,14 @@
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
+#[cfg(feature = "quic")]
 use crate::transport::quic::QUICTransport;
+#[cfg(feature = "tcp")]
 use crate::transport::tcp::TCPTransport;
+#[cfg(feature = "websocket")]
 use crate::transport::websocket::WebSocketTransport;
+#[cfg(any(feature = "websocket", feature = "tcp"))]
 use tokio::net::TcpStream;
+#[cfg(feature = "websocket")]
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// An enumeration of supported transport types.
@@ -15,47 +20,39 @@ pub enum TransportType {
 
 #[allow(clippy::large_enum_variant)]
 pub enum StreamWrapper {
+    #[cfg(feature = "websocket")]
     WebSocket(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+    #[cfg(feature = "quic")]
     QUIC {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
     },
+    #[cfg(feature = "tcp")]
     TCP(TcpStream),
 }
 
 /// A factory for creating transport layer connections.
-///
-/// This factory provides a unified interface for creating different types of
-/// transport connections, such as WebSocket, QUIC, or TCP.
 pub struct TransportFactory;
 
 impl TransportFactory {
-    /// Creates a new transport connection based on the specified type and stream.
-    ///
-    /// # Arguments
-    ///
-    /// * `transport_type` - The type of transport to create.
-    /// * `stream` - A stream object that the transport will use for communication.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a `Box<dyn Connection>` on success, or an error if
-    /// the connection could not be created.
     pub fn create_connection(
         transport_type: TransportType,
         stream: StreamWrapper,
     ) -> Result<Box<dyn Connection>> {
         match (transport_type, stream) {
+            #[cfg(feature = "websocket")]
             (TransportType::WebSocket, StreamWrapper::WebSocket(ws_stream)) => {
-                let ws_stream = *ws_stream;
-                Ok(Box::new(WebSocketTransport::new(ws_stream)))
+                Ok(Box::new(WebSocketTransport::new(*ws_stream)))
             }
+            #[cfg(feature = "quic")]
             (TransportType::QUIC, StreamWrapper::QUIC { send, recv }) => {
                 Ok(Box::new(QUICTransport::new(send, recv)))
             }
+            #[cfg(feature = "tcp")]
             (TransportType::TCP, StreamWrapper::TCP(tcp_stream)) => {
                 Ok(Box::new(TCPTransport::new(tcp_stream)))
             }
+            #[allow(unreachable_patterns)]
             _ => Err(FlareError::protocol_error(
                 "Mismatched transport type and stream",
             )),

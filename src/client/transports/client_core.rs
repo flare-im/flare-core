@@ -6,15 +6,13 @@ use crate::client::config::ClientConfig;
 use crate::client::connection::ConnectionStateManager;
 use crate::client::heartbeat::HeartbeatManager;
 use crate::client::router::MessageRouter;
+use crate::common::MessageParser;
 use crate::common::error::{FlareError, Result};
+use crate::common::protocol::Frame;
 use crate::common::protocol::flare::core::commands::command::Type;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotificationCommandType;
 use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadCommandType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
-use crate::common::protocol::{Frame, Reliability, connect, frame_with_system_command};
-use crate::common::{
-    CompressionAlgorithm, EncryptionAlgorithm, MessageParser, SerializationFormat,
-};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use std::collections::HashMap;
@@ -22,7 +20,51 @@ use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot};
+
+#[path = "client_core_connect.rs"]
+mod client_core_connect;
+
+const NEGOTIATION_TIMEOUT_HINT: &str =
+    "Ensure `flare_chat_server` is running, not `simple_server`.";
+
+/// WASM 入站队列上限：防止浏览器回调洪泛占满内存；丢弃最旧帧并记录日志。
+#[cfg(target_arch = "wasm32")]
+const MAX_WASM_INBOUND_QUEUE: usize = 512;
+
+fn negotiation_timeout_error(timeout: std::time::Duration) -> FlareError {
+    FlareError::connection_timeout(format!(
+        "Negotiation timeout after {:?} (CONNECT_ACK not received). {}",
+        timeout, NEGOTIATION_TIMEOUT_HINT
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_negotiation_notify(
+    flag: Arc<AtomicBool>,
+    failure_reason: Arc<StdMutex<Option<String>>>,
+    notify: Arc<Notify>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let wait = async move {
+        loop {
+            if flag.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            if let Ok(reason) = failure_reason.lock()
+                && let Some(msg) = reason.as_ref()
+            {
+                return Err(FlareError::protocol_error(msg.clone()));
+            }
+            notify.notified().await;
+        }
+    };
+
+    match crate::common::platform::timeout(timeout, wait).await {
+        Ok(result) => result,
+        Err(_) => Err(negotiation_timeout_error(timeout)),
+    }
+}
 
 /// 客户端核心功能
 ///
@@ -32,9 +74,8 @@ pub struct ClientCore {
     pub state_manager: Arc<ConnectionStateManager>,
     /// 消息解析器（使用 Arc<Mutex<>> 以支持协商后更新）
     pub parser: Arc<tokio::sync::Mutex<MessageParser>>,
-    /// 心跳管理器（可选，通过配置开启）
-    /// 使用 Arc<Mutex<>> 以支持并发访问（从同步的观察者中调用）
-    heartbeat_manager: Option<Arc<tokio::sync::Mutex<HeartbeatManager>>>,
+    /// 心跳管理器（共享，clone 与 observer 路径均可启动/停止）
+    heartbeat_manager: Arc<StdMutex<Option<Arc<tokio::sync::Mutex<HeartbeatManager>>>>>,
     /// 消息路由器（可选，通过配置开启）
     message_router: Option<MessageRouter>,
     /// 观察者列表
@@ -51,10 +92,16 @@ pub struct ClientCore {
     pub(crate) pending_map: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<Frame>>>>,
     /// 协商完成标志
     /// 当收到 CONNECT_ACK 并更新 parser 后，设置为 true
-    /// 用于判断是否应该使用协商后的 parser 解析消息
-    negotiation_completed: Arc<AtomicBool>,
+    pub(crate) negotiation_completed: Arc<AtomicBool>,
+    /// 用于等待 CONNECT_ACK 完成
+    pub(crate) negotiation_notify: Arc<Notify>,
+    /// CONNECT_ACK 协商失败原因（`wait_for_negotiation` 立即返回 Err）
+    negotiation_failure_reason: Arc<StdMutex<Option<String>>>,
     /// 我方已请求断开（disconnect_internal 中置位）：若随后读循环仍收到 KICK，不向观察者通知「被踢」，避免重复登录/协议竞速时误报
     disconnect_requested: Arc<AtomicBool>,
+    /// WASM: browser WebSocket 回调线程同步入队，由 `wait_for_negotiation`/drain 在 LocalSet 内处理
+    #[cfg(target_arch = "wasm32")]
+    wasm_inbound: Arc<StdMutex<Vec<Vec<u8>>>>,
 }
 
 impl ClientCore {
@@ -72,7 +119,7 @@ impl ClientCore {
         Self {
             state_manager: Arc::new(ConnectionStateManager::new()),
             parser: Arc::new(tokio::sync::Mutex::new(parser)),
-            heartbeat_manager: None,
+            heartbeat_manager: Arc::new(StdMutex::new(None)),
             message_router,
             observers: Arc::new(StdMutex::new(Vec::new())),
             config: config.clone(),
@@ -80,13 +127,59 @@ impl ClientCore {
             client_connection: Arc::new(std::sync::Mutex::new(None)),
             pending_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             negotiation_completed: Arc::new(AtomicBool::new(false)),
+            negotiation_notify: Arc::new(Notify::new()),
+            negotiation_failure_reason: Arc::new(StdMutex::new(None)),
             disconnect_requested: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_arch = "wasm32")]
+            wasm_inbound: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
+    /// WASM: enqueue bytes from the browser `onmessage` callback (sync context).
+    #[cfg(target_arch = "wasm32")]
+    pub fn push_wasm_inbound(&self, data: Vec<u8>) {
+        if let Ok(mut queue) = self.wasm_inbound.lock() {
+            if queue.len() >= MAX_WASM_INBOUND_QUEUE {
+                queue.remove(0);
+                tracing::warn!(
+                    "[ClientCore] wasm inbound queue full (max {}), dropping oldest frame",
+                    MAX_WASM_INBOUND_QUEUE
+                );
+            }
+            queue.push(data);
+        }
+        self.negotiation_notify.notify_waiters();
+    }
+
+    /// WASM: process all queued inbound frames on the current LocalSet task.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn drain_wasm_inbound(&self) {
+        let batch: Vec<Vec<u8>> = match self.wasm_inbound.lock() {
+            Ok(mut queue) if !queue.is_empty() => queue.drain(..).collect(),
+            _ => return,
+        };
+        for data in batch {
+            self.handle_message(data).await;
         }
     }
 
     /// 标记「我方已请求断开」（disconnect_internal 调用前设置，收到 KICK 时不向观察者通知被踢）
     pub fn set_disconnect_requested(&self, value: bool) {
         self.disconnect_requested.store(value, Ordering::SeqCst);
+    }
+
+    /// 协议竞速：与主 core 共享 disconnect / 协商 / pending 状态，避免 loser KICK 误报。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "websocket", feature = "quic", feature = "tcp")
+    ))]
+    pub(crate) fn share_race_state_from(&mut self, shared: &ClientCore) {
+        self.observers = Arc::clone(&shared.observers);
+        self.pending_map = Arc::clone(&shared.pending_map);
+        self.disconnect_requested = Arc::clone(&shared.disconnect_requested);
+        self.negotiation_completed = Arc::clone(&shared.negotiation_completed);
+        self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
+        self.negotiation_failure_reason = Arc::clone(&shared.negotiation_failure_reason);
     }
 
     /// 确定初始序列化格式和压缩算法
@@ -120,6 +213,7 @@ impl ClientCore {
         *parser = MessageParser::new(format, compression, encryption);
         // 标记协商已完成
         self.negotiation_completed.store(true, Ordering::SeqCst);
+        self.negotiation_notify.notify_waiters();
         tracing::info!(
             "[ClientCore] ✅ 协商完成，解析器已更新: 最终序列化方式={:?}, 最终压缩方式={:?}, 最终加密方式={:?}, negotiation_completed={}",
             format,
@@ -127,6 +221,7 @@ impl ClientCore {
             encryption_clone,
             self.negotiation_completed.load(Ordering::SeqCst)
         );
+        self.try_start_heartbeat().await;
     }
 
     /// 设置客户端连接（用于断开连接）
@@ -144,53 +239,76 @@ impl ClientCore {
         self.event_handler = handler;
     }
 
-    /// 启动心跳（如果启用）
-    pub async fn start_heartbeat(&mut self, connection: Arc<Mutex<Box<dyn Connection>>>) {
-        // 保存连接引用（用于断开）
+    /// 启动心跳（协商完成后调用；协商前调用会被忽略）
+    pub async fn start_heartbeat(&self, connection: Arc<Mutex<Box<dyn Connection>>>) {
         if let Ok(mut conn) = self.client_connection.lock() {
             *conn = Some(Arc::clone(&connection));
         }
+        self.try_start_heartbeat().await;
+    }
 
+    /// 协商完成后启动心跳（幂等）
+    async fn try_start_heartbeat(&self) {
         if !self.config.heartbeat.enabled {
             return;
         }
+        if !self.negotiation_completed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Ok(mut slot) = self.heartbeat_manager.lock() else {
+            return;
+        };
+        if slot.is_some() {
+            return;
+        }
+        let Some(connection) = self
+            .client_connection
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        else {
+            tracing::debug!("[ClientCore] heartbeat deferred: no active connection");
+            return;
+        };
 
         let mut heartbeat = HeartbeatManager::new(
             self.config.heartbeat.interval,
             self.config.heartbeat.timeout,
         );
-
-        // **关键修复**：传递 parser 的引用而不是副本
-        // 这样心跳管理器可以始终使用最新的 parser（协商后的 parser）
         let parser_ref = Arc::clone(&self.parser);
         heartbeat.start(connection, parser_ref);
-        self.heartbeat_manager = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
+        *slot = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
+        tracing::debug!("[ClientCore] heartbeat started after negotiation");
     }
 
     /// 停止心跳
-    pub fn stop_heartbeat(&mut self) {
-        if let Some(heartbeat) = self.heartbeat_manager.take() {
+    pub fn stop_heartbeat(&self) {
+        let taken = self
+            .heartbeat_manager
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(heartbeat) = taken {
             Self::stop_heartbeat_async(heartbeat);
         }
     }
 
     /// 异步停止心跳（内部辅助函数）
     fn stop_heartbeat_async(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::try_current()
-                .map(|handle| {
-                    handle.block_on(async {
-                        let mut hb_guard = heartbeat.lock().await;
-                        hb_guard.stop();
-                    })
-                })
-                .unwrap_or_else(|_| {
-                    tokio::runtime::Runtime::new().unwrap().block_on(async {
-                        let mut hb_guard = heartbeat.lock().await;
-                        hb_guard.stop();
-                    })
-                })
-        });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::client::runtime::run_client_async(async {
+                let mut hb_guard = heartbeat.lock().await;
+                hb_guard.stop();
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::client::runtime::spawn_client_task(async move {
+                let mut hb_guard = heartbeat.lock().await;
+                hb_guard.stop();
+            });
+        }
     }
 
     /// 处理接收到的消息
@@ -227,16 +345,15 @@ impl ClientCore {
                 frame.message_id
             );
 
-            if let Some(cmd) = &frame.command {
-                if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
-                    if msg_cmd.message_id != frame.message_id {
-                        tracing::warn!(
-                            "[ClientCore] PayloadCommand.message_id 和 Frame.message_id 不一致: cmd_id={}, frame_id={}",
-                            msg_cmd.message_id,
-                            frame.message_id
-                        );
-                    }
-                }
+            if let Some(cmd) = &frame.command
+                && let Some(Type::Payload(msg_cmd)) = &cmd.r#type
+                && msg_cmd.message_id != frame.message_id
+            {
+                tracing::warn!(
+                    "[ClientCore] PayloadCommand.message_id 和 Frame.message_id 不一致: cmd_id={}, frame_id={}",
+                    msg_cmd.message_id,
+                    frame.message_id
+                );
             }
 
             // 列出所有等待的 message_id（用于调试）
@@ -384,6 +501,8 @@ impl ClientCore {
                         self.config.get_serialization_format(),
                         self.config.get_compression()
                     );
+                    self.negotiation_completed.store(true, Ordering::SeqCst);
+                    self.negotiation_notify.notify_waiters();
                 }
 
                 // 发送 NEGOTIATION_READY 命令，通知服务端客户端已准备好按协商方式通信
@@ -392,9 +511,11 @@ impl ClientCore {
                 if let Err(e) = self.send_negotiation_ready().await {
                     tracing::warn!("[ClientCore] 发送 NEGOTIATION_READY 失败: {}", e);
                 }
+
+                self.try_start_heartbeat().await;
             }
             Err(e) => {
-                tracing::warn!("Failed to handle CONNECT_ACK: {}", e);
+                self.fail_negotiation(e.to_string()).await;
             }
         }
     }
@@ -429,13 +550,12 @@ impl ClientCore {
         let kick_reason = Self::parse_kick_reason(&reason, sys_cmd);
 
         // 通知事件处理器
-        if let Some(ref handler) = self.event_handler {
-            if let Err(e) = handler
+        if let Some(ref handler) = self.event_handler
+            && let Err(e) = handler
                 .handle_system_command(SystemCommandType::Kicked, frame)
                 .await
-            {
-                tracing::warn!("[ClientCore] 事件处理器处理 KICKED 失败: {}", e);
-            }
+        {
+            tracing::warn!("[ClientCore] 事件处理器处理 KICKED 失败: {}", e);
         }
 
         // 更新连接状态为断开（被踢）
@@ -467,12 +587,11 @@ impl ClientCore {
         base_reason: &str,
         sys_cmd: &crate::common::protocol::SystemCommand,
     ) -> String {
-        if let Some(reason_bytes) = sys_cmd.metadata.get("reason") {
-            if let Ok(reason_str) = String::from_utf8(reason_bytes.clone()) {
-                if reason_str == "device_conflict" {
-                    return format!("设备冲突：{}", base_reason);
-                }
-            }
+        if let Some(reason_bytes) = sys_cmd.metadata.get("reason")
+            && let Ok(reason_str) = String::from_utf8(reason_bytes.clone())
+            && reason_str == "device_conflict"
+        {
+            return format!("设备冲突：{}", base_reason);
         }
         base_reason.to_string()
     }
@@ -546,13 +665,49 @@ impl ClientCore {
         }
     }
 
+    /// CONNECT_ACK 无效或协商失败：立即唤醒 `wait_for_negotiation` 并上报连接错误。
+    async fn fail_negotiation(&self, reason: String) {
+        tracing::warn!("[ClientCore] 协商失败: {}", reason);
+        if let Ok(mut stored) = self.negotiation_failure_reason.lock() {
+            *stored = Some(reason);
+        }
+        self.negotiation_notify.notify_waiters();
+        self.stop_heartbeat();
+        self.cancel_all_pending_responses().await;
+        if let Ok(reason) = self.negotiation_failure_reason.lock()
+            && let Some(msg) = reason.as_ref()
+        {
+            self.handle_connection_event(&ConnectionEvent::Error(FlareError::protocol_error(
+                msg.clone(),
+            )));
+        }
+    }
+
+    fn negotiation_failure_error(&self) -> Option<FlareError> {
+        self.negotiation_failure_reason
+            .lock()
+            .ok()
+            .and_then(|reason| {
+                reason
+                    .as_ref()
+                    .map(|msg| FlareError::protocol_error(msg.clone()))
+            })
+    }
+
+    fn reset_negotiation_state(&self) {
+        self.negotiation_completed.store(false, Ordering::SeqCst);
+        if let Ok(mut reason) = self.negotiation_failure_reason.lock() {
+            *reason = None;
+        }
+    }
+
     /// 处理连接事件
     pub fn handle_connection_event(&self, event: &ConnectionEvent) {
         // 通知事件处理器
         if let Some(ref handler) = self.event_handler {
             let handler_clone = Arc::clone(handler);
             let event_clone = event.clone();
-            tokio::spawn(async move {
+            crate::client::runtime::spawn_client_task(async move {
                 let _ = handler_clone.handle_connection_event(&event_clone).await;
             });
         }
@@ -561,15 +716,13 @@ impl ClientCore {
         match event {
             ConnectionEvent::Connected => {
                 self.state_manager.set_connected();
-                // 连接建立时，重置协商完成标志
-                self.negotiation_completed.store(false, Ordering::SeqCst);
+                self.reset_negotiation_state();
             }
             ConnectionEvent::Disconnected(_) => {
                 self.state_manager.set_disconnected();
-                // 连接断开时，重置协商完成标志
-                self.negotiation_completed.store(false, Ordering::SeqCst);
+                self.reset_negotiation_state();
                 let pending = Arc::clone(&self.pending_map);
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     let mut map = pending.lock().await;
                     if !map.is_empty() {
                         tracing::debug!(
@@ -582,10 +735,9 @@ impl ClientCore {
             }
             ConnectionEvent::Error(_) => {
                 self.state_manager.set_failed();
-                // 连接错误时，重置协商完成标志
-                self.negotiation_completed.store(false, Ordering::SeqCst);
+                self.reset_negotiation_state();
                 let pending = Arc::clone(&self.pending_map);
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     let mut map = pending.lock().await;
                     if !map.is_empty() {
                         tracing::debug!(
@@ -653,6 +805,46 @@ impl ClientCore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// 等待 CONNECT_ACK 协商完成（WASM/JS 侧应在发送业务消息前调用）
+    pub async fn wait_for_negotiation(&self, timeout: std::time::Duration) -> Result<()> {
+        if self.is_negotiation_completed() {
+            return Ok(());
+        }
+        if let Some(err) = self.negotiation_failure_error() {
+            return Err(err);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::common::platform::monotonic_now;
+            let deadline = monotonic_now() + timeout;
+            loop {
+                self.drain_wasm_inbound().await;
+                if self.is_negotiation_completed() {
+                    return Ok(());
+                }
+                if let Some(err) = self.negotiation_failure_error() {
+                    return Err(err);
+                }
+                if monotonic_now() >= deadline {
+                    return Err(negotiation_timeout_error(timeout));
+                }
+                crate::common::platform::yield_to_event_loop().await;
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            wait_for_negotiation_notify(
+                Arc::clone(&self.negotiation_completed),
+                Arc::clone(&self.negotiation_failure_reason),
+                Arc::clone(&self.negotiation_notify),
+                timeout,
+            )
+            .await
+        }
+    }
+
     /// 检查是否可以连接
     pub fn can_connect(&self) -> bool {
         self.state_manager.get_state().can_connect()
@@ -664,337 +856,29 @@ impl ClientCore {
     ///
     /// 注意：由于观察者是同步的，我们需要异步获取锁
     pub fn record_pong(&self) {
-        let Some(ref heartbeat) = self.heartbeat_manager else {
+        let heartbeat = match self.heartbeat_manager.lock() {
+            Ok(guard) => guard.as_ref().map(Arc::clone),
+            Err(_) => None,
+        };
+        let Some(heartbeat) = heartbeat else {
             return;
         };
-
         // HeartbeatManager::record_pong 是 `&self` 方法
         // 但由于我们使用了 Arc<Mutex<>>，需要先获取锁
-        // 由于这是从同步上下文调用，使用 block_in_place
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::try_current()
-                .map(|handle| {
-                    handle.block_on(async {
-                        let hb_guard = heartbeat.lock().await;
-                        hb_guard.record_pong();
-                    })
-                })
-                .unwrap_or_else(|_| {
-                    tokio::runtime::Runtime::new().unwrap().block_on(async {
-                        let hb_guard = heartbeat.lock().await;
-                        hb_guard.record_pong();
-                    })
-                })
-        });
-    }
-
-    /// 发送 CONNECT 消息进行协商
-    ///
-    /// # 参数
-    /// - `connection`: 连接实例
-    ///
-    /// # 返回
-    /// 发送成功返回 `Ok(())`，失败返回错误
-    pub async fn send_connect_message(
-        &self,
-        connection: Arc<Mutex<Box<dyn Connection>>>,
-    ) -> Result<()> {
-        let metadata = self.build_connect_metadata();
-
-        // 创建 CONNECT 命令（协商前统一使用 JSON，协商后使用协商结果）
-        // 注意：CONNECT 消息的 format 字段应该始终是 JSON（协商前统一使用 JSON）
-        // 客户端希望使用的格式通过 metadata 中的 "format" 字段传递
-        let connect_cmd = connect(crate::common::protocol::SerializationFormat::Json, metadata);
-        let connect_frame = frame_with_system_command(connect_cmd, Reliability::AtLeastOnce);
-
-        // 序列化并发送
-        let data = self.serialize_connect_frame(&connect_frame).await?;
-        let mut conn = connection.lock().await;
-        conn.send(&data).await?;
-
-        self.log_connect_sent();
-        Ok(())
-    }
-
-    /// 构建 CONNECT 消息的元数据
-    fn build_connect_metadata(&self) -> HashMap<String, Vec<u8>> {
-        let mut metadata = HashMap::new();
-
-        // 确定要使用的序列化格式和压缩算法
-        let (format, compression, should_send_format) = self.determine_connect_format();
-
-        tracing::debug!(
-            "[ClientCore] 发送 CONNECT 消息: 请求序列化方式={:?}, 请求压缩方式={:?}, 强制模式={}, 发送format={}",
-            format,
-            compression,
-            self.config.is_force_format(),
-            should_send_format
-        );
-
-        // 添加序列化格式（仅当客户端指定了格式或强制模式时）
-        if should_send_format {
-            let format_str = match format {
-                crate::common::protocol::SerializationFormat::Protobuf => "protobuf",
-                crate::common::protocol::SerializationFormat::Json => "json",
-            };
-            metadata.insert("format".to_string(), format_str.as_bytes().to_vec());
-        }
-
-        // 添加压缩算法（仅当客户端指定了压缩时）
-        if compression != crate::common::compression::CompressionAlgorithm::None {
-            metadata.insert("compression".to_string(), compression.as_str().into_bytes());
-        }
-
-        // 添加是否强制指定格式的标记
-        if self.config.is_force_format() {
-            metadata.insert("force_format".to_string(), b"true".to_vec());
-        }
-
-        // 添加设备信息
-        Self::add_device_metadata(&mut metadata, &self.config);
-
-        // 添加用户 ID
-        if let Some(ref user_id) = self.config.user_id {
-            metadata.insert("user_id".to_string(), user_id.as_bytes().to_vec());
-        }
-
-        // 添加 token（用于认证）
-        if let Some(ref token) = self.config.token {
-            metadata.insert("token".to_string(), token.as_bytes().to_vec());
-            tracing::debug!("[ClientCore] 已添加 token 到 CONNECT 消息元数据");
-        }
-
-        // 添加其他元数据
-        for (key, value) in &self.config.metadata {
-            metadata.insert(key.clone(), value.as_bytes().to_vec());
-        }
-
-        metadata
-    }
-
-    /// 确定 CONNECT 消息的格式
-    fn determine_connect_format(
-        &self,
-    ) -> (
-        crate::common::protocol::SerializationFormat,
-        crate::common::compression::CompressionAlgorithm,
-        bool,
-    ) {
-        if self.config.is_force_format() {
-            // 强制模式：直接使用强制格式，必须发送format
-            (
-                self.config.get_serialization_format(),
-                self.config.get_compression(),
-                true,
-            )
-        } else if self.config.serialization_format
-            != crate::common::protocol::SerializationFormat::Json
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            // 客户端指定了非JSON格式：发送format元数据，服务端优先使用
-            (
-                self.config.serialization_format,
-                self.config.compression.clone(),
-                true,
-            )
-        } else {
-            // 客户端使用默认JSON：不发送format元数据，让服务端使用默认JSON
-            (
-                self.config.serialization_format,
-                self.config.compression.clone(),
-                false,
-            )
+            crate::client::runtime::run_client_async(async {
+                let hb_guard = heartbeat.lock().await;
+                hb_guard.record_pong();
+            });
         }
-    }
-
-    /// 添加设备信息到元数据（内部辅助函数）
-    fn add_device_metadata(metadata: &mut HashMap<String, Vec<u8>>, config: &ClientConfig) {
-        let Some(ref device_info) = config.device_info else {
-            return;
-        };
-
-        metadata.insert(
-            "device_id".to_string(),
-            device_info.device_id.as_bytes().to_vec(),
-        );
-        metadata.insert(
-            "platform".to_string(),
-            device_info.platform.as_str().as_bytes().to_vec(),
-        );
-
-        if let Some(ref model) = device_info.model {
-            metadata.insert("model".to_string(), model.as_bytes().to_vec());
-        }
-        if let Some(ref app_version) = device_info.app_version {
-            metadata.insert("app_version".to_string(), app_version.as_bytes().to_vec());
-        }
-        if let Some(ref system_version) = device_info.system_version {
-            metadata.insert(
-                "system_version".to_string(),
-                system_version.as_bytes().to_vec(),
-            );
-        }
-
-        // 添加其他元数据
-        for (key, value) in &device_info.metadata {
-            metadata.insert(key.clone(), value.as_bytes().to_vec());
-        }
-    }
-
-    /// 序列化 CONNECT Frame
-    async fn serialize_connect_frame(&self, frame: &Frame) -> Result<Vec<u8>> {
-        if self.config.is_force_format() {
-            // 强制模式：使用强制格式的 parser
-            let parser = self.parser.lock().await;
-            parser.serialize(frame)
-        } else {
-            // 协商模式：使用 PRE_NEGOTIATION_PARSER 发送 CONNECT 消息
-            use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
-            PRE_NEGOTIATION_PARSER.serialize(frame)
-        }
-    }
-
-    /// 记录 CONNECT 消息已发送
-    fn log_connect_sent(&self) {
-        let (format, compression, _) = self.determine_connect_format();
-
-        if self.config.is_force_format() {
-            tracing::debug!(
-                "[ClientCore] CONNECT 消息已发送（强制模式: format={:?}, compression={:?}）",
-                format,
-                compression
-            );
-        } else {
-            tracing::debug!(
-                "[ClientCore] CONNECT 消息已发送（协商模式: 首选 format={:?}, compression={:?}）",
-                format,
-                compression
-            );
-        }
-    }
-
-    /// 处理 CONNECT_ACK 消息
-    ///
-    /// 解析服务器返回的 CONNECT_ACK，确认协商结果
-    ///
-    /// # 返回
-    /// 协商结果：(序列化格式, 压缩算法, 加密方式)
-    pub fn handle_connect_ack(
-        &self,
-        frame: &Frame,
-    ) -> Result<(
-        SerializationFormat,
-        CompressionAlgorithm,
-        EncryptionAlgorithm,
-    )> {
-        let cmd = frame
-            .command
-            .as_ref()
-            .and_then(|c| c.r#type.as_ref())
-            .and_then(|t| {
-                if let Type::System(sys_cmd) = t {
-                    Some(sys_cmd)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| FlareError::protocol_error("Not a CONNECT_ACK message".to_string()))?;
-
-        let cmd_type = SystemCommandType::try_from(cmd.r#type)
-            .map_err(|_| FlareError::protocol_error("Invalid system command type".to_string()))?;
-
-        if cmd_type != SystemCommandType::ConnectAck {
-            return Err(FlareError::protocol_error(
-                "Not a CONNECT_ACK message".to_string(),
-            ));
-        }
-
-        // 解析协商结果
-        let format = SerializationFormat::try_from(cmd.format).unwrap_or(SerializationFormat::Json);
-
-        let compression =
-            CompressionAlgorithm::from_str(&cmd.compression).unwrap_or(CompressionAlgorithm::None);
-        let encryption =
-            EncryptionAlgorithm::from_str(&cmd.encryption).unwrap_or(EncryptionAlgorithm::None);
-
-        tracing::debug!(
-            "[ClientCore] 收到 CONNECT_ACK，协商结果: format={:?}, compression={:?}, encryption={:?}",
-            format,
-            compression,
-            encryption
-        );
-
-        // 检查是否有冲突连接通知
-        Self::check_conflict_connections(cmd);
-
-        Ok((format, compression, encryption))
-    }
-
-    /// 检查冲突连接通知
-    fn check_conflict_connections(cmd: &crate::common::protocol::SystemCommand) {
-        if let Some(conflicts_bytes) = cmd.metadata.get("conflict_connections") {
-            if let Ok(conflicts_json) = String::from_utf8(conflicts_bytes.clone()) {
-                if let Ok(conflict_connections) =
-                    serde_json::from_str::<Vec<String>>(&conflicts_json)
-                {
-                    if !conflict_connections.is_empty() {
-                        tracing::warn!(
-                            "[ClientCore] 检测到设备冲突，以下连接被踢掉: {:?}",
-                            conflict_connections
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// 发送 NEGOTIATION_READY 命令
-    ///
-    /// 在收到 CONNECT_ACK 并更新 parser 后调用，通知服务端客户端已准备好按协商方式通信
-    async fn send_negotiation_ready(&self) -> Result<()> {
-        use crate::common::protocol::flare::core::commands::SystemCommand;
-        use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
-        use crate::common::protocol::{Reliability, frame_with_system_command};
-
-        // 创建 NEGOTIATION_READY 系统命令
-        let negotiation_ready_cmd = SystemCommand {
-            r#type: SysType::NegotiationReady as i32,
-            format: 0,                                  // 不需要
-            compression: String::new(),                 // 不需要
-            encryption: String::new(),                  // 不需要
-            message: String::new(),                     // 不需要
-            metadata: std::collections::HashMap::new(), // 不需要
-            data: vec![],                               // 不需要
-        };
-
-        let frame = frame_with_system_command(negotiation_ready_cmd, Reliability::AtLeastOnce);
-
-        // 使用 PRE_NEGOTIATION_PARSER 序列化 NEGOTIATION_READY
-        // 注意：NEGOTIATION_READY 必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
-        // 这样服务端和客户端都统一使用 PRE_NEGOTIATION_PARSER 处理，确保兼容性
-        // 服务端收到 NEGOTIATION_READY 后才会严格使用协商后的 parser（不允许 fallback）
-        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
-        let data = PRE_NEGOTIATION_PARSER.serialize(&frame)?;
-
-        // 通过 client_connection 发送
-        let client_conn_opt = {
-            if let Ok(conn_guard) = self.client_connection.lock() {
-                conn_guard.clone()
-            } else {
-                return Err(FlareError::connection_failed(
-                    "Client connection not available".to_string(),
-                ));
-            }
-        };
-
-        if let Some(client_conn) = client_conn_opt {
-            let mut conn = client_conn.lock().await;
-            conn.send(&data).await?;
-            tracing::debug!("[ClientCore] ✅ 已发送 NEGOTIATION_READY 命令");
-            Ok(())
-        } else {
-            Err(FlareError::connection_failed(
-                "Client connection not set".to_string(),
-            ))
+        #[cfg(target_arch = "wasm32")]
+        {
+            let heartbeat = Arc::clone(&heartbeat);
+            crate::client::runtime::spawn_client_task(async move {
+                let hb_guard = heartbeat.lock().await;
+                hb_guard.record_pong();
+            });
         }
     }
 }
@@ -1034,7 +918,7 @@ impl Clone for ClientCore {
         Self {
             state_manager: Arc::clone(&self.state_manager),
             parser: Arc::clone(&self.parser),
-            heartbeat_manager: None, // 心跳管理器不克隆，由主实例管理
+            heartbeat_manager: Arc::clone(&self.heartbeat_manager),
             message_router: self.message_router.as_ref().map(|_| MessageRouter::new()), // 路由不克隆，创建新的
             observers: Arc::clone(&self.observers),
             config: self.config.clone(),
@@ -1042,7 +926,89 @@ impl Clone for ClientCore {
             client_connection: Arc::clone(&self.client_connection), // 共享连接引用
             pending_map: Arc::clone(&self.pending_map),
             negotiation_completed: Arc::clone(&self.negotiation_completed), // 共享协商完成标志
-            disconnect_requested: Arc::new(AtomicBool::new(false)), // 每个 clone 独立，避免互相影响
+            negotiation_notify: Arc::clone(&self.negotiation_notify),
+            negotiation_failure_reason: Arc::clone(&self.negotiation_failure_reason),
+            disconnect_requested: Arc::clone(&self.disconnect_requested),
+            #[cfg(target_arch = "wasm32")]
+            wasm_inbound: Arc::clone(&self.wasm_inbound),
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod client_core_tests {
+    use super::*;
+    use crate::common::compression::CompressionAlgorithm;
+    use crate::common::encryption::EncryptionAlgorithm;
+    use crate::common::protocol::SerializationFormat;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn update_parser_marks_negotiation_completed() {
+        let core = ClientCore::new(&ClientConfig::default());
+        assert!(!core.is_negotiation_completed());
+
+        core.update_parser(
+            SerializationFormat::Protobuf,
+            CompressionAlgorithm::Gzip,
+            EncryptionAlgorithm::None,
+        )
+        .await;
+
+        assert!(core.is_negotiation_completed());
+    }
+
+    #[tokio::test]
+    async fn wait_for_negotiation_returns_after_flag_set() {
+        let core = ClientCore::new(&ClientConfig::default());
+        let core = Arc::new(core);
+
+        let waiter = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                core.wait_for_negotiation(Duration::from_secs(1))
+                    .await
+                    .expect("negotiation wait")
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        core.update_parser(
+            SerializationFormat::Json,
+            CompressionAlgorithm::None,
+            EncryptionAlgorithm::None,
+        )
+        .await;
+
+        waiter.await.expect("wait task");
+    }
+
+    #[tokio::test]
+    async fn start_heartbeat_before_negotiation_does_not_panic() {
+        let core = ClientCore::new(&ClientConfig::default());
+        // No connection attached; should no-op safely before negotiation.
+        core.start_heartbeat(Arc::new(Mutex::new(
+            Box::new(MockConnection) as Box<dyn Connection>
+        )))
+        .await;
+        assert!(!core.is_negotiation_completed());
+    }
+
+    struct MockConnection;
+
+    #[async_trait::async_trait]
+    impl Connection for MockConnection {
+        fn add_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        fn remove_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> crate::common::platform::MonotonicInstant {
+            crate::common::platform::monotonic_now()
+        }
+        fn update_active_time(&mut self) {}
     }
 }

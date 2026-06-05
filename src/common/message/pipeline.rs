@@ -131,9 +131,9 @@ pub type ArcMessageProcessor = Arc<dyn MessageProcessor>;
 #[derive(Clone)]
 pub struct MessagePipeline {
     /// 中间件列表（按优先级排序）
-    middlewares: Arc<RwLock<Vec<ArcMessageMiddleware>>>,
+    middlewares: Arc<RwLock<Arc<Vec<ArcMessageMiddleware>>>>,
     /// 处理器列表
-    processors: Arc<RwLock<Vec<ArcMessageProcessor>>>,
+    processors: Arc<RwLock<Arc<Vec<ArcMessageProcessor>>>>,
     /// 消息解析器（使用 Arc 以便在运行时更新）
     parser: Arc<tokio::sync::Mutex<MessageParser>>,
 }
@@ -142,8 +142,8 @@ impl MessagePipeline {
     /// 创建新的消息处理管道
     pub fn new(parser: MessageParser) -> Self {
         Self {
-            middlewares: Arc::new(RwLock::new(Vec::new())),
-            processors: Arc::new(RwLock::new(Vec::new())),
+            middlewares: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            processors: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             parser: Arc::new(tokio::sync::Mutex::new(parser)),
         }
     }
@@ -157,27 +157,35 @@ impl MessagePipeline {
     /// 添加中间件
     pub async fn add_middleware(&self, middleware: ArcMessageMiddleware) {
         let mut middlewares = self.middlewares.write().await;
-        middlewares.push(middleware);
+        let mut next = (**middlewares).clone();
+        next.push(middleware);
         // 按优先级排序
-        middlewares.sort_by_key(|m| m.priority());
+        next.sort_by_key(|m| m.priority());
+        *middlewares = Arc::new(next);
     }
 
     /// 移除中间件
     pub async fn remove_middleware(&self, middleware: &ArcMessageMiddleware) {
         let mut middlewares = self.middlewares.write().await;
-        middlewares.retain(|m| !Arc::ptr_eq(m, middleware));
+        let mut next = (**middlewares).clone();
+        next.retain(|m| !Arc::ptr_eq(m, middleware));
+        *middlewares = Arc::new(next);
     }
 
     /// 添加处理器
     pub async fn add_processor(&self, processor: ArcMessageProcessor) {
         let mut processors = self.processors.write().await;
-        processors.push(processor);
+        let mut next = (**processors).clone();
+        next.push(processor);
+        *processors = Arc::new(next);
     }
 
     /// 移除处理器
     pub async fn remove_processor(&self, processor: &ArcMessageProcessor) {
         let mut processors = self.processors.write().await;
-        processors.retain(|p| !Arc::ptr_eq(p, processor));
+        let mut next = (**processors).clone();
+        next.retain(|p| !Arc::ptr_eq(p, processor));
+        *processors = Arc::new(next);
     }
 
     /// 处理原始数据（自动解析）
@@ -200,21 +208,33 @@ impl MessagePipeline {
         let frame = parser.parse(data).map_err(|e| {
             FlareError::deserialization_error(format!("Failed to parse message: {}", e))
         })?;
+        let parser_snapshot = parser.clone();
         drop(parser);
 
         // 2. 处理 Frame
-        let response = self.process_frame(&frame, connection_id).await?;
+        let response = self
+            .process_frame_with_parser(&frame, connection_id, parser_snapshot.clone())
+            .await?;
 
         // 3. 序列化响应（如果有）
         if let Some(response_frame) = response {
-            let parser = self.parser.lock().await;
-            let response_data = parser.serialize(&response_frame).map_err(|e| {
+            let response_data = parser_snapshot.serialize(&response_frame).map_err(|e| {
                 FlareError::encoding_error(format!("Failed to serialize response: {}", e))
             })?;
             Ok(Some(response_data))
         } else {
             Ok(None)
         }
+    }
+
+    async fn middleware_snapshot(&self) -> Arc<Vec<ArcMessageMiddleware>> {
+        let middlewares = self.middlewares.read().await;
+        Arc::clone(&middlewares)
+    }
+
+    async fn processor_snapshot(&self) -> Arc<Vec<ArcMessageProcessor>> {
+        let processors = self.processors.read().await;
+        Arc::clone(&processors)
     }
 
     /// 处理 Frame
@@ -232,27 +252,34 @@ impl MessagePipeline {
         frame: &Frame,
         connection_id: Option<&str>,
     ) -> Result<Option<Frame>> {
-        // 创建消息上下文
         let parser = self.parser.lock().await;
-        let ctx = MessageContext::new(
-            frame.clone(),
-            connection_id.map(|s| s.to_string()),
-            parser.clone(),
-        );
+        let parser_snapshot = parser.clone();
         drop(parser);
 
+        self.process_frame_with_parser(frame, connection_id, parser_snapshot)
+            .await
+    }
+
+    async fn process_frame_with_parser(
+        &self,
+        frame: &Frame,
+        connection_id: Option<&str>,
+        parser: MessageParser,
+    ) -> Result<Option<Frame>> {
+        // 创建消息上下文
+        let ctx = MessageContext::new(frame.clone(), connection_id.map(|s| s.to_string()), parser);
+
         // 1. 执行中间件（before）
-        let middlewares = self.middlewares.read().await;
+        let middlewares = self.middleware_snapshot().await;
         for middleware in middlewares.iter() {
             if let Some(response) = middleware.before(&ctx).await? {
                 // 中间件提前返回响应
                 return Ok(Some(response));
             }
         }
-        drop(middlewares);
 
         // 2. 执行处理器
-        let processors = self.processors.read().await;
+        let processors = self.processor_snapshot().await;
         let mut response = None;
         for processor in processors.iter() {
             if let Some(resp) = processor.process(&ctx).await? {
@@ -260,10 +287,9 @@ impl MessagePipeline {
                 break; // 第一个返回响应的处理器生效
             }
         }
-        drop(processors);
 
         // 3. 执行中间件（after）
-        let middlewares = self.middlewares.read().await;
+        let middlewares = self.middleware_snapshot().await;
         for middleware in middlewares.iter() {
             if let Some(modified_response) = middleware.after(&ctx, response.clone()).await? {
                 response = Some(modified_response);
@@ -284,7 +310,7 @@ impl MessagePipeline {
         _connection_id: Option<&str>,
     ) -> Result<()> {
         // 连接事件可以传递给中间件处理
-        let middlewares = self.middlewares.read().await;
+        let middlewares = self.middleware_snapshot().await;
         for _middleware in middlewares.iter() {
             // 如果中间件实现了连接事件处理，可以在这里调用
             // 目前先跳过，后续可以扩展
@@ -296,5 +322,133 @@ impl MessagePipeline {
 impl Default for MessagePipeline {
     fn default() -> Self {
         Self::new(MessageParser::protobuf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocol::{
+        Command, FrameBuilder, Reliability, SerializationFormat, frame_with_system_command, ping,
+        pong,
+    };
+    use tokio::sync::{Mutex, oneshot};
+
+    struct BlockingMiddleware {
+        entered_tx: Mutex<Option<oneshot::Sender<()>>>,
+        release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl MessageMiddleware for BlockingMiddleware {
+        async fn before(&self, _ctx: &MessageContext) -> Result<Option<Frame>> {
+            if let Some(tx) = self.entered_tx.lock().await.take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release_rx.lock().await.take() {
+                let _ = rx.await;
+            }
+            Ok(None)
+        }
+    }
+
+    struct NoopMiddleware;
+
+    #[async_trait]
+    impl MessageMiddleware for NoopMiddleware {}
+
+    struct ParserUpdatingProcessor {
+        pipeline: MessagePipeline,
+    }
+
+    #[async_trait]
+    impl MessageProcessor for ParserUpdatingProcessor {
+        async fn process(&self, _ctx: &MessageContext) -> Result<Option<Frame>> {
+            self.pipeline.update_parser(MessageParser::protobuf()).await;
+            Ok(Some(frame_with_system_command(
+                pong(),
+                Reliability::BestEffort,
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_updates_do_not_wait_for_inflight_middleware_to_finish() {
+        let pipeline = MessagePipeline::new(MessageParser::json());
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        pipeline
+            .add_middleware(Arc::new(BlockingMiddleware {
+                entered_tx: Mutex::new(Some(entered_tx)),
+                release_rx: Mutex::new(Some(release_rx)),
+            }))
+            .await;
+
+        let frame = FrameBuilder::new()
+            .with_command(Command {
+                r#type: Some(
+                    crate::common::protocol::flare::core::commands::command::Type::System(ping()),
+                ),
+            })
+            .with_reliability(Reliability::BestEffort)
+            .build();
+        let processing = {
+            let pipeline = pipeline.clone();
+            tokio::spawn(async move { pipeline.process_frame(&frame, Some("conn-1")).await })
+        };
+
+        entered_rx.await.expect("blocking middleware should start");
+        let add_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pipeline.add_middleware(Arc::new(NoopMiddleware)),
+        )
+        .await;
+
+        let _ = release_tx.send(());
+        processing
+            .await
+            .expect("pipeline task should not panic")
+            .expect("pipeline should succeed");
+
+        assert!(
+            add_result.is_ok(),
+            "middleware updates should use a copy-on-write snapshot and avoid waiting for in-flight middleware"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_raw_serializes_response_with_request_parser_snapshot() {
+        let json_parser = MessageParser::json();
+        let pipeline = MessagePipeline::new(json_parser.clone());
+        pipeline
+            .add_processor(Arc::new(ParserUpdatingProcessor {
+                pipeline: pipeline.clone(),
+            }))
+            .await;
+        let request = frame_with_system_command(ping(), Reliability::BestEffort);
+        let request_data = json_parser
+            .serialize(&request)
+            .expect("json request should serialize");
+
+        let response_data = pipeline
+            .process_raw(&request_data, Some("conn-1"))
+            .await
+            .expect("pipeline should process request")
+            .expect("processor should produce response");
+
+        let response = json_parser.parse_with_format(&response_data, SerializationFormat::Json).expect(
+            "response should use the same parser snapshot as request even if parser is updated mid-pipeline",
+        );
+        let format = response
+            .command
+            .and_then(|command| command.r#type)
+            .and_then(|kind| match kind {
+                crate::common::protocol::flare::core::commands::command::Type::System(system) => {
+                    SerializationFormat::try_from(system.format).ok()
+                }
+                _ => None,
+            })
+            .expect("response should be a system command");
+        assert_eq!(format, SerializationFormat::Protobuf);
     }
 }

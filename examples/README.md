@@ -137,6 +137,25 @@ RUST_LOG=info cargo run --example quic_server
 RUST_LOG=info cargo run --example quic_client
 ```
 
+#### `tcp_client.rs` - TCP 客户端
+
+**特点：**
+- 原始 TCP + length-prefixed Frame（默认 `tcp://127.0.0.1:8090`）
+- 需 `--features tcp`；服务端见 `flare_chat_server` 的 `FLARE_TCP` / `TRANSPORT_PROTOCOL=tcp`
+
+**启动命令：**
+```bash
+TRANSPORT_PROTOCOL=tcp RUST_LOG=info cargo run --example flare_chat_server --features tcp
+RUST_LOG=info cargo run --example tcp_client --features tcp
+```
+
+**`flare_chat_client` 手动指定协议：**
+```bash
+RUST_LOG=info cargo run --example flare_chat_client --features tcp -- user1 --protocol tcp
+RUST_LOG=info cargo run --example flare_chat_client -- user1 -p quic
+TRANSPORT_PROTOCOL=websocket RUST_LOG=info cargo run --example flare_chat_client
+```
+
 ---
 
 ### 5. WebSocket 协议示例
@@ -167,6 +186,60 @@ RUST_LOG=info cargo run --example websocket_server
 ```bash
 RUST_LOG=info cargo run --example websocket_client
 ```
+
+---
+
+### 6. 自定义扩展示例
+
+演示如何扩展 `flare-core` 的压缩、加密和序列化能力，适合验证插件化协议能力的接入方式。
+
+#### `custom_extensions_example.rs` - 自定义扩展服务端/客户端
+
+**特点：**
+- 实现自定义 XOR 加密器（演示用途）
+- 实现自定义 RLE 压缩器
+- 实现自定义序列化器
+- 在服务端和客户端注册扩展并进行端到端联调
+
+**启动命令：**
+```bash
+# 终端 1：启动服务端
+RUST_LOG=info cargo run --example custom_extensions_example -- server
+
+# 终端 2：启动客户端
+RUST_LOG=info cargo run --example custom_extensions_example -- client
+```
+
+---
+
+### 7. WASM WebSocket 客户端（浏览器）
+
+在浏览器中运行 `flare-core` WebSocket 客户端栈（`wasm32-unknown-unknown`）。
+
+#### `wasm_websocket_client/` - WASM 示例 crate
+
+**特点：**
+- 默认对接 **`flare_chat_server`**（WebSocket `:8080`，Protobuf/Gzip/AES 协商）
+- 也可对接 `simple_server`（纯 JSON WS）
+- 使用 `ClientBuilder` + `SimpleClient`
+- 导出 WASM 时间/实例 ID 工具 API
+
+**构建与运行：**
+
+```bash
+cd examples/wasm_websocket_client
+wasm-pack build --target web --out-dir pkg
+
+# 另开终端，启动 Flare 聊天室服务端（推荐）
+cd ../.. && RUST_LOG=info cargo run --example flare_chat_server
+# 或: RUST_LOG=info cargo run --example simple_server
+
+# 回到示例目录，启动静态服务
+python3 -m http.server 3000
+# 浏览器打开 http://127.0.0.1:3000/index.html
+```
+
+详见 [`wasm_websocket_client/README.md`](wasm_websocket_client/README.md)。
 
 ---
 

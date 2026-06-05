@@ -222,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption-aes-gcm")]
     fn test_aes256gcm_encryptor() {
         use crate::common::encryption::Aes256GcmEncryptor;
 
@@ -253,6 +254,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption-aes-gcm")]
     fn test_aes256gcm_from_password() {
         use crate::common::encryption::Aes256GcmEncryptor;
 
@@ -268,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption-aes-gcm")]
     fn test_aes256gcm_invalid_key_length() {
         use crate::common::encryption::Aes256GcmEncryptor;
 
@@ -280,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption-aes-gcm")]
     fn test_aes256gcm_invalid_ciphertext() {
         use crate::common::encryption::Aes256GcmEncryptor;
 
@@ -293,5 +297,17 @@ mod tests {
         // 测试无效的密文
         let invalid_data = vec![0u8; 20]; // 长度足够但内容无效
         assert!(encryptor.decrypt(&invalid_data).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "encryption-aes-gcm"))]
+    fn test_aes256gcm_constructor_reports_disabled_feature() {
+        use crate::common::encryption::Aes256GcmEncryptor;
+        use crate::common::error::ErrorCode;
+
+        match Aes256GcmEncryptor::new(b"01234567890123456789012345678901") {
+            Ok(_) => panic!("AES-GCM should report disabled feature"),
+            Err(err) => assert_eq!(err.code(), Some(ErrorCode::OperationNotSupported)),
+        }
     }
 }

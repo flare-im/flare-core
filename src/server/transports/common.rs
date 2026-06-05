@@ -27,19 +27,18 @@ impl ServerConnectionHelper {
         // 生成连接 ID
         let connection_id = generate_id();
 
-        // 检查连接数限制
-        if manager.connection_count() >= config.max_connections {
-            return Err(crate::common::error::FlareError::connection_failed(
-                format!("Connection limit exceeded: {}", config.max_connections),
-            ));
-        }
-
         // 从 ServerCore 获取是否需要认证
         let requires_auth = core.auth_enabled();
 
-        // 添加连接
+        // 添加连接。容量检查必须和插入在同一个临界区内完成，避免并发握手超额注册。
         manager
-            .add_connection(connection_id.clone(), connection, None, requires_auth)
+            .add_connection_with_limit(
+                connection_id.clone(),
+                connection,
+                None,
+                requires_auth,
+                config.max_connections,
+            )
             .map_err(|e| {
                 crate::common::error::FlareError::connection_failed(format!(
                     "Failed to add connection: {}",

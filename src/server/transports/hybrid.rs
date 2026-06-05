@@ -16,7 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tracing::error;
 
+#[cfg(feature = "quic")]
 use super::quic::QUICServer;
+#[cfg(feature = "tcp")]
+use super::tcp::TCPServer;
+#[cfg(feature = "websocket")]
 use super::websocket::WebSocketServer;
 
 /// 混合服务端
@@ -154,6 +158,8 @@ impl HybridServer {
 
         let protocols = config.get_protocols();
         let mut servers = Vec::new();
+        let mut effective_protocols = Vec::new();
+        let has_websocket = protocols.contains(&TransportProtocol::WebSocket);
 
         for protocol in &protocols {
             let mut server_config = config.clone();
@@ -164,28 +170,78 @@ impl HybridServer {
             let bind_address = config.get_protocol_address(protocol);
             server_config.bind_address = bind_address;
 
-            let server: Box<dyn Server> = match protocol {
-                TransportProtocol::WebSocket => Box::new(WebSocketServer::with_shared_core(
-                    server_config,
-                    shared_core.clone(),
-                )),
-                TransportProtocol::QUIC => Box::new(QUICServer::with_shared_core(
-                    server_config,
-                    shared_core.clone(),
-                )?),
+            let server_result: Result<Box<dyn Server>> = match protocol {
+                TransportProtocol::WebSocket => {
+                    #[cfg(feature = "websocket")]
+                    {
+                        Ok(Box::new(WebSocketServer::with_shared_core(
+                            server_config,
+                            shared_core.clone(),
+                        )))
+                    }
+                    #[cfg(not(feature = "websocket"))]
+                    {
+                        let _ = (server_config, &shared_core);
+                        Err(crate::common::error::FlareError::operation_not_supported(
+                            "WebSocket server feature is disabled",
+                        ))
+                    }
+                }
+                TransportProtocol::QUIC => {
+                    #[cfg(feature = "quic")]
+                    {
+                        QUICServer::with_shared_core(server_config, shared_core.clone())
+                            .map(|s| Box::new(s) as Box<dyn Server>)
+                    }
+                    #[cfg(not(feature = "quic"))]
+                    {
+                        let _ = (server_config, &shared_core);
+                        Err(crate::common::error::FlareError::operation_not_supported(
+                            "QUIC server feature is disabled",
+                        ))
+                    }
+                }
                 TransportProtocol::TCP => {
-                    return Err(crate::common::error::FlareError::protocol_error(
-                        "TCP transport not yet implemented".to_string(),
-                    ));
+                    #[cfg(feature = "tcp")]
+                    {
+                        Ok(Box::new(TCPServer::with_shared_core(
+                            server_config,
+                            shared_core.clone(),
+                        )))
+                    }
+                    #[cfg(not(feature = "tcp"))]
+                    {
+                        let _ = (server_config, &shared_core);
+                        Err(crate::common::error::FlareError::operation_not_supported(
+                            "TCP server feature is disabled",
+                        ))
+                    }
                 }
             };
 
-            servers.push(Arc::new(Mutex::new(server)));
+            match server_result {
+                Ok(server) => {
+                    servers.push(Arc::new(Mutex::new(server)));
+                    effective_protocols.push(*protocol);
+                }
+                Err(e) if *protocol == TransportProtocol::QUIC && has_websocket => {
+                    tracing::warn!(
+                        "QUIC server unavailable ({e}), continuing with WebSocket only (set FLARE_WS_ONLY=1 to skip QUIC bind attempts)"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if effective_protocols.is_empty() {
+            return Err(crate::common::error::FlareError::connection_failed(
+                "No transport servers could be started".to_string(),
+            ));
         }
 
         Ok(Self {
             servers,
-            protocols,
+            protocols: effective_protocols,
             is_running: Arc::new(AtomicBool::new(false)),
             core: Some(shared_core),
             config,

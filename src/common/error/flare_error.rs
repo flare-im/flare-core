@@ -168,6 +168,11 @@ impl FlareError {
         Self::localized(ErrorCode::OperationTimeout, reason)
     }
 
+    /// 创建操作不支持错误
+    pub fn operation_not_supported(reason: impl Into<String>) -> Self {
+        Self::localized(ErrorCode::OperationNotSupported, reason)
+    }
+
     // ============================================================
     // 信息获取方法
     // ============================================================

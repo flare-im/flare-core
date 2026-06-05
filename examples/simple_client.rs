@@ -165,10 +165,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Ok(_) => {
             println!("✅ 连接成功！");
             println!("使用的协议: {:?}", client.active_protocol());
-            println!("连接 ID: {:?}", client.connection_id());
+            println!("连接 ID: {:?}", client.connection_id().await);
             println!(
                 "连接状态: {}",
-                if client.is_connected() {
+                if client.is_connected().await {
                     "已连接"
                 } else {
                     "未连接"
@@ -257,8 +257,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             "/status" => {
-                                let is_connected = client.is_connected();
-                                let conn_id = client.connection_id();
+                                let is_connected = client.is_connected().await;
+                                let conn_id = client.connection_id().await;
                                 let protocol = client.active_protocol();
                                 println!("\n[状态] 连接状态: {}", if is_connected { "已连接" } else { "未连接" });
                                 println!("[状态] 连接 ID: {:?}", conn_id);
@@ -318,7 +318,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                     eprintln!("\n[错误] 发送消息失败: {}", e);
                                     println!("提示: 连接可能已断开");
                                     // 检查连接状态
-                                    if !client.is_connected() {
+                                    if !client.is_connected().await {
                                         println!("连接已断开，尝试重连...");
                                         // 客户端会自动重连（如果配置了重连）
                                         if let Err(e) = client.connect().await {

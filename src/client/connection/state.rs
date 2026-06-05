@@ -3,7 +3,8 @@
 //! 定义连接状态枚举和状态转换逻辑
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+
+use crate::common::platform::{MonotonicInstant, monotonic_now};
 
 /// 连接状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,8 +49,8 @@ impl ConnectionState {
 /// 连接状态管理器
 pub struct ConnectionStateManager {
     state: Arc<Mutex<ConnectionState>>,
-    state_changed_at: Arc<Mutex<Instant>>,
-    connect_started_at: Arc<Mutex<Option<Instant>>>,
+    state_changed_at: Arc<Mutex<MonotonicInstant>>,
+    connect_started_at: Arc<Mutex<Option<MonotonicInstant>>>,
 }
 
 impl Clone for ConnectionStateManager {
@@ -66,7 +67,7 @@ impl ConnectionStateManager {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
-            state_changed_at: Arc::new(Mutex::new(Instant::now())),
+            state_changed_at: Arc::new(Mutex::new(monotonic_now())),
             connect_started_at: Arc::new(Mutex::new(None)),
         }
     }
@@ -76,7 +77,7 @@ impl ConnectionStateManager {
             *state = new_state;
         }
         if let Ok(mut changed_at) = self.state_changed_at.lock() {
-            *changed_at = Instant::now();
+            *changed_at = monotonic_now();
         }
     }
 
@@ -90,7 +91,7 @@ impl ConnectionStateManager {
     pub fn start_connecting(&self) {
         self.set_state(ConnectionState::Connecting);
         if let Ok(mut started_at) = self.connect_started_at.lock() {
-            *started_at = Some(Instant::now());
+            *started_at = Some(monotonic_now());
         }
     }
 
@@ -118,15 +119,15 @@ impl ConnectionStateManager {
     pub fn set_reconnecting(&self) {
         self.set_state(ConnectionState::Reconnecting);
         if let Ok(mut started_at) = self.connect_started_at.lock() {
-            *started_at = Some(Instant::now());
+            *started_at = Some(monotonic_now());
         }
     }
 
-    pub fn state_changed_at(&self) -> Instant {
+    pub fn state_changed_at(&self) -> MonotonicInstant {
         self.state_changed_at
             .lock()
             .map(|t| *t)
-            .unwrap_or_else(|_| Instant::now())
+            .unwrap_or_else(|_| monotonic_now())
     }
 
     pub fn connect_duration(&self) -> Option<std::time::Duration> {

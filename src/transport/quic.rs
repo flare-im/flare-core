@@ -60,11 +60,11 @@ impl QUICTransport {
 
         loop {
             // 检查是否已关闭
-            if let Ok(closed) = is_closed.lock() {
-                if *closed {
-                    debug!("[QUIC Transport] Receiver task: connection closed");
-                    break;
-                }
+            if let Ok(closed) = is_closed.lock()
+                && *closed
+            {
+                debug!("[QUIC Transport] Receiver task: connection closed");
+                break;
             }
 
             let mut recv = recv_stream.lock().await;

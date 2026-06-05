@@ -42,8 +42,16 @@ impl From<prost::EncodeError> for FlareError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<tokio::time::error::Elapsed> for FlareError {
     fn from(_: tokio::time::error::Elapsed) -> Self {
+        FlareError::timeout("操作超时")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<wasmtimer::tokio::error::Elapsed> for FlareError {
+    fn from(_: wasmtimer::tokio::error::Elapsed) -> Self {
         FlareError::timeout("操作超时")
     }
 }

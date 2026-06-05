@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use quinn::{Endpoint, ServerConfig as QuinnServerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::time::timeout;
 use tracing::debug;
 
 /// QUIC 服务端
@@ -117,7 +118,9 @@ impl QUICServer {
             })?;
 
         // 解析地址
-        let addr = config.bind_address.parse::<SocketAddr>().map_err(|e| {
+        let bind_address =
+            config.get_protocol_address(&crate::common::config_types::TransportProtocol::QUIC);
+        let addr = bind_address.parse::<SocketAddr>().map_err(|e| {
             crate::common::error::FlareError::protocol_error(format!("无效地址: {}", e))
         })?;
 
@@ -148,6 +151,7 @@ impl Server for QUICServer {
         let config = self.config.clone();
         let is_running = Arc::clone(&self.is_running);
         let core = Arc::clone(&self.core);
+        let handshake_limiter = Arc::new(Semaphore::new(config.max_handshake_concurrency.max(1)));
 
         tokio::spawn(async move {
             debug!("[QUIC Server] 开始监听连接");
@@ -157,10 +161,21 @@ impl Server for QUICServer {
                     let manager_clone = Arc::clone(&manager);
                     let config_clone = config.clone();
                     let core_clone = Arc::clone(&core);
+                    let permit = match Arc::clone(&handshake_limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            debug!(
+                                "[QUIC Server] 握手并发已满: {}",
+                                config.max_handshake_concurrency
+                            );
+                            continue;
+                        }
+                    };
 
                     tokio::spawn(async move {
-                        match conn.await {
-                            Ok(connecting) => {
+                        let _permit = permit;
+                        match timeout(config_clone.handshake_timeout, conn).await {
+                            Ok(Ok(connecting)) => {
                                 debug!("[QUIC Server] 握手完成，处理连接");
                                 handle_quic_connection(
                                     connecting,
@@ -170,8 +185,14 @@ impl Server for QUICServer {
                                 )
                                 .await;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 debug!("[QUIC Server] QUIC 连接握手失败: {}", e);
+                            }
+                            Err(_) => {
+                                debug!(
+                                    "[QUIC Server] QUIC 握手超时: {:?}",
+                                    config_clone.handshake_timeout
+                                );
                             }
                         }
                     });
@@ -217,13 +238,22 @@ async fn handle_quic_connection(
 
     // 接受双向流
     debug!("[QUIC Server] 等待客户端打开双向流");
-    let (send, recv) = match connection.accept_bi().await {
-        Ok(streams) => {
+    let (send, recv) = match timeout(config.handshake_timeout, connection.accept_bi()).await {
+        Ok(Ok(streams)) => {
             debug!("[QUIC Server] 双向流已接受");
             streams
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             debug!("[QUIC Server] 接受双向流失败: {}", e);
+            connection.close(0u32.into(), b"stream error");
+            return;
+        }
+        Err(_) => {
+            debug!(
+                "[QUIC Server] 等待双向流超时: {:?}",
+                config.handshake_timeout
+            );
+            connection.close(0u32.into(), b"stream timeout");
             return;
         }
     };

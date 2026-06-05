@@ -5,9 +5,10 @@
 use crate::client::connection::ConnectionStateManager;
 use crate::client::transports::ClientCore;
 use crate::common::error::{FlareError, Result};
+use crate::common::platform::sleep;
 use crate::common::protocol::Frame;
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent, ConnectionObserver};
+use crate::transport::events::{ConnectionEvent, ConnectionObserver};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -15,34 +16,13 @@ use tokio::sync::Mutex;
 ///
 /// 委托给 ClientCore 处理消息和连接事件
 pub struct ClientMessageObserver {
-    state_manager: Arc<ConnectionStateManager>,
-    #[allow(dead_code)] // 保留用于未来扩展
-    parser: Arc<tokio::sync::Mutex<crate::common::MessageParser>>,
-    observers: Arc<std::sync::Mutex<Vec<ArcObserver>>>,
     core: Arc<ClientCore>,
 }
 
 impl ClientMessageObserver {
     /// 创建新的消息观察者
     pub fn new(core: Arc<ClientCore>) -> Self {
-        Self {
-            state_manager: Arc::clone(&core.state_manager),
-            parser: Arc::clone(&core.parser),
-            observers: Arc::clone(&core.observers),
-            core,
-        }
-    }
-
-    /// 通知所有观察者（内部辅助函数）
-    fn notify_observers(
-        observers: &Arc<std::sync::Mutex<Vec<ArcObserver>>>,
-        event: &ConnectionEvent,
-    ) {
-        if let Ok(obs) = observers.lock() {
-            for observer in obs.iter() {
-                observer.on_event(event);
-            }
-        }
+        Self { core }
     }
 }
 
@@ -50,25 +30,30 @@ impl ConnectionObserver for ClientMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                // 直接调用 ClientCore::handle_message 处理消息
-                // 它会在内部处理 CONNECT_ACK, PONG, KICKED 等系统命令
                 let core = Arc::clone(&self.core);
                 let data_clone = data.clone();
-                tokio::spawn(async move {
-                    core.handle_message(data_clone).await;
-                });
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // Browser onmessage is sync; queue bytes and drain on the LocalSet task
+                    // that is already running `wait_for_negotiation` / `run_async`.
+                    core.push_wasm_inbound(data_clone);
+                    let core_drain = Arc::clone(&core);
+                    crate::client::wasm_tokio::spawn_detached(async move {
+                        core_drain.drain_wasm_inbound().await;
+                    });
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    crate::client::runtime::spawn_client_task(async move {
+                        core.handle_message(data_clone).await;
+                    });
+                }
             }
-            ConnectionEvent::Connected => {
-                self.state_manager.set_connected();
-                Self::notify_observers(&self.observers, event);
-            }
-            ConnectionEvent::Disconnected(_) => {
-                self.state_manager.set_disconnected();
-                Self::notify_observers(&self.observers, event);
-            }
-            ConnectionEvent::Error(_) => {
-                self.state_manager.set_failed();
-                Self::notify_observers(&self.observers, event);
+            ConnectionEvent::Connected
+            | ConnectionEvent::Disconnected(_)
+            | ConnectionEvent::Error(_) => {
+                // 单一生命周期入口：pending 清理、协商状态、上层观察者均由 ClientCore 负责
+                self.core.handle_connection_event(event);
             }
         }
     }
@@ -141,20 +126,20 @@ impl ClientConnectionHelper {
         Fut: std::future::Future<Output = Result<()>>,
     {
         // 检查重连次数限制
-        if let Some(max) = max_attempts {
-            if *reconnect_attempts >= max {
-                return Err(FlareError::connection_failed(format!(
-                    "Max reconnect attempts ({}) exceeded",
-                    max
-                )));
-            }
+        if let Some(max) = max_attempts
+            && *reconnect_attempts >= max
+        {
+            return Err(FlareError::connection_failed(format!(
+                "Max reconnect attempts ({}) exceeded",
+                max
+            )));
         }
 
         state_manager.start_connecting();
         *reconnect_attempts += 1;
 
         // 等待重连间隔
-        tokio::time::sleep(reconnect_interval).await;
+        sleep(reconnect_interval).await;
 
         // 关闭旧连接
         if let Some(conn) = old_connection {

@@ -69,7 +69,7 @@ impl DefaultClientMessageObserver {
         // 通知事件处理器
         if let Some(handler) = event_handler {
             let event = ConnectionEvent::Connected;
-            tokio::spawn(async move {
+            crate::client::runtime::spawn_client_task(async move {
                 let _ = handler.handle_connection_event(&event).await;
             });
         }
@@ -90,7 +90,7 @@ impl DefaultClientMessageObserver {
         // 通知事件处理器
         if let Some(handler) = event_handler {
             let event = ConnectionEvent::Disconnected(reason);
-            tokio::spawn(async move {
+            crate::client::runtime::spawn_client_task(async move {
                 let _ = handler.handle_connection_event(&event).await;
             });
         }
@@ -108,7 +108,7 @@ impl DefaultClientMessageObserver {
         // 通知事件处理器
         if let Some(handler) = event_handler {
             let event = ConnectionEvent::Error(error);
-            tokio::spawn(async move {
+            crate::client::runtime::spawn_client_task(async move {
                 let _ = handler.handle_connection_event(&event).await;
             });
         }
@@ -121,14 +121,14 @@ impl ConnectionObserver for DefaultClientMessageObserver {
             ConnectionEvent::Message(data) => {
                 let core = Arc::clone(&self.core);
                 let data_clone = data.clone();
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     Self::handle_message_event(&core, data_clone).await;
                 });
             }
             ConnectionEvent::Connected => {
                 let state_manager = Arc::clone(&self.state_manager);
                 let event_handler = self.event_handler.clone();
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     Self::handle_connected_event(&state_manager, event_handler).await;
                 });
             }
@@ -136,7 +136,7 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                 let state_manager = Arc::clone(&self.state_manager);
                 let event_handler = self.event_handler.clone();
                 let reason_clone = reason.clone();
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     Self::handle_disconnected_event(&state_manager, event_handler, reason_clone)
                         .await;
                 });
@@ -145,7 +145,7 @@ impl ConnectionObserver for DefaultClientMessageObserver {
                 let state_manager = Arc::clone(&self.state_manager);
                 let event_handler = self.event_handler.clone();
                 let error_clone = e.clone();
-                tokio::spawn(async move {
+                crate::client::runtime::spawn_client_task(async move {
                     Self::handle_error_event(&state_manager, event_handler, error_clone).await;
                 });
             }

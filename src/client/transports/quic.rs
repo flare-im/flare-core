@@ -132,9 +132,9 @@ impl QUICClient {
     async fn internal_connect(&mut self) -> Result<()> {
         // 如果连接已建立（协议竞速场景），直接发送 CONNECT
         // 否则先建立网络连接
-        let connection_arc = if self.connection.is_some() {
+        let connection_arc = if let Some(connection) = &self.connection {
             // 连接已建立，直接使用
-            self.connection.as_ref().unwrap().clone()
+            connection.clone()
         } else {
             // 建立新的网络连接
             self.establish_network_connection().await?
@@ -144,8 +144,7 @@ impl QUICClient {
         self.setup_connection_with_observer(connection_arc.clone())
             .await?;
 
-        // 启动心跳
-        self.core.start_heartbeat(connection_arc.clone()).await;
+        // 心跳在 CONNECT_ACK 协商完成后由 ClientCore 启动
 
         // 通知连接成功
         self.core
@@ -188,7 +187,10 @@ impl QUICClient {
 
     /// 解析服务器地址
     async fn parse_server_address(&self) -> Result<(SocketAddr, String)> {
-        let address_str = self.config.server_url.replace("quic://", "");
+        let address_str = self
+            .config
+            .get_protocol_url(&crate::common::config_types::TransportProtocol::QUIC)
+            .replace("quic://", "");
 
         // 尝试直接解析为 SocketAddr
         let server_addr = match address_str.parse::<SocketAddr>() {
@@ -250,13 +252,13 @@ impl QUICClient {
     /// 尝试重连
     async fn try_reconnect(&mut self) -> Result<()> {
         // 检查重连次数限制
-        if let Some(max) = self.config.max_reconnect_attempts {
-            if self.reconnect_attempts >= max {
-                return Err(FlareError::connection_failed(format!(
-                    "Max reconnect attempts ({}) exceeded",
-                    max
-                )));
-            }
+        if let Some(max) = self.config.max_reconnect_attempts
+            && self.reconnect_attempts >= max
+        {
+            return Err(FlareError::connection_failed(format!(
+                "Max reconnect attempts ({}) exceeded",
+                max
+            )));
         }
 
         self.core.state_manager.start_connecting();

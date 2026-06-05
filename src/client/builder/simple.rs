@@ -20,8 +20,11 @@
 //! 简单模式基于 `HybridClient`，共享所有核心能力（多协议支持、序列化协商、心跳检测等），
 //! 但消息处理逻辑通过闭包定义，不依赖高级抽象。
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::client::HybridClient;
+#[cfg(target_arch = "wasm32")]
+use crate::client::WebSocketClient;
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
-use crate::client::{Client, HybridClient};
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::transport::events::{ConnectionEvent, ConnectionObserver};
@@ -41,28 +44,21 @@ struct SimpleClientObserver {
 
 impl ConnectionObserver for SimpleClientObserver {
     fn on_event(&self, event: &ConnectionEvent) {
-        match event {
-            ConnectionEvent::Message(data) => {
-                // 解析消息
-                if let Ok(frame) = crate::common::MessageParser::new(
-                    crate::common::protocol::SerializationFormat::Protobuf,
-                    crate::common::compression::CompressionAlgorithm::None,
-                    crate::common::encryption::EncryptionAlgorithm::None,
-                )
-                .parse(data)
-                {
-                    if let Some(ref handler) = self.message_handler {
-                        if let Err(e) = handler(&frame) {
-                            tracing::error!("消息处理错误: {:?}", e);
-                        }
-                    }
-                }
-            }
-            _ => {
-                if let Some(ref handler) = self.event_handler {
-                    handler(event);
-                }
-            }
+        if let Some(ref handler) = self.event_handler {
+            handler(event);
+        }
+
+        if let ConnectionEvent::Message(data) = event
+            && let Some(ref handler) = self.message_handler
+            && let Ok(frame) = crate::common::MessageParser::new(
+                crate::common::protocol::SerializationFormat::Protobuf,
+                crate::common::compression::CompressionAlgorithm::None,
+                crate::common::encryption::EncryptionAlgorithm::None,
+            )
+            .parse(data)
+            && let Err(e) = handler(&frame)
+        {
+            tracing::error!("消息处理错误: {:?}", e);
         }
     }
 }
@@ -76,13 +72,9 @@ pub struct SimpleClient {
 impl SimpleClient {
     /// 连接到服务器
     pub async fn connect(&mut self) -> Result<()> {
-        // 先添加观察者
-        {
-            let mut client = self.wrapper.client().lock().await;
-            client.add_observer(self.observer.clone() as Arc<dyn ConnectionObserver>);
-        }
-
-        // 然后连接
+        self.wrapper
+            .add_observer(self.observer.clone() as Arc<dyn ConnectionObserver>)
+            .await;
         self.wrapper.connect().await
     }
 
@@ -106,18 +98,28 @@ impl SimpleClient {
     }
 
     /// 检查连接状态
-    pub fn is_connected(&self) -> bool {
-        self.wrapper.is_connected()
+    pub async fn is_connected(&self) -> bool {
+        self.wrapper.is_connected_async().await
     }
 
     /// 获取连接 ID
-    pub fn connection_id(&self) -> Option<String> {
-        self.wrapper.connection_id()
+    pub async fn connection_id(&self) -> Option<String> {
+        self.wrapper.connection_id_async().await
     }
 
     /// 获取活动协议
     pub fn active_protocol(&self) -> crate::common::config_types::TransportProtocol {
         self.wrapper.active_protocol()
+    }
+
+    /// 获取当前消息解析器快照（协商完成后与 `flare_chat_server` 等 Flare 服务端一致）
+    pub async fn parser_snapshot(&self) -> crate::common::MessageParser {
+        self.wrapper.parser_snapshot().await
+    }
+
+    /// 等待 CONNECT_ACK 协商完成
+    pub async fn wait_for_negotiation(&self, timeout: std::time::Duration) -> Result<()> {
+        self.wrapper.wait_for_negotiation(timeout).await
     }
 }
 
@@ -213,6 +215,12 @@ impl ClientBuilder {
         self
     }
 
+    /// 设置设备信息（CONNECT 协商与设备管理）
+    pub fn with_device_info(mut self, device_info: crate::common::device::DeviceInfo) -> Self {
+        self.base = self.base.with_device_info(device_info);
+        self
+    }
+
     /// 设置 Token（用于认证，如果服务端启用认证，必须提供）
     pub fn with_token(mut self, token: String) -> Self {
         self.base = self.base.with_token(token);
@@ -285,7 +293,16 @@ impl ClientBuilder {
             event_handler: self.event_handler,
         });
 
-        let client = HybridClient::new(self.base.config)?;
+        let client = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                HybridClient::new(self.base.config)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                WebSocketClient::new(self.base.config)
+            }
+        };
         let wrapper = ClientWrapper::new(client);
 
         Ok(SimpleClient { wrapper, observer })

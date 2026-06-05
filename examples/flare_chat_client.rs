@@ -21,6 +21,12 @@
 //! # 指定用户ID
 //! RUST_LOG=info cargo run --example flare_chat_client -- user123
 //!
+//! # 指定传输协议（需编译启用 tcp feature）
+//! RUST_LOG=info cargo run --example flare_chat_client --features tcp -- user123 --protocol tcp
+//! RUST_LOG=info cargo run --example flare_chat_client -- user123 -p websocket
+//! TRANSPORT_PROTOCOL=quic RUST_LOG=info cargo run --example flare_chat_client
+//!
+//! # 协议选项：websocket（默认）、quic（竞速 WS+QUIC，USE_QUIC=1）、tcp
 //! # 指定平台
 //! DEVICE_PLATFORM=android RUST_LOG=info cargo run --example flare_chat_client
 //!
@@ -115,15 +121,12 @@ async fn main() -> Result<()> {
     info!("🔐 已注册 AES-256-GCM 加密器");
 
     // ============================================================
-    // 2. 获取用户ID（用于测试多设备互斥）
+    // 2. 解析命令行：用户 ID + 传输协议
     // ============================================================
-    // 方式1：从命令行参数读取（如果提供）
-    // 方式2：从环境变量读取（如果提供）
-    // 方式3：从stdin读取（交互式输入）
-    let user_id = if let Some(arg_user_id) = std::env::args().nth(1) {
-        // 从命令行参数读取
-        info!("📝 使用命令行参数指定的用户ID: {}", arg_user_id);
-        arg_user_id
+    let (cli_user_id, selected_transport) = parse_cli_args();
+    let user_id = if let Some(id) = cli_user_id {
+        info!("📝 使用命令行参数指定的用户ID: {id}");
+        id
     } else if let Ok(env_user_id) = std::env::var("USER_ID") {
         // 从环境变量读取
         info!("📝 使用环境变量 USER_ID: {}", env_user_id);
@@ -159,6 +162,11 @@ async fn main() -> Result<()> {
     };
 
     info!("✅ 用户ID: {}", user_id);
+    info!(
+        "📡 传输协议: {} ({:?})",
+        transport_label(selected_transport),
+        selected_transport
+    );
     info!("💡 提示：使用相同用户ID + 相同平台登录第二个客户端，会看到设备互斥效果");
     info!("");
 
@@ -236,51 +244,56 @@ async fn main() -> Result<()> {
     // 6. 使用 FlareClientBuilder 构建客户端（使用所有能力）
     // ============================================================
     // 注意：协议选择、协议竞速、压缩、序列化和加密都由 HybridClient 和 ClientCore 自动处理
-    let client = FlareClientBuilder::new("127.0.0.1:8080")
-        // ============================================================
-        // 必须：设置消息监听器
-        // ============================================================
+    // 协议列表的顺序就是优先级顺序，前面的协议优先级更高
+    #[cfg(feature = "tcp")]
+    let tcp_url =
+        std::env::var("TCP_SERVER_URL").unwrap_or_else(|_| "tcp://127.0.0.1:8090".to_string());
+    let ws_url =
+        std::env::var("WS_SERVER_URL").unwrap_or_else(|_| "ws://127.0.0.1:8080".to_string());
+    let quic_url =
+        std::env::var("QUIC_SERVER_URL").unwrap_or_else(|_| "quic://127.0.0.1:8081".to_string());
+
+    let mut builder = FlareClientBuilder::new(ws_url.clone())
         .with_listener(chat_listener.clone())
-        // ============================================================
-        // 中间件（按添加顺序执行）
-        // ============================================================
-        .with_middleware(logging_middleware) // 1. 日志
-        .with_middleware(metrics_middleware) // 2. 性能监控
-        // ============================================================
-        // 协议配置：支持多协议竞速（由 HybridClient 处理）
-        // ============================================================
-        // 协议列表的顺序就是优先级顺序，前面的协议优先级更高
-        // HybridClient 会同时尝试多个协议，选择第一个成功的
-        .with_protocol_race(vec![TransportProtocol::QUIC, TransportProtocol::WebSocket])
-        .with_protocol_url(
-            TransportProtocol::WebSocket,
-            "ws://127.0.0.1:8080".to_string(),
-        )
-        .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-        // ============================================================
-        // 设备信息配置（用于设备管理和多设备互斥测试）
-        // ============================================================
-        .with_device_info(device_info) // 设置设备信息，将在 CONNECT 消息中发送
-        .with_user_id(user_id.clone()) // 设置用户 ID（用于设备管理和多设备互斥测试）
-        // ============================================================
-        // 协商配置：客户端序列化格式、压缩和加密（可选，由 ClientCore 处理）
-        // ============================================================
-        // 场景1：不指定格式 - 使用服务端默认格式（推荐）
-        // 不调用 with_format()，将使用服务端默认格式
-        // 场景2：指定格式（非强制） - 客户端指定格式，服务端优先使用
-        // 取消下面的注释来指定格式：
-        // .with_format(SerializationFormat::Protobuf)
-        // .with_compression(CompressionAlgorithm::Gzip)
-        // 场景3：强制模式 - 客户端强制使用指定格式（适用于不支持某些格式的平台）
-        // 取消下面的注释来启用强制模式：
-        // .force_format(SerializationFormat::Json)
-        // .force_compression(CompressionAlgorithm::None)
-        // 场景4：启用加密（可选）
-        // 取消下面的注释来启用加密：
-        // .with_encryption(EncryptionAlgorithm::Aes256Gcm)
-        // ============================================================
-        // 连接配置
-        // ============================================================
+        .with_middleware(logging_middleware)
+        .with_middleware(metrics_middleware)
+        .with_protocol_url(TransportProtocol::WebSocket, ws_url.clone())
+        .with_protocol_url(TransportProtocol::QUIC, quic_url.clone())
+        .with_device_info(device_info)
+        .with_user_id(user_id.clone());
+
+    #[cfg(feature = "tcp")]
+    {
+        builder = builder.with_protocol_url(TransportProtocol::TCP, tcp_url.clone());
+    }
+
+    builder = match selected_transport {
+        SelectedTransport::WebSocket => {
+            info!("📡 使用 WebSocket 单协议（-p quic 或 USE_QUIC=1 可启用竞速）");
+            builder.with_protocol(TransportProtocol::WebSocket)
+        }
+        SelectedTransport::QuicRace => {
+            info!("📡 使用 QUIC + WebSocket 协议竞速");
+            builder.with_protocol_race(vec![TransportProtocol::QUIC, TransportProtocol::WebSocket])
+        }
+        SelectedTransport::Tcp => {
+            #[cfg(feature = "tcp")]
+            {
+                info!("📡 使用 TCP 单协议（默认 {tcp_url}，服务端需 `--features tcp`）");
+                builder.with_protocol(TransportProtocol::TCP)
+            }
+            #[cfg(not(feature = "tcp"))]
+            {
+                let _ = builder;
+                return Err(flare_core::common::error::FlareError::operation_not_supported(
+                    "TCP 协议需要编译时启用 feature：cargo run --example flare_chat_client --features tcp ..."
+                        .to_string(),
+                ));
+            }
+        }
+    };
+
+    let client = builder
         .with_heartbeat(
             HeartbeatConfig::default()
                 .with_interval(std::time::Duration::from_secs(30))
@@ -289,7 +302,6 @@ async fn main() -> Result<()> {
         .with_connect_timeout(std::time::Duration::from_secs(10))
         .with_reconnect_interval(std::time::Duration::from_secs(3))
         .with_max_reconnect_attempts(Some(5))
-        // 使用协议竞速连接（由 HybridClient::connect_with_race 处理）
         .build_with_race()
         .await?;
 
@@ -365,19 +377,7 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        // 检查连接状态（如果断开，等待重连，不立即退出）
-                        if !client.is_connected() {
-                            warn!("⚠️  连接已断开，等待自动重连...");
-                            // 等待一段时间，让重连机制尝试重连
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            // 如果仍然断开，提示用户，但不退出
-                            if !client.is_connected() {
-                                warn!("💡 提示：连接已断开，正在自动重连中，请稍候...");
-                            }
-                            continue; // 继续循环，不退出
-                        }
-
-                        // 发送消息
+                        // 直接尝试发送；若已断开会由底层 try_reconnect 自动重连
                         let msg_cmd = send_message(
                             generate_message_id(),
                             message.as_bytes().to_vec(),
@@ -393,14 +393,12 @@ async fn main() -> Result<()> {
                         // 发送消息并等待响应（按 message_id 匹配）
                         if let Err(e) = client.send_frame_and_wait(&frame, std::time::Duration::from_secs(5)).await {
                             error!("发送消息或等待响应失败: {}", e);
-                            // 如果发送失败，等待重连，不立即退出
                             if !client.is_connected() {
-                                warn!("⚠️  连接已断开，等待自动重连...");
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                warn!("⚠️  连接已断开。若刚重启过服务端，请退出客户端后重新运行");
                             }
-                            // 继续循环，不退出
+                        } else {
+                            debug!("发送消息并等待响应成功: {}", frame.message_id);
                         }
-                        debug!("发送消息并等待响应成功: {}", frame.message_id);
                     }
                     Err(e) => {
                         error!("读取输入失败: {}", e);
@@ -419,6 +417,69 @@ async fn main() -> Result<()> {
     info!("客户端已断开");
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedTransport {
+    WebSocket,
+    QuicRace,
+    Tcp,
+}
+
+fn transport_label(mode: SelectedTransport) -> &'static str {
+    match mode {
+        SelectedTransport::WebSocket => "WebSocket",
+        SelectedTransport::QuicRace => "QUIC+WebSocket 竞速",
+        SelectedTransport::Tcp => "TCP",
+    }
+}
+
+fn parse_transport_str(s: &str) -> Option<SelectedTransport> {
+    match s.to_lowercase().as_str() {
+        "ws" | "websocket" => Some(SelectedTransport::WebSocket),
+        "quic" | "race" => Some(SelectedTransport::QuicRace),
+        "tcp" => Some(SelectedTransport::Tcp),
+        _ => None,
+    }
+}
+
+fn default_transport_from_env() -> SelectedTransport {
+    if let Ok(v) = std::env::var("TRANSPORT_PROTOCOL") {
+        if let Some(mode) = parse_transport_str(&v) {
+            return mode;
+        }
+        warn!("未知 TRANSPORT_PROTOCOL={v}，使用 WebSocket");
+    }
+    if std::env::var("USE_QUIC").is_ok() {
+        return SelectedTransport::QuicRace;
+    }
+    SelectedTransport::WebSocket
+}
+
+/// 解析 `--protocol`/`-p` 与首个 positional 用户 ID。
+fn parse_cli_args() -> (Option<String>, SelectedTransport) {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mut transport = default_transport_from_env();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--protocol" | "-p" if i + 1 < args.len() => {
+                if let Some(mode) = parse_transport_str(&args[i + 1]) {
+                    transport = mode;
+                } else {
+                    warn!("未知协议 {}，保持当前选择", args[i + 1]);
+                }
+                args.remove(i + 1);
+                args.remove(i);
+            }
+            "--protocol" | "-p" => {
+                warn!("缺少 --protocol 参数值");
+                args.remove(i);
+            }
+            _ => i += 1,
+        }
+    }
+    (args.first().cloned(), transport)
 }
 
 /// 聊天监听器

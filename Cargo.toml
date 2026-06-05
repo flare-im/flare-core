@@ -8,8 +8,8 @@ keywords = ["websocket", "quic", "long-connection"]
 categories = ["network-programming", "asynchronous", "web-programming"]
 authors = ["Flare Team"]
 license = "MIT"
-repository = "https://github.com/flare-team/flare-core"
-homepage = "https://github.com/flare-team/flare-core"
+repository = "https://github.com/flare-im/flare-core"
+homepage = "https://github.com/flare-im/flare-core"
 documentation = "https://docs.rs/flare-core"
 readme = "README.md"
 exclude = [
@@ -34,22 +34,24 @@ bytes = "1"
 async-trait = "0.1"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
-flate2 = "1.0"
+flate2 = { version = "1.0", optional = true }
 lazy_static = "1.4"
 url = "2.5"
-rustls-pemfile = "2"
 base64 = "0.22"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-# 会话ID生成所需依赖
 sha2 = "0.10"
 hex = "0.4"
 base32 = "0.4"
-# 加密所需依赖
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", optional = true }
 rand = "0.8"
- 
 anyhow = "1.0"
+
+[build-dependencies]
+prost-build = "0.14"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustls-pemfile = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rcgen = "0.14"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
@@ -57,10 +59,68 @@ quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 ulid = "1.1"
 
-[build-dependencies]
-prost-build = "0.14"
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt", "time"] }
+wasmtimer = "0.4"
+web-time = "1.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "WebSocket",
+    "BinaryType",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "Blob",
+    "console",
+] }
 
 [dev-dependencies]
 
 [features]
-default = []
+default = [
+    "client",
+    "server",
+    "websocket",
+    "quic",
+    "compression-gzip",
+    "encryption-aes-gcm",
+]
+full = [
+    "client",
+    "server",
+    "websocket",
+    "quic",
+    "tcp",
+    "compression-gzip",
+    "encryption-aes-gcm",
+]
+
+# Public stack surfaces.
+client = []
+server = []
+
+# Transport capabilities.
+websocket = []
+quic = []
+tcp = []
+
+# wasm32 客户端栈（WebSocket only）；构建时配合 --target wasm32-unknown-unknown
+wasm = ["client", "websocket", "compression-gzip", "encryption-aes-gcm"]
+
+# Codec / crypto capabilities.
+compression-gzip = ["dep:flate2"]
+encryption-aes-gcm = ["dep:aes-gcm"]
+
+[[example]]
+name = "tcp_client"
+required-features = ["tcp"]
+
+[[bench]]
+name = "perf_baseline"
+harness = false
+required-features = ["server", "compression-gzip"]

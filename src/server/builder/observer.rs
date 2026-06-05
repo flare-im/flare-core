@@ -146,6 +146,30 @@ impl ObserverServerBuilder {
         self
     }
 
+    /// 设置握手超时时间
+    pub fn with_handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.base = self.base.with_handshake_timeout(timeout);
+        self
+    }
+
+    /// 设置最大并发握手数
+    pub fn with_max_handshake_concurrency(mut self, max: usize) -> Self {
+        self.base = self.base.with_max_handshake_concurrency(max);
+        self
+    }
+
+    /// 设置单次连接写入超时时间
+    pub fn with_write_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.base = self.base.with_write_timeout(timeout);
+        self
+    }
+
+    /// 设置 fanout 发送最大并发度
+    pub fn with_fanout_concurrency(mut self, max: usize) -> Self {
+        self.base = self.base.with_fanout_concurrency(max);
+        self
+    }
+
     /// 设置心跳配置
     pub fn with_heartbeat(
         mut self,

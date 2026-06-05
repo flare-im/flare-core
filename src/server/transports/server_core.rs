@@ -6,7 +6,9 @@ use crate::common::MessageParser;
 use crate::common::compression::CompressionAlgorithm;
 use crate::common::encryption::EncryptionAlgorithm;
 use crate::common::error::Result;
-use crate::common::message::pipeline::{ArcMessageMiddleware, ArcMessageProcessor};
+use crate::common::message::pipeline::{
+    ArcMessageMiddleware, ArcMessageProcessor, MessagePipeline,
+};
 use crate::common::protocol::{Frame, Reliability, SerializationFormat, frame_with_system_command};
 use crate::server::auth::Authenticator;
 use crate::server::config::ServerConfig;
@@ -58,6 +60,23 @@ pub struct ServerCore {
     /// 共享的处理器列表（可选，用于消息处理管道）
     /// 如果配置了处理器，每个连接在协商完成时会创建自己的 pipeline
     shared_processors: Vec<ArcMessageProcessor>,
+    /// 按协商 profile 复用共享 pipeline，减少大量长连接的重复分配。
+    pipeline_cache: Arc<tokio::sync::Mutex<HashMap<PipelineCacheKey, Arc<MessagePipeline>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipelineCacheKey {
+    format: SerializationFormat,
+    compression: CompressionAlgorithm,
+    encryption: EncryptionAlgorithm,
+}
+
+struct NegotiatedConnectionUpdate {
+    format: SerializationFormat,
+    compression: CompressionAlgorithm,
+    encryption: EncryptionAlgorithm,
+    user_id: Option<String>,
+    metadata: Option<HashMap<String, String>>,
 }
 
 impl ServerCore {
@@ -114,8 +133,12 @@ impl ServerCore {
         connection_manager: Option<Arc<ConnectionManager>>,
         observer_factory: Arc<dyn ServerMessageObserverFactory>,
     ) -> Self {
-        let connection_manager =
-            connection_manager.unwrap_or_else(|| Arc::new(ConnectionManager::new()));
+        let connection_manager = connection_manager.unwrap_or_else(|| {
+            Arc::new(ConnectionManager::with_limits(
+                config.write_timeout,
+                config.fanout_concurrency,
+            ))
+        });
 
         // 初始parser用于解析CONNECT消息，应该不使用加密（协商阶段）
         let parser = MessageParser::new(
@@ -139,6 +162,7 @@ impl ServerCore {
             observer_factory,
             shared_middlewares: Vec::new(), // 默认不配置中间件，避免性能开销
             shared_processors: Vec::new(),  // 默认不配置处理器，避免性能开销
+            pipeline_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -265,6 +289,7 @@ impl ServerCore {
     /// - `middleware`: 中间件实例
     pub async fn add_middleware(&mut self, middleware: ArcMessageMiddleware) {
         self.shared_middlewares.push(middleware);
+        self.pipeline_cache.lock().await.clear();
     }
 
     /// 添加处理器（用于消息处理管道）
@@ -276,6 +301,7 @@ impl ServerCore {
     /// - `processor`: 处理器实例
     pub async fn add_processor(&mut self, processor: ArcMessageProcessor) {
         self.shared_processors.push(processor);
+        self.pipeline_cache.lock().await.clear();
     }
 
     /// 启动心跳检测
@@ -413,11 +439,13 @@ impl ServerCore {
         self.update_connection_info(
             connection_id,
             &negotiation,
-            final_format,
-            final_compression.clone(),
-            final_encryption.clone(),
-            &user_id,
-            meta_data,
+            NegotiatedConnectionUpdate {
+                format: final_format,
+                compression: final_compression.clone(),
+                encryption: final_encryption.clone(),
+                user_id: user_id.clone(),
+                metadata: meta_data,
+            },
         )
         .await;
 
@@ -554,25 +582,16 @@ impl ServerCore {
             encryption_clone.clone(),
         );
 
-        // 如果配置了中间件或处理器，创建 pipeline
-        let pipeline = if !self.shared_middlewares.is_empty() || !self.shared_processors.is_empty()
-        {
-            let pipeline = crate::common::message::pipeline::MessagePipeline::new(parser.clone());
-
-            // 添加共享的中间件（使用 Arc 克隆，避免重复创建）
-            for middleware in &self.shared_middlewares {
-                pipeline.add_middleware(Arc::clone(middleware)).await;
-            }
-
-            // 添加共享的处理器（使用 Arc 克隆，避免重复创建）
-            for processor in &self.shared_processors {
-                pipeline.add_processor(Arc::clone(processor)).await;
-            }
-
-            Some(std::sync::Arc::new(pipeline))
-        } else {
-            None
-        };
+        let pipeline = self
+            .pipeline_for_negotiation_profile(
+                &parser,
+                PipelineCacheKey {
+                    format: final_format,
+                    compression: final_compression.clone(),
+                    encryption: final_encryption.clone(),
+                },
+            )
+            .await;
 
         // 更新连接信息，标记协商完成并设置 parser/pipeline
         if let Err(e) = manager.update_connection_negotiation_with_pipeline(
@@ -599,6 +618,36 @@ impl ServerCore {
     // 内部辅助方法
     // ============================================================================
 
+    async fn pipeline_for_negotiation_profile(
+        &self,
+        parser: &MessageParser,
+        key: PipelineCacheKey,
+    ) -> Option<Arc<MessagePipeline>> {
+        if self.shared_middlewares.is_empty() && self.shared_processors.is_empty() {
+            return None;
+        }
+
+        {
+            let cache = self.pipeline_cache.lock().await;
+            if let Some(pipeline) = cache.get(&key) {
+                return Some(Arc::clone(pipeline));
+            }
+        }
+
+        let pipeline = MessagePipeline::new(parser.clone());
+        for middleware in &self.shared_middlewares {
+            pipeline.add_middleware(Arc::clone(middleware)).await;
+        }
+        for processor in &self.shared_processors {
+            pipeline.add_processor(Arc::clone(processor)).await;
+        }
+        let pipeline = Arc::new(pipeline);
+
+        let mut cache = self.pipeline_cache.lock().await;
+        let cached = cache.entry(key).or_insert_with(|| Arc::clone(&pipeline));
+        Some(Arc::clone(cached))
+    }
+
     /// 确定协商结果（内部辅助方法）
     fn determine_negotiation_result(
         &self,
@@ -612,9 +661,7 @@ impl ServerCore {
         // - 如果客户端强制指定（force_format=true），使用客户端格式
         // - 如果客户端指定了格式但未强制，优先使用客户端格式（如果服务端支持）
         // - 如果客户端未指定格式，使用服务端默认格式（JSON）
-        let final_format = if negotiation.is_forced
-            || negotiation.serialization_format != SerializationFormat::Json
-        {
+        let final_format = if negotiation.is_forced || negotiation.serialization_format_specified {
             negotiation.serialization_format
         } else {
             self.default_serialization_format
@@ -651,8 +698,9 @@ impl ServerCore {
             connection_id
         );
         debug!(
-            "[ServerCore] 📋 协商详情: 客户端请求={:?}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?},最终加密={:?} device={:?}, user_id={:?}",
+            "[ServerCore] 📋 协商详情: 客户端请求={:?}, 客户端是否指定格式={}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?},最终加密={:?} device={:?}, user_id={:?}",
             negotiation.serialization_format,
+            negotiation.serialization_format_specified,
             negotiation.compression,
             negotiation.is_forced,
             self.default_serialization_format,
@@ -872,16 +920,13 @@ impl ServerCore {
         &self,
         connection_id: &str,
         negotiation: &negotiation::NegotiationResult,
-        final_format: SerializationFormat,
-        final_compression: CompressionAlgorithm,
-        final_encryption: EncryptionAlgorithm,
-        auth_user_id: &Option<String>,
-        metadata: Option<HashMap<String, String>>,
+        update: NegotiatedConnectionUpdate,
     ) {
         let manager = Arc::clone(&self.connection_manager);
 
         // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
         // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
+        let auth_user_id = update.user_id.clone();
         let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
 
         // 只更新基本信息，不标记协商完成，也不创建 parser/pipeline
@@ -889,11 +934,11 @@ impl ServerCore {
         if let Err(e) = manager.update_connection_negotiation(
             connection_id,
             negotiation.device_info.clone(),
-            final_format,
-            final_compression,
-            final_encryption,
+            update.format,
+            update.compression,
+            update.encryption,
             user_id.clone(),
-            metadata,
+            update.metadata,
         ) {
             error!("[ServerCore] 更新连接协商信息失败: {}", e);
             return;
@@ -907,13 +952,16 @@ impl ServerCore {
             );
 
             if let Some((_, conn_info)) = manager.get_connection(connection_id) {
-                if let Some(ref updated_user_id) = conn_info.user_id {
-                    debug!(
-                        "[ServerCore] ✅ 验证成功: 连接信息中的 user_id={}",
-                        updated_user_id
-                    );
-                } else {
-                    error!("[ServerCore] ❌ 验证失败: 连接信息中的 user_id 仍为 None");
+                match conn_info.user_id {
+                    Some(ref updated_user_id) => {
+                        debug!(
+                            "[ServerCore] ✅ 验证成功: 连接信息中的 user_id={}",
+                            updated_user_id
+                        );
+                    }
+                    None => {
+                        error!("[ServerCore] ❌ 验证失败: 连接信息中的 user_id 仍为 None");
+                    }
                 }
             }
         } else {
@@ -1017,5 +1065,115 @@ impl ServerHandle for ServerCore {
 
     fn user_count(&self) -> usize {
         self.user_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::message::ValidationMiddleware;
+    use crate::common::platform::{MonotonicInstant, monotonic_now};
+    use crate::transport::connection::Connection;
+    use crate::transport::events::ArcObserver;
+
+    struct TestConnection {
+        last_active: MonotonicInstant,
+    }
+
+    #[async_trait]
+    impl Connection for TestConnection {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            self.last_active = monotonic_now();
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn last_active_time(&self) -> MonotonicInstant {
+            self.last_active
+        }
+
+        fn update_active_time(&mut self) {
+            self.last_active = monotonic_now();
+        }
+    }
+
+    #[test]
+    fn negotiation_uses_server_default_when_client_format_unspecified() {
+        let config = ServerConfig::default().with_format(SerializationFormat::Protobuf);
+        let core = ServerCore::new(&config, None);
+        let negotiation = negotiation::NegotiationResult::default();
+
+        let (format, compression, encryption) = core.determine_negotiation_result(&negotiation);
+
+        assert_eq!(format, SerializationFormat::Protobuf);
+        assert_eq!(compression, config.default_compression);
+        assert_eq!(encryption, config.default_encryption);
+    }
+
+    #[test]
+    fn negotiation_honors_explicit_client_format_metadata() {
+        let config = ServerConfig::default().with_format(SerializationFormat::Protobuf);
+        let core = ServerCore::new(&config, None);
+        let negotiation = negotiation::NegotiationResult {
+            serialization_format: SerializationFormat::Json,
+            serialization_format_specified: true,
+            ..Default::default()
+        };
+
+        let (format, _, _) = core.determine_negotiation_result(&negotiation);
+
+        assert_eq!(format, SerializationFormat::Json);
+    }
+
+    #[tokio::test]
+    async fn shared_pipeline_is_reused_for_same_negotiation_profile() {
+        let config = ServerConfig::default().with_format(SerializationFormat::Protobuf);
+        let mut core = ServerCore::new(&config, None);
+        core.add_middleware(Arc::new(ValidationMiddleware::new("noop", |_| Ok(()))))
+            .await;
+
+        for connection_id in ["conn1", "conn2"] {
+            core.connection_manager
+                .add_connection(
+                    connection_id.to_string(),
+                    Box::new(TestConnection {
+                        last_active: monotonic_now(),
+                    }),
+                    Some("user1".to_string()),
+                    false,
+                )
+                .unwrap();
+
+            core.finalize_negotiation_after_ack(
+                connection_id,
+                SerializationFormat::Protobuf,
+                CompressionAlgorithm::None,
+                EncryptionAlgorithm::None,
+            )
+            .await;
+        }
+
+        let first_pipeline = core
+            .connection_manager
+            .get_connection("conn1")
+            .and_then(|(_, info)| info.cached_pipeline)
+            .expect("first connection should have cached pipeline");
+        let second_pipeline = core
+            .connection_manager
+            .get_connection("conn2")
+            .and_then(|(_, info)| info.cached_pipeline)
+            .expect("second connection should have cached pipeline");
+
+        assert!(
+            Arc::ptr_eq(&first_pipeline, &second_pipeline),
+            "connections with the same negotiated parser profile should share one pipeline"
+        );
     }
 }

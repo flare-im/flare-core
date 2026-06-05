@@ -177,10 +177,9 @@ impl DefaultServerHandle {
                             for conn_id in connection_ids {
                                 if let Some((_, info)) =
                                     self.connection_manager.get_connection(&conn_id).await
+                                    && let Some(user_id) = info.user_id
                                 {
-                                    if let Some(user_id) = info.user_id {
-                                        user_set.insert(user_id);
-                                    }
+                                    user_set.insert(user_id);
                                 }
                             }
                             user_set.len()
@@ -193,10 +192,9 @@ impl DefaultServerHandle {
                             for conn_id in connection_ids {
                                 if let Some((_, info)) =
                                     self.connection_manager.get_connection(&conn_id).await
+                                    && let Some(user_id) = info.user_id
                                 {
-                                    if let Some(user_id) = info.user_id {
-                                        user_set.insert(user_id);
-                                    }
+                                    user_set.insert(user_id);
                                 }
                             }
                             user_set.len()

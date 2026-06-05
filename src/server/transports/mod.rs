@@ -100,12 +100,22 @@ pub trait Server: Send + Sync {
 }
 
 mod common;
+#[cfg(any(feature = "websocket", feature = "quic", feature = "tcp"))]
 pub mod hybrid;
+#[cfg(feature = "quic")]
 pub mod quic;
 pub mod server_core;
+#[cfg(feature = "tcp")]
+pub mod tcp;
+#[cfg(feature = "websocket")]
 pub mod websocket;
 
 // 重新导出常用类型
+#[cfg(any(feature = "websocket", feature = "quic", feature = "tcp"))]
 pub use hybrid::HybridServer;
+#[cfg(feature = "quic")]
 pub use quic::QUICServer;
+#[cfg(feature = "tcp")]
+pub use tcp::TCPServer;
+#[cfg(feature = "websocket")]
 pub use websocket::WebSocketServer;

@@ -10,7 +10,7 @@ use prost::Message as ProstMessage;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message, error::ProtocolError};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::warn;
 
@@ -29,6 +29,31 @@ pub struct WebSocketTransport {
 impl WebSocketTransport {
     pub fn new(stream: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
         Self::from_stream(stream)
+    }
+
+    fn event_from_websocket_error(error: WsError) -> ConnectionEvent {
+        match error {
+            WsError::ConnectionClosed | WsError::AlreadyClosed => {
+                ConnectionEvent::Disconnected("WebSocket connection closed by peer".to_string())
+            }
+            WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+                ConnectionEvent::Disconnected(
+                    "WebSocket peer disconnected without close handshake".to_string(),
+                )
+            }
+            WsError::Io(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                ConnectionEvent::Disconnected(format!("WebSocket peer disconnected: {}", err))
+            }
+            other => ConnectionEvent::Error(FlareError::connection_failed(other.to_string())),
+        }
     }
 
     /// 从 `WebSocketStream<TcpStream>` 创建（在没有 TLS 时使用）
@@ -123,9 +148,7 @@ impl WebSocketTransport {
                     }
                     _ => None,
                 },
-                Err(e) => Some(ConnectionEvent::Error(FlareError::connection_failed(
-                    e.to_string(),
-                ))),
+                Err(e) => Some(Self::event_from_websocket_error(e)),
             };
 
             if let Some(event) = event {
@@ -187,9 +210,7 @@ impl WebSocketTransport {
                     }
                     _ => None,
                 },
-                Err(e) => Some(ConnectionEvent::Error(FlareError::connection_failed(
-                    e.to_string(),
-                ))),
+                Err(e) => Some(Self::event_from_websocket_error(e)),
             };
 
             if let Some(event) = event {
@@ -377,5 +398,48 @@ impl Connection for WebSocketTransport {
             *active = std::time::Instant::now();
         }
         // 如果锁被 poison，忽略更新（连接可能已经出问题）
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_without_close_handshake_is_disconnected_event() {
+        let event = WebSocketTransport::event_from_websocket_error(WsError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        ));
+
+        assert!(matches!(event, ConnectionEvent::Disconnected(_)));
+        assert!(!event.is_error());
+    }
+
+    #[test]
+    fn transport_peer_disconnect_io_errors_are_disconnected_events() {
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let event = WebSocketTransport::event_from_websocket_error(WsError::Io(
+                std::io::Error::new(kind, "peer closed"),
+            ));
+
+            assert!(
+                matches!(event, ConnectionEvent::Disconnected(_)),
+                "expected {kind:?} to be classified as disconnected, got {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_websocket_protocol_errors_remain_error_events() {
+        let event = WebSocketTransport::event_from_websocket_error(WsError::Protocol(
+            ProtocolError::InvalidOpcode(0x0f),
+        ));
+
+        assert!(matches!(event, ConnectionEvent::Error(_)));
     }
 }

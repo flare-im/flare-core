@@ -26,9 +26,9 @@ pub mod command {
         Custom(super::CustomCommand),
     }
 }
-/// ---
-///
-/// ## 系统命令
+/// ------------------------------------------------------------
+/// 系统命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -181,9 +181,9 @@ pub mod system_command {
         }
     }
 }
-/// ---
-///
-/// ## 载荷命令（信道层：在信道上传输的四类载荷）
+/// ------------------------------------------------------------
+/// 载荷命令（信道层：在信道上传输的四类载荷）
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -260,9 +260,9 @@ pub mod payload_command {
         }
     }
 }
-/// ---
-///
-/// ## 通知命令
+/// ------------------------------------------------------------
+/// 通知命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -337,9 +337,9 @@ pub mod notification_command {
         }
     }
 }
-/// ---
-///
-/// ## 自定义命令
+/// ------------------------------------------------------------
+/// 自定义命令
+/// ------------------------------------------------------------
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, PartialEq, ::prost::Message)]

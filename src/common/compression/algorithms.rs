@@ -131,29 +131,51 @@ pub struct GzipCompressor;
 
 impl Compressor for GzipCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::Compression;
-        use flate2::write::GzEncoder;
-        use std::io::Write;
+        #[cfg(feature = "compression-gzip")]
+        {
+            use flate2::Compression;
+            use flate2::write::GzEncoder;
+            use std::io::Write;
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(data)
-            .map_err(|e| FlareError::encoding_error(format!("Gzip compression failed: {}", e)))?;
-        encoder.finish().map_err(|e| {
-            FlareError::encoding_error(format!("Gzip compression finish failed: {}", e))
-        })
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).map_err(|e| {
+                FlareError::encoding_error(format!("Gzip compression failed: {}", e))
+            })?;
+            encoder.finish().map_err(|e| {
+                FlareError::encoding_error(format!("Gzip compression finish failed: {}", e))
+            })
+        }
+
+        #[cfg(not(feature = "compression-gzip"))]
+        {
+            let _ = data;
+            Err(FlareError::operation_not_supported(
+                "gzip compression feature is disabled",
+            ))
+        }
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::read::GzDecoder;
-        use std::io::Read;
+        #[cfg(feature = "compression-gzip")]
+        {
+            use flate2::read::GzDecoder;
+            use std::io::Read;
 
-        let mut decoder = GzDecoder::new(data);
-        let mut decompressed = Vec::new();
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| FlareError::encoding_error(format!("Gzip decompression failed: {}", e)))?;
-        Ok(decompressed)
+            let mut decoder = GzDecoder::new(data);
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed).map_err(|e| {
+                FlareError::encoding_error(format!("Gzip decompression failed: {}", e))
+            })?;
+            Ok(decompressed)
+        }
+
+        #[cfg(not(feature = "compression-gzip"))]
+        {
+            let _ = data;
+            Err(FlareError::operation_not_supported(
+                "gzip compression feature is disabled",
+            ))
+        }
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {

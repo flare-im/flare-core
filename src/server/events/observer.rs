@@ -149,24 +149,24 @@ impl ConnectionHandlerObserverAdapter {
         // NEGOTIATION_READY 消息必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
         // 这样客户端和服务端都统一使用 PRE_NEGOTIATION_PARSER 处理，确保兼容性
         // 服务端收到 NEGOTIATION_READY 后才会严格使用协商后的 parser（不允许 fallback）
-        if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(&data) {
-            if Self::is_negotiation_ready_message(&frame) {
-                // 这是 NEGOTIATION_READY 消息，使用 PRE_NEGOTIATION_PARSER 解析成功
-                // 标记协商已确认，之后服务端将严格使用协商后的 parser（不允许 fallback）
-                if let Err(e) = (*manager).mark_negotiation_confirmed(&conn_id) {
-                    error!(
-                        "[ConnectionHandlerObserverAdapter] 标记协商确认失败: connection_id={}, error={}",
-                        conn_id, e
-                    );
-                } else {
-                    debug!(
-                        "[ConnectionHandlerObserverAdapter] ✅ 协商已确认: connection_id={}，之后将严格使用协商后的 parser",
-                        conn_id
-                    );
-                }
-                // 协商确认消息不需要进一步处理
-                return;
+        if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(&data)
+            && Self::is_negotiation_ready_message(&frame)
+        {
+            // 这是 NEGOTIATION_READY 消息，使用 PRE_NEGOTIATION_PARSER 解析成功
+            // 标记协商已确认，之后服务端将严格使用协商后的 parser（不允许 fallback）
+            if let Err(e) = (*manager).mark_negotiation_confirmed(&conn_id) {
+                error!(
+                    "[ConnectionHandlerObserverAdapter] 标记协商确认失败: connection_id={}, error={}",
+                    conn_id, e
+                );
+            } else {
+                debug!(
+                    "[ConnectionHandlerObserverAdapter] ✅ 协商已确认: connection_id={}，之后将严格使用协商后的 parser",
+                    conn_id
+                );
             }
+            // 协商确认消息不需要进一步处理
+            return;
         }
 
         // 2. 如果不是 NEGOTIATION_READY 消息，使用协商后的 parser 解析

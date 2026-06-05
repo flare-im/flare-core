@@ -36,6 +36,54 @@ impl TransportProtocol {
             TransportProtocol::TCP => "tcp",
         }
     }
+
+    /// 将任意基础端点规范化为客户端连接 URL。
+    ///
+    /// 多协议竞速时常以 WebSocket URL 作为默认地址；这里负责按目标协议替换 scheme，
+    /// 避免 TCP/QUIC 客户端拿到 `ws://...` 后各自解析失败。
+    pub fn normalize_client_url(&self, endpoint: &str) -> String {
+        let endpoint = endpoint.trim();
+        match self {
+            TransportProtocol::WebSocket => normalize_websocket_client_url(endpoint),
+            TransportProtocol::QUIC => {
+                format!("quic://{}", strip_known_scheme(endpoint))
+            }
+            TransportProtocol::TCP => {
+                format!("tcp://{}", strip_known_scheme(endpoint))
+            }
+        }
+    }
+
+    /// 将任意协议端点规范化为服务端监听地址。
+    ///
+    /// 服务端 listener/endpoint 只需要 `host:port`，不应把客户端 URL scheme 传进
+    /// `SocketAddr` parser。
+    pub fn normalize_server_bind_address(endpoint: &str) -> String {
+        strip_known_scheme(endpoint.trim()).to_string()
+    }
+}
+
+fn normalize_websocket_client_url(endpoint: &str) -> String {
+    if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
+        return endpoint.to_string();
+    }
+
+    let scheme = if endpoint.starts_with("https://") {
+        "wss"
+    } else {
+        "ws"
+    };
+    format!("{scheme}://{}", strip_known_scheme(endpoint))
+}
+
+fn strip_known_scheme(endpoint: &str) -> &str {
+    const SCHEMES: [&str; 6] = [
+        "ws://", "wss://", "quic://", "tcp://", "http://", "https://",
+    ];
+    SCHEMES
+        .iter()
+        .find_map(|scheme| endpoint.strip_prefix(scheme))
+        .unwrap_or(endpoint)
 }
 
 /// TLS/SSL 证书配置

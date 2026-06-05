@@ -64,6 +64,12 @@ impl FramedProtobufSerializer {
     }
 }
 
+impl Default for FramedProtobufSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Serializer for FramedProtobufSerializer {
     fn serialize(&self, frame: &Frame) -> Result<Vec<u8>> {
         let mut buf = Vec::new();

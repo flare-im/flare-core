@@ -103,6 +103,12 @@ impl ClientConfig {
         self
     }
 
+    /// 使用 TCP 协议
+    pub fn tcp(mut self) -> Self {
+        self.transport = TransportProtocol::TCP;
+        self
+    }
+
     /// 设置序列化格式
     pub fn with_format(mut self, format: SerializationFormat) -> Self {
         self.serialization_format = format;
@@ -158,12 +164,15 @@ impl ClientConfig {
 
     /// 获取指定协议的地址
     pub fn get_protocol_url(&self, protocol: &TransportProtocol) -> String {
-        if let Some(ref urls) = self.protocol_urls {
-            if let Some(url) = urls.get(protocol) {
-                return url.clone();
-            }
-        }
-        self.server_url.clone()
+        let endpoint = if let Some(ref urls) = self.protocol_urls
+            && let Some(url) = urls.get(protocol)
+        {
+            url.as_str()
+        } else {
+            self.server_url.as_str()
+        };
+
+        protocol.normalize_client_url(endpoint)
     }
 
     /// 设置竞速超时时间
@@ -261,5 +270,39 @@ impl ClientConfig {
     /// 是否启用协议竞速
     pub fn is_race_mode(&self) -> bool {
         self.transports.is_some() && self.transports.as_ref().unwrap().len() > 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_protocol_specific_urls_from_default_websocket_url() {
+        let config = ClientConfig::default();
+
+        assert_eq!(
+            config.get_protocol_url(&TransportProtocol::WebSocket),
+            "ws://localhost:8080"
+        );
+        assert_eq!(
+            config.get_protocol_url(&TransportProtocol::QUIC),
+            "quic://localhost:8080"
+        );
+        assert_eq!(
+            config.get_protocol_url(&TransportProtocol::TCP),
+            "tcp://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn normalizes_explicit_bare_protocol_url() {
+        let config = ClientConfig::default()
+            .with_protocol_url(TransportProtocol::TCP, "127.0.0.1:19090".to_string());
+
+        assert_eq!(
+            config.get_protocol_url(&TransportProtocol::TCP),
+            "tcp://127.0.0.1:19090"
+        );
     }
 }

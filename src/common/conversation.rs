@@ -439,8 +439,16 @@ pub fn generate_system_conversation_id(system_id: &str, scope: Option<String>) -
 /// # 返回
 /// 格式化的会话ID：`6A{26字符ULID}`
 pub fn generate_temp_conversation_id() -> String {
-    use ulid::Ulid;
-    format!("6A{}", Ulid::new().to_string())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use ulid::Ulid;
+        format!("6A{}", Ulid::new().to_string())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let opaque: u128 = rand::random();
+        format!("6A{:032x}", opaque)
+    }
 }
 
 /// 生成服务端会话ID（向后兼容，使用ULID）
@@ -448,8 +456,16 @@ pub fn generate_temp_conversation_id() -> String {
 /// 注意：推荐使用具体的生成函数（如 `generate_temp_conversation_id`）
 #[deprecated(note = "Use specific generation functions like generate_temp_conversation_id()")]
 pub fn generate_server_conversation_id(conversation_type: ConversationType) -> String {
-    use ulid::Ulid;
-    format!("{}-{}", conversation_type.prefix(), Ulid::new().to_string())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use ulid::Ulid;
+        format!("{}-{}", conversation_type.prefix(), Ulid::new().to_string())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let opaque: u128 = rand::random();
+        format!("{}-{:032x}", conversation_type.prefix(), opaque)
+    }
 }
 
 /// 验证会话ID格式（CID格式：TypePrefix + Version + OpaqueID）

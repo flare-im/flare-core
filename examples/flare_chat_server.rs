@@ -7,12 +7,22 @@
 //! - 序列化协商（JSON/Protobuf）
 //! - 压缩协商（Gzip/Zstd/None）
 //! - 加密支持（AES-256-GCM，已注册加密器）
-//! - 多协议支持（WebSocket + QUIC）
+//! - 多协议支持（默认 WebSocket + QUIC；TCP 需 `--features tcp`）
 //!
 //! ## 启动命令
 //!
 //! ```bash
+//! # 默认：WebSocket :8080 + QUIC :8081
 //! RUST_LOG=info cargo run --example flare_chat_server
+//!
+//! # 同时启用 TCP :8090
+//! cargo run --example flare_chat_server --features tcp
+//!
+//! # 仅 WebSocket（WASM E2E / 避免 QUIC 端口占用）
+//! FLARE_WS_ONLY=1 RUST_LOG=info cargo run --example flare_chat_server
+//!
+//! # 可选：仅启用单一协议（调试，TCP 需 --features tcp）
+//! TRANSPORT_PROTOCOL=tcp cargo run --example flare_chat_server --features tcp
 //! ```
 
 use async_trait::async_trait;
@@ -50,7 +60,7 @@ async fn main() -> Result<()> {
     info!("   - 设备管理：平台互斥策略（同一用户同一平台只能有一个设备在线）");
     info!("   - 协商：默认 Protobuf + Gzip 压缩（客户端可指定格式）");
     info!("   - 加密：AES-256-GCM 加密（可选，默认 None）");
-    info!("   - 多协议：WebSocket + QUIC 双协议支持");
+    info!("   - 多协议：WebSocket + QUIC（默认）；TCP 需 `--features tcp`");
     info!("");
 
     // ============================================================
@@ -126,7 +136,22 @@ async fn main() -> Result<()> {
     // ============================================================
     // 注意：服务端 Flare 模式通过 ServerEventHandler 处理消息
     // 所有消息处理逻辑都在 ChatRoomHandler 中实现
-    let server = FlareServerBuilder::new("0.0.0.0:8080", chat_handler.clone())
+    //
+    // 默认 WebSocket + QUIC；`--features tcp` 时额外监听 TCP
+    let ws_only = std::env::var("FLARE_WS_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let transport_filter = std::env::var("TRANSPORT_PROTOCOL")
+        .ok()
+        .map(|v| v.to_lowercase());
+
+    let ws_bind = std::env::var("WS_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let quic_bind =
+        std::env::var("QUIC_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8081".to_string());
+    #[cfg(feature = "tcp")]
+    let tcp_bind = std::env::var("TCP_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8090".to_string());
+
+    let mut builder = FlareServerBuilder::new(ws_bind.clone(), chat_handler.clone())
         // ============================================================
         // 连接和设备管理
         // ============================================================
@@ -145,12 +170,6 @@ async fn main() -> Result<()> {
         .with_default_compression(CompressionAlgorithm::Gzip) // 默认 Gzip 压缩
         .with_default_encryption(EncryptionAlgorithm::Aes256Gcm) // 默认 AES-256-GCM 加密
         // ============================================================
-        // 协议配置（多协议支持）
-        // ============================================================
-        .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
-        .with_protocol_address(TransportProtocol::WebSocket, "0.0.0.0:8080".to_string())
-        .with_protocol_address(TransportProtocol::QUIC, "0.0.0.0:8081".to_string())
-        // ============================================================
         // 其他配置
         // ============================================================
         .with_max_connections(2000)
@@ -159,8 +178,63 @@ async fn main() -> Result<()> {
             HeartbeatConfig::default()
                 .with_interval(std::time::Duration::from_secs(30))
                 .with_timeout(std::time::Duration::from_secs(90)),
-        )
-        .build()?;
+        );
+
+    builder = match transport_filter.as_deref() {
+        Some("tcp") => {
+            #[cfg(feature = "tcp")]
+            {
+                info!("ℹ️  TRANSPORT_PROTOCOL=tcp — 仅 TCP（{tcp_bind}）");
+                builder
+                    .with_protocols(vec![TransportProtocol::TCP])
+                    .with_protocol_address(TransportProtocol::TCP, tcp_bind.clone())
+            }
+            #[cfg(not(feature = "tcp"))]
+            {
+                return Err(
+                    "TRANSPORT_PROTOCOL=tcp 需要编译 feature tcp：cargo run --example flare_chat_server --features tcp"
+                        .into(),
+                );
+            }
+        }
+        Some("websocket") | Some("ws") => {
+            info!("ℹ️  TRANSPORT_PROTOCOL=websocket — 仅 WebSocket（{ws_bind}）");
+            builder
+                .with_protocols(vec![TransportProtocol::WebSocket])
+                .with_protocol_address(TransportProtocol::WebSocket, ws_bind.clone())
+        }
+        Some("quic") => {
+            info!("ℹ️  TRANSPORT_PROTOCOL=quic — 仅 QUIC（{quic_bind}）");
+            builder
+                .with_protocols(vec![TransportProtocol::QUIC])
+                .with_protocol_address(TransportProtocol::QUIC, quic_bind.clone())
+        }
+        Some(other) => {
+            warn!("未知 TRANSPORT_PROTOCOL={other}，使用默认协议组合");
+            configure_default_transports(
+                builder,
+                &ws_bind,
+                &quic_bind,
+                #[cfg(feature = "tcp")]
+                &tcp_bind,
+            )
+        }
+        None if ws_only => {
+            info!("ℹ️  FLARE_WS_ONLY=1 — 仅 WebSocket（{ws_bind}）");
+            builder
+                .with_protocols(vec![TransportProtocol::WebSocket])
+                .with_protocol_address(TransportProtocol::WebSocket, ws_bind.clone())
+        }
+        None => configure_default_transports(
+            builder,
+            &ws_bind,
+            &quic_bind,
+            #[cfg(feature = "tcp")]
+            &tcp_bind,
+        ),
+    };
+
+    let server = builder.build()?;
 
     // ============================================================
     // 8. 获取 ServerHandle 和 ConnectionManager 并设置到监听器
@@ -179,11 +253,25 @@ async fn main() -> Result<()> {
     // ============================================================
     // 9. 启动服务器
     // ============================================================
-    server.start().await?;
+    server.start().await.map_err(|e| {
+        format!(
+            "服务端启动失败（常见原因：8080/8081/8090 端口被占用，请先结束旧 flare_chat_server 进程）: {e}"
+        )
+    })?;
 
     info!("✅ 服务器已启动");
-    info!("   WebSocket: ws://127.0.0.1:8080");
-    info!("   QUIC: quic://127.0.0.1:8081");
+    match transport_filter.as_deref() {
+        Some("tcp") => info!("   TCP: tcp://127.0.0.1:8090"),
+        Some("websocket") | Some("ws") => info!("   WebSocket: ws://127.0.0.1:8080"),
+        Some("quic") => info!("   QUIC: quic://127.0.0.1:8081"),
+        _ if ws_only => info!("   WebSocket: ws://127.0.0.1:8080"),
+        _ => {
+            info!("   WebSocket: ws://127.0.0.1:8080");
+            info!("   QUIC: quic://127.0.0.1:8081");
+            #[cfg(feature = "tcp")]
+            info!("   TCP: tcp://127.0.0.1:8090");
+        }
+    }
     info!("");
     info!("📋 功能说明：");
     info!("   - 消息处理：通过 ServerEventHandler 自动处理消息路由和 ACK");
@@ -192,7 +280,7 @@ async fn main() -> Result<()> {
     info!("   - 设备管理：平台互斥策略（同一用户同一平台只能有一个设备在线）");
     info!("   - 协商机制：默认 Protobuf + Gzip 压缩（客户端可指定格式）");
     info!("   - 加密支持：AES-256-GCM 加密（已注册，客户端可请求使用）");
-    info!("   - 多协议支持：WebSocket + QUIC 双协议");
+    info!("   - 多协议支持：WebSocket + QUIC（默认）；TCP 需 `--features tcp`");
     info!("");
     info!("📱 设备管理说明：");
     info!("   - 当前策略：平台互斥（PlatformExclusive）");
@@ -214,6 +302,34 @@ async fn main() -> Result<()> {
     info!("服务器已停止");
 
     Ok(())
+}
+
+fn configure_default_transports(
+    builder: FlareServerBuilder,
+    ws_bind: &str,
+    quic_bind: &str,
+    #[cfg(feature = "tcp")] tcp_bind: &str,
+) -> FlareServerBuilder {
+    info!("ℹ️  默认启用 WebSocket + QUIC");
+    let builder = builder
+        .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
+        .with_protocol_address(TransportProtocol::WebSocket, ws_bind.to_string())
+        .with_protocol_address(TransportProtocol::QUIC, quic_bind.to_string());
+
+    #[cfg(feature = "tcp")]
+    {
+        info!("ℹ️  TCP feature 已启用，额外监听 {tcp_bind}");
+        builder
+            .with_protocols(vec![
+                TransportProtocol::WebSocket,
+                TransportProtocol::QUIC,
+                TransportProtocol::TCP,
+            ])
+            .with_protocol_address(TransportProtocol::TCP, tcp_bind.to_string())
+    }
+
+    #[cfg(not(feature = "tcp"))]
+    builder
 }
 
 /// 聊天室事件处理器（实现 ServerEventHandler）

@@ -2,7 +2,9 @@
 //!
 //! 管理压缩器的注册和查找，支持用户注册自定义压缩器
 
-use super::algorithms::{CompressionAlgorithm, GzipCompressor, NoCompressor};
+#[cfg(feature = "compression-gzip")]
+use super::algorithms::GzipCompressor;
+use super::algorithms::{CompressionAlgorithm, NoCompressor};
 use super::traits::Compressor;
 use crate::common::error::Result;
 use std::collections::HashMap;
@@ -36,6 +38,7 @@ impl CompressionRegistry {
     /// 注册内置压缩器
     pub fn register_defaults(&self) {
         self.register("none", Arc::new(NoCompressor));
+        #[cfg(feature = "compression-gzip")]
         self.register("gzip", Arc::new(GzipCompressor));
     }
 
@@ -205,12 +208,16 @@ mod tests {
         let registry = CompressionRegistry::new();
         registry.register_defaults();
 
-        assert!(registry.find("gzip").is_some());
         assert!(registry.find("none").is_some());
+        #[cfg(feature = "compression-gzip")]
+        assert!(registry.find("gzip").is_some());
+        #[cfg(not(feature = "compression-gzip"))]
+        assert!(registry.find("gzip").is_none());
         assert!(registry.find("unknown").is_none());
     }
 
     #[test]
+    #[cfg(feature = "compression-gzip")]
     fn test_auto_detect() {
         let data = b"\x1f\x8b\x08test"; // Gzip 魔数
         let registry = CompressionRegistry::new();
@@ -219,5 +226,15 @@ mod tests {
         let compressor = registry.auto_detect(data);
         assert!(compressor.is_some());
         assert_eq!(compressor.unwrap().algorithm(), CompressionAlgorithm::Gzip);
+    }
+
+    #[test]
+    #[cfg(not(feature = "compression-gzip"))]
+    fn test_auto_detect_without_gzip_feature() {
+        let data = b"\x1f\x8b\x08test"; // Gzip 魔数
+        let registry = CompressionRegistry::new();
+        registry.register_defaults();
+
+        assert!(registry.auto_detect(data).is_none());
     }
 }

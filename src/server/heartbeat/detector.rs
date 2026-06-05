@@ -59,10 +59,13 @@ impl HeartbeatDetector {
                         // 清理超时连接
                         let timeout_connections = connection_manager.cleanup_timeout_connections(timeout).await;
                         if !timeout_connections.is_empty() {
+                            let (sample, omitted_count) =
+                                Self::timeout_cleanup_log_sample(&timeout_connections, 8);
                             info!(
-                                "Cleaned up {} timeout connections: {:?}",
-                                timeout_connections.len(),
-                                timeout_connections
+                                cleaned_count = timeout_connections.len(),
+                                omitted_count,
+                                sample = ?sample,
+                                "Cleaned timeout connections"
                             );
                         }
                     }
@@ -77,7 +80,99 @@ impl HeartbeatDetector {
     /// 停止心跳检测
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
-            drop(tx.send(()));
+            let _ = tx.try_send(());
         }
+    }
+
+    fn timeout_cleanup_log_sample(connection_ids: &[String], limit: usize) -> (Vec<String>, usize) {
+        let sample_len = connection_ids.len().min(limit);
+        (
+            connection_ids[..sample_len].to_vec(),
+            connection_ids.len().saturating_sub(sample_len),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::error::Result;
+    use crate::common::platform::{MonotonicInstant, monotonic_now};
+    use crate::server::connection::ConnectionManager;
+    use crate::transport::connection::Connection;
+    use crate::transport::events::ArcObserver;
+    use async_trait::async_trait;
+
+    struct DetectorTestConnection {
+        last_active: MonotonicInstant,
+    }
+
+    #[async_trait]
+    impl Connection for DetectorTestConnection {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            self.last_active = monotonic_now();
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn last_active_time(&self) -> MonotonicInstant {
+            self.last_active
+        }
+
+        fn update_active_time(&mut self) {
+            self.last_active = monotonic_now();
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_prevents_future_timeout_cleanup_checks() {
+        let manager = Arc::new(ConnectionManager::new());
+        manager
+            .add_connection(
+                "stays-connected".to_string(),
+                Box::new(DetectorTestConnection {
+                    last_active: monotonic_now(),
+                }),
+                None,
+                false,
+            )
+            .expect("test connection should be added");
+
+        let manager_trait: Arc<dyn ConnectionManagerTrait> = manager.clone();
+        let mut detector = HeartbeatDetector::new(
+            manager_trait,
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+        );
+        detector.start();
+        detector.stop();
+
+        tokio::time::sleep(Duration::from_millis(70)).await;
+
+        assert_eq!(
+            manager.connection_count(),
+            1,
+            "stopped detector should not continue cleaning timeout connections"
+        );
+    }
+
+    #[test]
+    fn timeout_cleanup_log_sample_limits_connection_ids() {
+        let connection_ids = (0..12).map(|idx| format!("conn-{idx}")).collect::<Vec<_>>();
+
+        let (sample, omitted) = HeartbeatDetector::timeout_cleanup_log_sample(&connection_ids, 5);
+
+        assert_eq!(
+            sample,
+            vec!["conn-0", "conn-1", "conn-2", "conn-3", "conn-4"]
+        );
+        assert_eq!(omitted, 7);
     }
 }

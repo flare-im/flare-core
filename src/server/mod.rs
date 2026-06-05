@@ -2,6 +2,11 @@
 //!
 //! 提供服务端实现，支持 WebSocket 和 QUIC 协议
 
+#[cfg(not(any(feature = "websocket", feature = "quic", feature = "tcp")))]
+compile_error!(
+    "feature `server` requires at least one transport feature: `websocket`, `quic`, or `tcp`"
+);
+
 pub mod auth;
 pub mod builder;
 pub mod config;
@@ -23,7 +28,13 @@ pub use device::{DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceMa
 pub use events::ServerEventHandler;
 pub use handle::{DefaultServerHandle, ServerHandle};
 pub use heartbeat::HeartbeatDetector;
-pub use transports::{ConnectionHandler, HybridServer, QUICServer, Server, WebSocketServer};
+#[cfg(feature = "quic")]
+pub use transports::QUICServer;
+#[cfg(feature = "tcp")]
+pub use transports::TCPServer;
+#[cfg(feature = "websocket")]
+pub use transports::WebSocketServer;
+pub use transports::{ConnectionHandler, HybridServer, Server};
 
 // 重新导出错误类型，服务端使用 ServerError
 pub use crate::common::error::Result;

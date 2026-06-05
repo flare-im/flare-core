@@ -11,11 +11,15 @@ use crate::common::protocol::Frame;
 use crate::transport::events::ArcObserver;
 use async_trait::async_trait;
 use futures_util::future::select_all;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+#[cfg(feature = "quic")]
 use crate::client::transports::quic::QUICClient;
+#[cfg(feature = "tcp")]
+use crate::client::transports::tcp::TCPClient;
+#[cfg(feature = "websocket")]
 use crate::client::transports::websocket::WebSocketClient;
 
 /// 混合客户端
@@ -36,6 +40,7 @@ type ConnectionResult = Result<Box<dyn Client>>;
 
 /// 连接任务结果
 type ConnectionTaskResult = (TransportProtocol, usize, ConnectionResult, Duration);
+type RaceInflight = Arc<StdMutex<Vec<tokio::task::JoinHandle<ConnectionTaskResult>>>>;
 
 /// 成功的连接信息
 type SuccessfulConnection = (usize, TransportProtocol, Box<dyn Client>, Duration);
@@ -71,6 +76,8 @@ impl HybridClient {
         let mut single_config = config;
         single_config.transport = protocol;
         single_config.transports = None;
+        // 与竞速模式一致：优先使用 with_protocol_url 注册的地址，避免裸 host:port 缺少 scheme。
+        single_config.server_url = single_config.get_protocol_url(&protocol);
 
         let client = Self::create_protocol_client(single_config, core.clone())?;
 
@@ -90,7 +97,7 @@ impl HybridClient {
         core: ClientCore,
     ) -> Result<Self> {
         let default_config = ClientConfig {
-            server_url: config.server_url.clone(),
+            server_url: config.get_protocol_url(&default_protocol),
             transport: default_protocol,
             ..config
         };
@@ -107,14 +114,47 @@ impl HybridClient {
     /// 创建协议客户端（统一创建逻辑）
     fn create_protocol_client(config: ClientConfig, core: ClientCore) -> Result<Box<dyn Client>> {
         match config.transport {
-            TransportProtocol::WebSocket => Ok(Box::new(WebSocketClient::with_core(config, core))),
-            TransportProtocol::QUIC => {
-                QUICClient::with_core(config, core).map(|c| Box::new(c) as Box<dyn Client>)
+            TransportProtocol::WebSocket => {
+                #[cfg(feature = "websocket")]
+                {
+                    Ok(Box::new(WebSocketClient::with_core(config, core)))
+                }
+                #[cfg(not(feature = "websocket"))]
+                {
+                    let _ = (config, core);
+                    Err(Self::transport_feature_disabled(
+                        TransportProtocol::WebSocket,
+                    ))
+                }
             }
-            TransportProtocol::TCP => Err(FlareError::protocol_error(
-                "TCP transport not yet implemented".to_string(),
-            )),
+            TransportProtocol::QUIC => {
+                #[cfg(feature = "quic")]
+                {
+                    QUICClient::with_core(config, core).map(|c| Box::new(c) as Box<dyn Client>)
+                }
+                #[cfg(not(feature = "quic"))]
+                {
+                    let _ = (config, core);
+                    Err(Self::transport_feature_disabled(TransportProtocol::QUIC))
+                }
+            }
+            TransportProtocol::TCP => {
+                #[cfg(feature = "tcp")]
+                {
+                    Ok(Box::new(TCPClient::with_core(config, core)))
+                }
+                #[cfg(not(feature = "tcp"))]
+                {
+                    let _ = (config, core);
+                    Err(Self::transport_feature_disabled(TransportProtocol::TCP))
+                }
+            }
         }
+    }
+
+    #[allow(dead_code)]
+    fn transport_feature_disabled(protocol: TransportProtocol) -> FlareError {
+        FlareError::operation_not_supported(format!("{protocol:?} transport feature is disabled"))
     }
 
     /// 协议竞速连接
@@ -125,15 +165,15 @@ impl HybridClient {
     async fn race_connect(
         config: ClientConfig,
         shared_core: ClientCore,
+        inflight: RaceInflight,
     ) -> Result<(Box<dyn Client>, TransportProtocol)> {
         let protocols = config.get_protocols();
         let race_start = Instant::now();
 
-        // 创建所有协议的连接任务
-        let handles = Self::spawn_connection_tasks(config, &protocols, &shared_core);
+        Self::spawn_connection_tasks(config, &protocols, &shared_core, Arc::clone(&inflight));
 
-        // 等待并处理连接结果
-        let (first_success, successful_clients, errors) = Self::wait_for_connections(handles).await;
+        let (first_success, successful_clients, errors) =
+            Self::wait_for_connections(inflight).await;
 
         // 处理连接结果（选择最快协议，然后发送 CONNECT）
         Self::process_race_results(
@@ -151,9 +191,8 @@ impl HybridClient {
         config: ClientConfig,
         protocols: &[TransportProtocol],
         shared_core: &ClientCore,
-    ) -> Vec<tokio::task::JoinHandle<ConnectionTaskResult>> {
-        let mut handles = Vec::with_capacity(protocols.len());
-
+        inflight: RaceInflight,
+    ) {
         for (index, protocol) in protocols.iter().enumerate() {
             let protocol_url = config.get_protocol_url(protocol);
             tracing::debug!(
@@ -170,11 +209,9 @@ impl HybridClient {
                 ..config.clone()
             };
 
-            // 为每个协议创建独立的 core 副本，但共享观察者和 pending_map
-            // 关键：必须共享 pending_map，否则 send_frame_and_wait 无法匹配响应
+            // 为每个协议创建独立的 core 副本，但共享竞速关键状态
             let mut protocol_core = ClientCore::new(&protocol_config);
-            protocol_core.observers = Arc::clone(&shared_core.observers);
-            protocol_core.pending_map = Arc::clone(&shared_core.pending_map);
+            protocol_core.share_race_state_from(shared_core);
 
             let protocol_clone = *protocol;
             let protocol_index = index;
@@ -205,10 +242,10 @@ impl HybridClient {
                 (protocol_clone, protocol_index, client_result, elapsed)
             });
 
-            handles.push(handle);
+            if let Ok(mut guard) = inflight.lock() {
+                guard.push(handle);
+            }
         }
-
-        handles
     }
 
     /// 仅建立网络连接（不发送 CONNECT，用于协议竞速）
@@ -220,24 +257,53 @@ impl HybridClient {
     ) -> Result<(Box<dyn Client>, Duration)> {
         match protocol {
             TransportProtocol::WebSocket => {
-                let (client, elapsed) =
-                    Self::establish_websocket_network(config, core, priority).await?;
-                Ok((Box::new(client), elapsed))
+                #[cfg(feature = "websocket")]
+                {
+                    let (client, elapsed) =
+                        Self::establish_websocket_network(config, core, priority).await?;
+                    Ok((Box::new(client), elapsed))
+                }
+                #[cfg(not(feature = "websocket"))]
+                {
+                    let _ = (config, core, priority);
+                    Err(Self::transport_feature_disabled(
+                        TransportProtocol::WebSocket,
+                    ))
+                }
             }
             TransportProtocol::QUIC => {
-                let (client, elapsed) =
-                    Self::establish_quic_network(config, core, priority).await?;
-                Ok((Box::new(client), elapsed))
+                #[cfg(feature = "quic")]
+                {
+                    let (client, elapsed) =
+                        Self::establish_quic_network(config, core, priority).await?;
+                    Ok((Box::new(client), elapsed))
+                }
+                #[cfg(not(feature = "quic"))]
+                {
+                    let _ = (config, core, priority);
+                    Err(Self::transport_feature_disabled(TransportProtocol::QUIC))
+                }
             }
-            TransportProtocol::TCP => Err(FlareError::protocol_error(
-                "TCP transport not yet implemented".to_string(),
-            )),
+            TransportProtocol::TCP => {
+                #[cfg(feature = "tcp")]
+                {
+                    let (client, elapsed) =
+                        Self::establish_tcp_network(config, core, priority).await?;
+                    Ok((Box::new(client), elapsed))
+                }
+                #[cfg(not(feature = "tcp"))]
+                {
+                    let _ = (config, core, priority);
+                    Err(Self::transport_feature_disabled(TransportProtocol::TCP))
+                }
+            }
         }
     }
 
     /// 仅建立 WebSocket 网络连接（不发送 CONNECT 消息）
     ///
     /// 用于协议竞速：先建立网络连接，选择最快协议，然后再发送 CONNECT
+    #[cfg(feature = "websocket")]
     async fn establish_websocket_network(
         config: ClientConfig,
         core: ClientCore,
@@ -265,6 +331,7 @@ impl HybridClient {
     ///
     /// 优化：将 endpoint 创建移到计时开始之前，只测量网络连接建立时间
     /// 这样可以更公平地比较 QUIC 和 WebSocket 的网络连接速度
+    #[cfg(feature = "quic")]
     async fn establish_quic_network(
         config: ClientConfig,
         core: ClientCore,
@@ -319,9 +386,40 @@ impl HybridClient {
         Ok((client, elapsed))
     }
 
+    /// 仅建立 TCP 网络连接（不发送 CONNECT 消息）
+    #[cfg(feature = "tcp")]
+    async fn establish_tcp_network(
+        config: ClientConfig,
+        core: ClientCore,
+        priority: usize,
+    ) -> Result<(TCPClient, Duration)> {
+        let start_time = Instant::now();
+        let mut client = TCPClient::with_core(config, core);
+        let _connection_arc = client.establish_network_connection().await?;
+        let elapsed = start_time.elapsed();
+        tracing::debug!(
+            "TCP 网络连接建立成功 (优先级: {}, 耗时: {:?})",
+            priority,
+            elapsed
+        );
+        Ok((client, elapsed))
+    }
+
+    /// 竞速超时或失败时关闭仍在进行/已建立但未选中的连接。
+    async fn cleanup_inflight(inflight: &RaceInflight) {
+        let handles = inflight
+            .lock()
+            .ok()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
+        if !handles.is_empty() {
+            Self::cleanup_remaining_race_handles(handles).await;
+        }
+    }
+
     /// 等待所有连接任务完成，收集结果
     async fn wait_for_connections(
-        handles: Vec<tokio::task::JoinHandle<ConnectionTaskResult>>,
+        inflight: RaceInflight,
     ) -> (
         Option<SuccessfulConnection>,
         Vec<SuccessfulConnection>,
@@ -329,17 +427,27 @@ impl HybridClient {
     ) {
         const TIME_THRESHOLD: Duration = Duration::from_millis(100);
 
-        let mut remaining_handles = handles;
         let mut first_success: Option<SuccessfulConnection> = None;
         let mut successful_clients = Vec::new();
         let mut errors = Vec::new();
-        let total_protocols = remaining_handles.len();
 
-        tracing::debug!("开始协议竞速，共 {} 个协议", total_protocols);
+        loop {
+            let batch = inflight
+                .lock()
+                .ok()
+                .map(|mut guard| std::mem::take(&mut *guard))
+                .unwrap_or_default();
+            if batch.is_empty() {
+                break;
+            }
 
-        while !remaining_handles.is_empty() {
-            let (result, _index, remaining) = select_all(remaining_handles).await;
-            remaining_handles = remaining;
+            let total_protocols = batch.len();
+            tracing::debug!("协议竞速 select 批次: {} 个任务", total_protocols);
+
+            let (result, _index, remaining) = select_all(batch).await;
+            if let Ok(mut guard) = inflight.lock() {
+                guard.extend(remaining);
+            }
 
             match result {
                 Ok((protocol, protocol_index, client_result, elapsed)) => {
@@ -410,7 +518,29 @@ impl HybridClient {
             }
         }
 
+        Self::cleanup_inflight(&inflight).await;
+
         (first_success, successful_clients, errors)
+    }
+
+    /// 竞速提前结束或全部完成后，关闭仍在进行/已建立但未选中的连接，避免泄漏。
+    async fn cleanup_remaining_race_handles(
+        handles: Vec<tokio::task::JoinHandle<ConnectionTaskResult>>,
+    ) {
+        for handle in handles {
+            match handle.await {
+                Ok((_protocol, _index, Ok(mut client), _elapsed)) => {
+                    client.set_disconnect_requested(true);
+                    if let Err(e) = client.disconnect().await {
+                        tracing::debug!("[HybridClient] race cleanup disconnect: {}", e);
+                    }
+                }
+                Ok((_protocol, _index, Err(_), _elapsed)) => {}
+                Err(join_err) => {
+                    tracing::debug!("[HybridClient] race task join error: {:?}", join_err);
+                }
+            }
+        }
     }
 
     /// 异步关闭客户端（不阻塞）
@@ -785,22 +915,173 @@ impl HybridClient {
 
         let core = ClientCore::new(&config);
         let race_timeout = config.race_timeout.unwrap_or(Duration::from_secs(5));
+        let inflight: RaceInflight = Arc::new(StdMutex::new(Vec::new()));
+        let inflight_cleanup = Arc::clone(&inflight);
 
-        let result = tokio::time::timeout(race_timeout, Self::race_connect(config, core.clone()))
-            .await
-            .map_err(|_| {
-                FlareError::connection_failed(format!(
+        let race_result = tokio::time::timeout(
+            race_timeout,
+            Self::race_connect(config, core.clone(), inflight),
+        )
+        .await;
+
+        let (client, protocol) = match race_result {
+            Ok(result) => result?,
+            Err(_) => {
+                Self::cleanup_inflight(&inflight_cleanup).await;
+                return Err(FlareError::connection_failed(format!(
                     "Protocol race timed out after {:?}",
                     race_timeout
-                ))
-            })?;
-
-        let (client, protocol) = result?;
+                )));
+            }
+        };
 
         Ok(Self {
             inner: Arc::new(Mutex::new(client)),
             active_protocol: protocol,
             core,
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod hybrid_race_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TrackedRaceClient {
+        disconnected: Arc<AtomicBool>,
+        disconnect_requested: Arc<AtomicBool>,
+    }
+
+    impl TrackedRaceClient {
+        fn new(disconnected: Arc<AtomicBool>, disconnect_requested: Arc<AtomicBool>) -> Self {
+            Self {
+                disconnected,
+                disconnect_requested,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Client for TrackedRaceClient {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            self.disconnected.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_frame(&mut self, _frame: &Frame) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            !self.disconnected.load(Ordering::SeqCst)
+        }
+
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+
+        fn set_disconnect_requested(&mut self, value: bool) {
+            self.disconnect_requested.store(value, Ordering::SeqCst);
+        }
+    }
+
+    fn ok_client(
+        disconnected: Arc<AtomicBool>,
+        disconnect_requested: Arc<AtomicBool>,
+    ) -> Box<dyn Client> {
+        Box::new(TrackedRaceClient::new(disconnected, disconnect_requested))
+    }
+
+    #[tokio::test]
+    async fn cleanup_remaining_race_handles_disconnects_successful_clients() {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let disconnect_requested = Arc::new(AtomicBool::new(false));
+        let client = ok_client(Arc::clone(&disconnected), Arc::clone(&disconnect_requested));
+
+        let handle = tokio::spawn(async move {
+            (
+                TransportProtocol::QUIC,
+                1,
+                Ok(client),
+                Duration::from_millis(1),
+            )
+        });
+
+        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
+
+        assert!(disconnected.load(Ordering::SeqCst));
+        assert!(disconnect_requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cleanup_remaining_race_handles_ignores_failed_clients() {
+        let handle = tokio::spawn(async move {
+            (
+                TransportProtocol::QUIC,
+                0,
+                Err(FlareError::connection_failed("mock failure".to_string())),
+                Duration::ZERO,
+            )
+        });
+
+        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
+    }
+
+    #[tokio::test]
+    async fn wait_for_connections_cleans_up_inflight_losers_after_early_win() {
+        let winner_disconnected = Arc::new(AtomicBool::new(false));
+        let winner_requested = Arc::new(AtomicBool::new(false));
+        let loser_disconnected = Arc::new(AtomicBool::new(false));
+        let loser_requested = Arc::new(AtomicBool::new(false));
+
+        let fast = tokio::spawn({
+            let winner_disconnected = Arc::clone(&winner_disconnected);
+            let winner_requested = Arc::clone(&winner_requested);
+            async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                (
+                    TransportProtocol::WebSocket,
+                    0,
+                    Ok(ok_client(winner_disconnected, winner_requested)),
+                    Duration::from_millis(5),
+                )
+            }
+        });
+
+        let slow = tokio::spawn({
+            let loser_disconnected = Arc::clone(&loser_disconnected);
+            let loser_requested = Arc::clone(&loser_requested);
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                (
+                    TransportProtocol::QUIC,
+                    1,
+                    Ok(ok_client(loser_disconnected, loser_requested)),
+                    Duration::from_millis(200),
+                )
+            }
+        });
+
+        let (first, _also_fast, errors) = {
+            let inflight: RaceInflight = Arc::new(StdMutex::new(vec![fast, slow]));
+            HybridClient::wait_for_connections(inflight).await
+        };
+
+        assert!(first.is_some());
+        assert!(errors.is_empty());
+        assert!(
+            !winner_disconnected.load(Ordering::SeqCst),
+            "winner must not be disconnected during race cleanup"
+        );
+        assert!(
+            loser_disconnected.load(Ordering::SeqCst),
+            "in-flight loser must be disconnected after early win"
+        );
+        assert!(loser_requested.load(Ordering::SeqCst));
     }
 }

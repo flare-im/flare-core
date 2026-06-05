@@ -51,9 +51,9 @@ impl ServerMessageWrapper {
         message_id: String,
         connection_id: &str,
         log_context: &str,
-    ) -> crate::client::Result<()>
+    ) -> crate::common::error::Result<()>
     where
-        F: std::future::Future<Output = crate::client::Result<Option<Frame>>>,
+        F: std::future::Future<Output = crate::common::error::Result<Option<Frame>>>,
     {
         let response_frame = match handler_future.await {
             Ok(Some(response)) => {
@@ -223,7 +223,7 @@ impl ServerMessageWrapper {
         frame: &Frame,
         sys_type: i32,
         connection_id: &str,
-    ) -> crate::client::Result<()> {
+    ) -> crate::common::error::Result<()> {
         use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
 
         match SysType::try_from(sys_type) {
@@ -338,7 +338,7 @@ impl ServerMessageWrapper {
         _frame: &Frame,
         command: &crate::common::protocol::PayloadCommand,
         connection_id: &str,
-    ) -> crate::client::Result<()> {
+    ) -> crate::common::error::Result<()> {
         let message_id = command.message_id.clone();
 
         use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadType;
@@ -386,7 +386,7 @@ impl ServerMessageWrapper {
         frame: &Frame,
         command: &crate::common::protocol::NotificationCommand,
         connection_id: &str,
-    ) -> crate::client::Result<()> {
+    ) -> crate::common::error::Result<()> {
         // 统一处理并发送响应
         self.handle_and_send_response(
             self.event_handler
@@ -404,7 +404,7 @@ impl ServerMessageWrapper {
         frame: &Frame,
         command: &crate::common::protocol::flare::core::commands::CustomCommand,
         connection_id: &str,
-    ) -> crate::client::Result<()> {
+    ) -> crate::common::error::Result<()> {
         self.update_connection_active_async(connection_id);
 
         let cmd_name = command.name.clone();
@@ -446,7 +446,7 @@ impl ConnectionHandler for ServerMessageWrapper {
         &self,
         frame: &Frame,
         connection_id: &str,
-    ) -> crate::client::Result<Option<Frame>> {
+    ) -> crate::common::error::Result<Option<Frame>> {
         // 根据命令类型路由到相应的处理方法
         if let Some(cmd) = &frame.command {
             match &cmd.r#type {
@@ -538,12 +538,12 @@ impl ConnectionHandler for ServerMessageWrapper {
         Ok(None)
     }
 
-    async fn on_connect(&self, connection_id: &str) -> crate::client::Result<()> {
+    async fn on_connect(&self, connection_id: &str) -> crate::common::error::Result<()> {
         info!("[ServerMessageWrapper] ✅ 新连接: {}", connection_id);
         self.event_handler.on_connect(connection_id).await
     }
 
-    async fn on_disconnect(&self, connection_id: &str) -> crate::client::Result<()> {
+    async fn on_disconnect(&self, connection_id: &str) -> crate::common::error::Result<()> {
         info!("[ServerMessageWrapper] ❌ 连接断开: {}", connection_id);
 
         // 通知事件处理器
@@ -559,20 +559,20 @@ impl ConnectionHandler for ServerMessageWrapper {
 
             tokio::spawn(async move {
                 // 获取连接信息（包括 user_id）
-                if let Some((_, conn_info)) = manager_trait.get_connection(&conn_id).await {
-                    if let Some(user_id) = conn_info.user_id {
-                        if let Err(e) = device_mgr_clone.remove_device(&user_id, &conn_id).await {
-                            tracing::debug!(
-                                "[ServerMessageWrapper] Failed to remove device from DeviceManager: {}",
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                "[ServerMessageWrapper] Successfully removed device from DeviceManager: user_id={}, connection_id={}",
-                                user_id,
-                                conn_id
-                            );
-                        }
+                if let Some((_, conn_info)) = manager_trait.get_connection(&conn_id).await
+                    && let Some(user_id) = conn_info.user_id
+                {
+                    if let Err(e) = device_mgr_clone.remove_device(&user_id, &conn_id).await {
+                        tracing::debug!(
+                            "[ServerMessageWrapper] Failed to remove device from DeviceManager: {}",
+                            e
+                        );
+                    } else {
+                        tracing::info!(
+                            "[ServerMessageWrapper] Successfully removed device from DeviceManager: user_id={}, connection_id={}",
+                            user_id,
+                            conn_id
+                        );
                     }
                 }
             });
@@ -593,7 +593,7 @@ impl ServerMessageWrapper {
         &self,
         connection_id: &str,
         error: &str,
-    ) -> crate::client::Result<()> {
+    ) -> crate::common::error::Result<()> {
         tracing::error!(
             "[ServerMessageWrapper] ❌ 连接错误: connection_id={}, error={}",
             connection_id,

@@ -7,14 +7,18 @@ use crate::client::transports::common::{ClientConnectionHelper, ClientMessageObs
 use crate::client::transports::{Client, ClientCore};
 use crate::common::error::{FlareError, Result};
 use crate::common::generate_id;
+use crate::common::platform::{sleep, timeout};
 use crate::common::protocol::Frame;
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::websocket::WebSocketTransport;
+#[cfg(target_arch = "wasm32")]
+use crate::transport::websocket_wasm::WebSocketTransport;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::connect_async;
 
 /// WebSocket 客户端
@@ -84,8 +88,7 @@ impl WebSocketClient {
         self.setup_connection_with_observer(connection_arc.clone())
             .await?;
 
-        // 启动心跳
-        self.core.start_heartbeat(connection_arc.clone()).await;
+        // 心跳在 CONNECT_ACK 协商完成后由 ClientCore 启动
 
         // 通知连接成功
         self.core
@@ -97,17 +100,33 @@ impl WebSocketClient {
 
     /// 建立 WebSocket 连接
     async fn establish_websocket_connection(&self) -> Result<Box<dyn Connection>> {
-        let url_str = &self.config.server_url;
+        let url_str = self
+            .config
+            .get_protocol_url(&crate::common::config_types::TransportProtocol::WebSocket);
 
-        let ws_stream_result = timeout(self.config.connect_timeout, connect_async(url_str))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ws_stream_result = timeout(self.config.connect_timeout, connect_async(&url_str))
+                .await
+                .map_err(|_| FlareError::connection_timeout("Connection timeout".to_string()))?;
+
+            let (ws_stream, _) =
+                ws_stream_result.map_err(|e| FlareError::connection_failed(e.to_string()))?;
+
+            let transport = WebSocketTransport::new(ws_stream);
+            Ok(Box::new(transport))
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let transport = timeout(
+                self.config.connect_timeout,
+                WebSocketTransport::connect(&url_str),
+            )
             .await
-            .map_err(|_| FlareError::connection_timeout("Connection timeout".to_string()))?;
-
-        let (ws_stream, _) =
-            ws_stream_result.map_err(|e| FlareError::connection_failed(e.to_string()))?;
-
-        let transport = WebSocketTransport::new(ws_stream);
-        Ok(Box::new(transport))
+            .map_err(|_| FlareError::connection_timeout("Connection timeout".to_string()))??;
+            Ok(Box::new(transport))
+        }
     }
 
     /// 设置连接和观察者
@@ -141,20 +160,20 @@ impl WebSocketClient {
     /// 尝试重连
     async fn try_reconnect(&mut self) -> Result<()> {
         // 检查重连次数限制
-        if let Some(max) = self.config.max_reconnect_attempts {
-            if self.reconnect_attempts >= max {
-                return Err(FlareError::connection_failed(format!(
-                    "Max reconnect attempts ({}) exceeded",
-                    max
-                )));
-            }
+        if let Some(max) = self.config.max_reconnect_attempts
+            && self.reconnect_attempts >= max
+        {
+            return Err(FlareError::connection_failed(format!(
+                "Max reconnect attempts ({}) exceeded",
+                max
+            )));
         }
 
         self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
 
         // 等待重连间隔
-        tokio::time::sleep(self.config.reconnect_interval).await;
+        sleep(self.config.reconnect_interval).await;
 
         // 关闭旧连接
         if let Some(conn) = self.connection.take() {
@@ -170,7 +189,45 @@ impl WebSocketClient {
     pub fn core(&self) -> &ClientCore {
         &self.core
     }
+
+    /// 发送消息并等待服务端响应（按 Frame.message_id 匹配）
+    pub async fn send_frame_and_wait(
+        &mut self,
+        frame: &Frame,
+        timeout_duration: std::time::Duration,
+    ) -> Result<Frame> {
+        if frame.message_id.is_empty() {
+            return Err(FlareError::protocol_error(
+                "message_id is empty".to_string(),
+            ));
+        }
+
+        let rx = self.core.register_pending_response(&frame.message_id).await;
+        self.send_frame(frame).await?;
+
+        match timeout(timeout_duration, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
+                self.core.cancel_pending_response(&frame.message_id).await;
+                Err(FlareError::protocol_error(
+                    "Response channel closed".to_string(),
+                ))
+            }
+            Err(_) => {
+                self.core.cancel_pending_response(&frame.message_id).await;
+                Err(FlareError::protocol_error(format!(
+                    "Response timeout for message_id {}",
+                    frame.message_id
+                )))
+            }
+        }
+    }
 }
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for WebSocketClient {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for WebSocketClient {}
 
 #[async_trait]
 impl Client for WebSocketClient {
@@ -221,6 +278,7 @@ impl Client for WebSocketClient {
             self.core.state(),
             crate::client::connection::ConnectionState::Connected
         ) && self.connection.is_some()
+            && self.core.is_negotiation_completed()
     }
 
     fn add_observer(&mut self, observer: ArcObserver) {

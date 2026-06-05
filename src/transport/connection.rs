@@ -1,13 +1,43 @@
+//! Transport connection trait and platform `Send` contract.
+//!
+//! # Native (`not(wasm32)`)
+//!
+//! - `Connection: Send + Sync` so `Box<dyn Connection>` can move across Tokio worker tasks.
+//! - Implementations: `WebSocketTransport`, `TCPTransport`, `QuicTransport`, etc.
+//! - Observers may spawn async work via [`crate::client::runtime::spawn_client_task`].
+//!
+//! # WASM (`wasm32-unknown-unknown`)
+//!
+//! Browser WebSocket runs on a **single JS thread**. The trait still requires `Send + Sync`
+//! so client code shares one object-safe API with Native; WASM transports use targeted
+//! `unsafe impl Send/Sync` (see `websocket_wasm.rs`) because `web_sys` handles are not
+//! `Send` by default but are never accessed off the browser thread.
+//!
+//! ## WASM async rules (do not violate)
+//!
+//! 1. **Never** `Runtime::block_on` — use [`crate::client::wasm_tokio::run_async`].
+//! 2. **Never** `async_trait(?Send)` on this trait — it breaks `Box<dyn Connection + Send + Sync>`.
+//! 3. **Browser callbacks are sync** (`onmessage`, `onopen`): enqueue bytes with
+//!    [`ClientCore::push_wasm_inbound`](crate::client::transports::ClientCore::push_wasm_inbound)
+//!    and drain inside `wait_for_negotiation` / `run_async` LocalSet (see `ClientMessageObserver`).
+//! 4. **Yield to the JS event loop** during long waits (`yield_to_event_loop`) so WebSocket
+//!    I/O callbacks can run while Rust awaits CONNECT_ACK.
+//!
+//! # Implementing `Connection`
+//!
+//! - Keep `send` / `close` non-blocking; delegate to the transport driver.
+//! - Notify observers synchronously from I/O callbacks; do not queue through unbounded
+//!   channels that the Tokio driver might not poll promptly on WASM.
+//! - Update `last_active_time` on send and receive.
+
 use crate::common::error::Result;
+use crate::common::platform::MonotonicInstant;
 use crate::transport::events::ArcObserver;
 use async_trait::async_trait;
-use std::time::Instant;
 
-/// A unified transport layer connection interface.
+/// Unified transport connection interface (Native + WASM).
 ///
-/// This trait abstracts the underlying transport protocol (e.g., WebSocket, QUIC)
-/// and provides a common set of methods for interacting with a connection.
-/// It uses an observer pattern to notify interested parties of connection events.
+/// See [module-level documentation](self) for `Send`/`Sync` and WASM LocalSet requirements.
 #[async_trait]
 pub trait Connection: Send + Sync {
     /// Adds an observer to the connection.
@@ -24,16 +54,9 @@ pub trait Connection: Send + Sync {
     /// Closes the connection.
     async fn close(&mut self) -> Result<()>;
 
-    /// 获取最后活跃时间
-    ///
-    /// 返回连接的最后活跃时间戳，用于判断连接是否还在使用中。
-    /// 活跃时间会在以下情况下更新：
-    /// - 发送消息时
-    /// - 收到消息时
-    fn last_active_time(&self) -> Instant;
+    /// Returns last activity time (send/receive). Used for heartbeat and idle detection.
+    fn last_active_time(&self) -> MonotonicInstant;
 
-    /// 更新最后活跃时间
-    ///
-    /// 通常在发送或接收消息时自动调用，但也可以手动调用。
+    /// Updates last activity time (also called automatically on send/receive in most impls).
     fn update_active_time(&mut self);
 }

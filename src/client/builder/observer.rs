@@ -18,8 +18,8 @@
 //! 观察者模式基于 `HybridClient`，使用 `ConnectionObserver` trait 处理所有连接事件。
 //! 观察者可以处理消息、连接建立、断开、错误等事件，提供灵活的事件驱动架构。
 
+use crate::client::HybridClient;
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
-use crate::client::{Client, HybridClient};
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::transport::events::ConnectionObserver;
@@ -184,16 +184,12 @@ impl ObserverClientBuilder {
 
         // 设置事件处理器（如果提供）
         if let Some(event_handler) = self.event_handler {
-            let mut client = wrapper.client().lock().await;
-            client.core_mut().set_event_handler(Some(event_handler));
+            wrapper.set_event_handler(Some(event_handler)).await;
         }
 
-        // 添加观察者
-        {
-            let observer_clone = Arc::clone(&observer);
-            let mut client = wrapper.client().lock().await;
-            client.add_observer(observer_clone);
-        }
+        wrapper
+            .add_observer(Arc::clone(&observer) as Arc<dyn ConnectionObserver>)
+            .await;
 
         Ok(ObserverClient {
             wrapper,
@@ -233,12 +229,12 @@ impl ObserverClient {
     /// 连接到服务器
     pub async fn connect(&mut self) -> Result<()> {
         // 先添加观察者（如果还未添加）
-        if let Some(observer) = self.observer.take() {
-            let mut client = self.wrapper.client().lock().await;
-            client.add_observer(observer);
+        if let Some(observer) = &self.observer {
+            self.wrapper
+                .add_observer(Arc::clone(observer) as Arc<dyn ConnectionObserver>)
+                .await;
         }
 
-        // 然后连接
         self.wrapper.connect().await
     }
 
@@ -263,12 +259,12 @@ impl ObserverClient {
 
     /// 检查连接状态
     pub fn is_connected(&self) -> bool {
-        self.wrapper.is_connected()
+        crate::client::runtime::run_client_async(self.wrapper.is_connected_async())
     }
 
     /// 获取连接 ID
     pub fn connection_id(&self) -> Option<String> {
-        self.wrapper.connection_id()
+        crate::client::runtime::run_client_async(self.wrapper.connection_id_async())
     }
 
     /// 获取活动协议
