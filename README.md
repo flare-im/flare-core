@@ -4,8 +4,17 @@
 [![Documentation](https://docs.rs/flare-core/badge.svg)](https://docs.rs/flare-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
+[![GitHub](https://img.shields.io/github/stars/flare-im/flare-core?style=social&label=GitHub)](https://github.com/flare-im/flare-core)
 
-Rust 长连接通信库，面向即时通讯与实时推送。支持 WebSocket、QUIC、TCP，以及序列化/压缩/加密协商、心跳重连、多设备策略与 Token 认证。
+[![WebSocket](https://img.shields.io/badge/WebSocket-ws%2Fwss-4CAF50)](https://github.com/flare-im/flare-core)
+[![QUIC](https://img.shields.io/badge/QUIC-UDP%2FTLS-2196F3)](https://github.com/flare-im/flare-core)
+[![TCP](https://img.shields.io/badge/TCP-length--prefixed-607D8B)](https://github.com/flare-im/flare-core)
+[![Tokio](https://img.shields.io/badge/Tokio-async-000000?logo=rust&logoColor=white)](https://tokio.rs/)
+[![Protobuf](https://img.shields.io/badge/Protobuf-negotiation-9C27B0)](https://github.com/flare-im/flare-core)
+[![WASM](https://img.shields.io/badge/WASM-web%20client-FF9800)](https://github.com/flare-im/flare-core)
+[![IM](https://img.shields.io/badge/IM-即时通讯-E91E63)](https://github.com/flare-im/flare-core)
+
+Rust 长连接通信库（Tokio async），面向即时通讯、聊天室与实时推送。支持 WebSocket、QUIC、TCP，以及 Protobuf/JSON 协商、压缩加密、心跳重连、多设备策略与 Token 认证。
 
 英文 API 文档：[docs.rs/flare-core](https://docs.rs/flare-core)
 

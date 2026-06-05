@@ -44,8 +44,10 @@ cargo doc --no-deps 2>&1 | grep -i "broken\|warning"
 - ✅ `homepage` - 主页 URL（可选）
 - ✅ `documentation` - 文档 URL（可选）
 - ✅ `readme` - README 文件路径
-- ✅ `keywords` - 关键词列表（用于搜索）
+- ✅ `keywords` - 关键词列表（用于搜索，最多 5 个，见 `Cargo.toml`）
 - ✅ `categories` - 分类列表（用于分类浏览）
+
+**GitHub Topics（维护者）**：在仓库 **Settings → Topics** 添加标签可提升站内搜索曝光，建议：`rust` `websocket` `quic` `tcp` `tokio` `instant-messaging` `realtime` `protobuf` `wasm` `chat` `push-notifications` `network-programming`。不必写入 README 正文。
 
 ### 4. 文件检查
 
