@@ -12,14 +12,17 @@
 
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    notify_observers_and_clear as notify_connection_observers_and_clear,
+};
 use crate::transport::framing::{read_length_prefixed, write_length_prefixed};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWriteExt, split};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub struct TCPTransport {
     write_half: Arc<TokioMutex<tokio::io::WriteHalf<TcpStream>>>,
@@ -70,7 +73,7 @@ impl TCPTransport {
                 Ok(data) => {
                     if data.is_empty() {
                         debug!("[TCP Transport] EOF, peer closed connection");
-                        Self::notify_observers(
+                        Self::notify_observers_and_clear(
                             &observers_arc,
                             &ConnectionEvent::Disconnected(
                                 "TCP connection closed by peer".to_string(),
@@ -95,7 +98,7 @@ impl TCPTransport {
                     } else {
                         ConnectionEvent::Error(e)
                     };
-                    Self::notify_observers(&observers_arc, &event);
+                    Self::notify_observers_and_clear(&observers_arc, &event);
                     break;
                 }
             }
@@ -105,16 +108,14 @@ impl TCPTransport {
     }
 
     fn notify_observers(observers_arc: &Arc<Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
-        let observers = match observers_arc.lock() {
-            Ok(obs) => obs,
-            Err(e) => {
-                warn!("[TCP Transport] observers lock poisoned: {e}");
-                return;
-            }
-        };
-        for observer in observers.iter() {
-            observer.on_event(event);
-        }
+        notify_connection_observers(observers_arc, event, "tcp observers");
+    }
+
+    fn notify_observers_and_clear(
+        observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
+        event: &ConnectionEvent,
+    ) {
+        notify_connection_observers_and_clear(observers_arc, event, "tcp observers");
     }
 }
 
@@ -152,17 +153,19 @@ impl Connection for TCPTransport {
             *closed = true;
         }
 
-        let mut writer = self.write_half.lock().await;
-        writer
+        let close_result = self
+            .write_half
+            .lock()
+            .await
             .shutdown()
             .await
-            .map_err(|e| FlareError::connection_closed(e.to_string()))?;
+            .map_err(|e| FlareError::connection_closed(e.to_string()));
 
-        Self::notify_observers(
+        Self::notify_observers_and_clear(
             &self.observers,
             &ConnectionEvent::Disconnected("Closed by local endpoint".to_string()),
         );
-        Ok(())
+        close_result
     }
 
     fn last_active_time(&self) -> std::time::Instant {

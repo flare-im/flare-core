@@ -126,6 +126,10 @@ impl Compressor for NoCompressor {
     }
 }
 
+/// 解压输出上限：防 gzip 解压炸弹（恶意小包膨胀致 OOM）。与传输帧上限同量级。
+#[cfg(feature = "compression-gzip")]
+const MAX_GZIP_DECOMPRESSED_LEN: u64 = 16 * 1024 * 1024;
+
 /// Gzip 压缩器
 pub struct GzipCompressor;
 
@@ -161,11 +165,17 @@ impl Compressor for GzipCompressor {
             use flate2::read::GzDecoder;
             use std::io::Read;
 
-            let mut decoder = GzDecoder::new(data);
+            // 防解压炸弹：限制解压输出上限，避免恶意小包膨胀致 OOM（客户端与服务端共用此路径）。
+            let mut decoder = GzDecoder::new(data).take(MAX_GZIP_DECOMPRESSED_LEN + 1);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed).map_err(|e| {
                 FlareError::encoding_error(format!("Gzip decompression failed: {}", e))
             })?;
+            if decompressed.len() as u64 > MAX_GZIP_DECOMPRESSED_LEN {
+                return Err(FlareError::encoding_error(format!(
+                    "Gzip decompressed payload exceeds limit ({MAX_GZIP_DECOMPRESSED_LEN} bytes)"
+                )));
+            }
             Ok(decompressed)
         }
 
@@ -189,5 +199,36 @@ impl Compressor for GzipCompressor {
     fn can_detect(&self, data: &[u8]) -> bool {
         // Gzip 魔数: 0x1f 0x8b
         data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b
+    }
+}
+
+#[cfg(all(test, feature = "compression-gzip"))]
+mod gzip_decompress_limit_tests {
+    use super::GzipCompressor;
+    use crate::common::compression::traits::Compressor;
+
+    #[test]
+    fn roundtrip_under_limit_is_unchanged() {
+        let c = GzipCompressor;
+        let data = vec![7u8; 1024 * 1024]; // 1MB，正常负载
+        let compressed = c.compress(&data).unwrap();
+        let restored = c.decompress(&compressed).unwrap();
+        assert_eq!(restored, data);
+    }
+
+    #[test]
+    fn decompress_rejects_zip_bomb_over_limit() {
+        let c = GzipCompressor;
+        // 17MB 高可压缩数据 → 解压超过 16MB 上限，必须被拒，避免 OOM。
+        let data = vec![0u8; 17 * 1024 * 1024];
+        let compressed = c.compress(&data).unwrap();
+        assert!(
+            compressed.len() < 1024 * 1024,
+            "bomb payload should compress small"
+        );
+        assert!(
+            c.decompress(&compressed).is_err(),
+            "decompressed payload exceeding the limit must be rejected"
+        );
     }
 }

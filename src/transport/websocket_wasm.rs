@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use js_sys::{ArrayBuffer, Uint8Array};
-use tracing::warn;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
@@ -13,7 +12,10 @@ use crate::common::platform::{MonotonicInstant, monotonic_now, timeout, yield_to
 
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    notify_observers_and_clear as notify_connection_observers_and_clear,
+};
 
 #[derive(Clone)]
 struct SendWebSocket(WebSocket);
@@ -31,6 +33,13 @@ impl SendWebSocket {
     }
 
     fn send(&self, data: &[u8]) -> Result<()> {
+        let ready_state = self.0.ready_state();
+        if ready_state != WebSocket::OPEN {
+            return Err(FlareError::connection_failed(format!(
+                "WebSocket send skipped: ready_state={ready_state}"
+            )));
+        }
+
         self.0
             .send_with_u8_array(data)
             .map_err(|_| FlareError::connection_failed("WebSocket send failed".to_string()))
@@ -131,7 +140,10 @@ impl WebSocketTransport {
                 } else {
                     event.reason()
                 };
-                Self::dispatch_observers(&observers, &ConnectionEvent::Disconnected(reason));
+                Self::dispatch_observers_and_clear(
+                    &observers,
+                    &ConnectionEvent::Disconnected(reason),
+                );
             }) as Box<dyn FnMut(CloseEvent)>);
             ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
             onclose.forget();
@@ -140,7 +152,7 @@ impl WebSocketTransport {
         {
             let observers = Arc::clone(&observers);
             let onerror = Closure::wrap(Box::new(move |_event: ErrorEvent| {
-                Self::dispatch_observers(
+                Self::dispatch_observers_and_clear(
                     &observers,
                     &ConnectionEvent::Error(FlareError::connection_failed(
                         "WebSocket error".to_string(),
@@ -157,6 +169,7 @@ impl WebSocketTransport {
             .map_err(|_| {
                 FlareError::connection_failed("WebSocket open channel closed".to_string())
             })?;
+        web_sys::console::log_1(&"[flare-core] WebSocket onopen received".into());
 
         Ok(Self {
             ws,
@@ -169,16 +182,14 @@ impl WebSocketTransport {
         observers_arc: &Arc<StdMutex<Vec<ArcObserver>>>,
         event: &ConnectionEvent,
     ) {
-        let observers = match observers_arc.lock() {
-            Ok(obs) => obs,
-            Err(e) => {
-                warn!("wasm websocket observers lock poisoned: {e}");
-                return;
-            }
-        };
-        for observer in observers.iter() {
-            observer.on_event(event);
-        }
+        notify_connection_observers(observers_arc, event, "wasm websocket observers");
+    }
+
+    fn dispatch_observers_and_clear(
+        observers_arc: &Arc<StdMutex<Vec<ArcObserver>>>,
+        event: &ConnectionEvent,
+    ) {
+        notify_connection_observers_and_clear(observers_arc, event, "wasm websocket observers");
     }
 }
 
@@ -205,8 +216,12 @@ impl Connection for WebSocketTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.ws.set_onopen(None);
+        self.ws.set_onmessage(None);
+        self.ws.set_onclose(None);
+        self.ws.set_onerror(None);
         self.ws.close();
-        Self::dispatch_observers(
+        Self::dispatch_observers_and_clear(
             &self.observers,
             &ConnectionEvent::Disconnected("Closed by client".to_string()),
         );

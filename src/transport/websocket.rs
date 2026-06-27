@@ -1,7 +1,10 @@
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::{Reliability, frame_with_system_command, pong};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    notify_observers_and_clear as notify_connection_observers_and_clear,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::SinkExt;
@@ -12,7 +15,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message, error::ProtocolError};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::warn;
 
 // 使用枚举来支持两种类型的 WebSocketStream
 enum WebSocketSink {
@@ -157,10 +159,15 @@ impl WebSocketTransport {
                     ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
                 );
 
-                Self::_notify_observers(&observers_arc, &event);
-
                 if is_terminal {
+                    notify_connection_observers_and_clear(
+                        &observers_arc,
+                        &event,
+                        "websocket observers",
+                    );
                     break;
+                } else {
+                    notify_connection_observers(&observers_arc, &event, "websocket observers");
                 }
             }
         }
@@ -219,35 +226,22 @@ impl WebSocketTransport {
                     ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
                 );
 
-                Self::_notify_observers(&observers_arc, &event);
-
                 if is_terminal {
+                    notify_connection_observers_and_clear(
+                        &observers_arc,
+                        &event,
+                        "websocket observers",
+                    );
                     break;
+                } else {
+                    notify_connection_observers(&observers_arc, &event, "websocket observers");
                 }
             }
         }
     }
 
-    // 私有辅助方法，用于通知所有观察者
-    fn _notify_observers(
-        observers_arc: &Arc<std::sync::Mutex<Vec<ArcObserver>>>,
-        event: &ConnectionEvent,
-    ) {
-        let observers = match observers_arc.lock() {
-            Ok(obs) => obs,
-            Err(e) => {
-                warn!("websocket observers lock poisoned: {e}");
-                return;
-            }
-        };
-
-        for observer in observers.iter() {
-            observer.on_event(event);
-        }
-    }
-
-    fn notify_observers(&self, event: &ConnectionEvent) {
-        Self::_notify_observers(&self.observers, event);
+    fn notify_observers_and_clear(&self, event: &ConnectionEvent) {
+        notify_connection_observers_and_clear(&self.observers, event, "websocket observers");
     }
 
     /// 发送 WebSocket 协议层的 PONG 响应 (TLS)
@@ -363,24 +357,24 @@ impl Connection for WebSocketTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
-        match &mut self.sink {
+        let close_result = match &mut self.sink {
             WebSocketSink::Tls(sink) => {
                 let mut s = sink.lock().await;
                 s.close()
                     .await
-                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))
             }
             WebSocketSink::Plain(sink) => {
                 let mut s = sink.lock().await;
                 s.close()
                     .await
-                    .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+                    .map_err(|e| FlareError::connection_failed(e.to_string()))
             }
-        }
-        self.notify_observers(&ConnectionEvent::Disconnected(
+        };
+        self.notify_observers_and_clear(&ConnectionEvent::Disconnected(
             "Closed by client".to_string(),
         ));
-        Ok(())
+        close_result
     }
 
     fn last_active_time(&self) -> std::time::Instant {

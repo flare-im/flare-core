@@ -6,18 +6,18 @@ use crate::client::config::ClientConfig;
 use crate::client::connection::ConnectionStateManager;
 use crate::client::heartbeat::HeartbeatManager;
 use crate::client::router::MessageRouter;
-use crate::common::MessageParser;
 use crate::common::error::{FlareError, Result};
 use crate::common::protocol::Frame;
 use crate::common::protocol::flare::core::commands::command::Type;
 use crate::common::protocol::flare::core::commands::notification_command::Type as NotificationCommandType;
 use crate::common::protocol::flare::core::commands::payload_command::Type as PayloadCommandType;
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
+use crate::common::{HeartbeatAppState, HeartbeatConfig, MessageParser};
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex as StdMutex,
+    Arc, Mutex as StdMutex, RwLock as StdRwLock,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -76,6 +76,8 @@ pub struct ClientCore {
     pub parser: Arc<tokio::sync::Mutex<MessageParser>>,
     /// 心跳管理器（共享，clone 与 observer 路径均可启动/停止）
     heartbeat_manager: Arc<StdMutex<Option<Arc<tokio::sync::Mutex<HeartbeatManager>>>>>,
+    /// 运行期心跳策略，供前后台/NAT 探测动态更新。
+    heartbeat_config: Arc<StdRwLock<HeartbeatConfig>>,
     /// 消息路由器（可选，通过配置开启）
     message_router: Option<MessageRouter>,
     /// 观察者列表
@@ -120,6 +122,7 @@ impl ClientCore {
             state_manager: Arc::new(ConnectionStateManager::new()),
             parser: Arc::new(tokio::sync::Mutex::new(parser)),
             heartbeat_manager: Arc::new(StdMutex::new(None)),
+            heartbeat_config: Arc::new(StdRwLock::new(config.heartbeat.clone())),
             message_router,
             observers: Arc::new(StdMutex::new(Vec::new())),
             config: config.clone(),
@@ -180,6 +183,7 @@ impl ClientCore {
         self.negotiation_completed = Arc::clone(&shared.negotiation_completed);
         self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
         self.negotiation_failure_reason = Arc::clone(&shared.negotiation_failure_reason);
+        self.heartbeat_config = Arc::clone(&shared.heartbeat_config);
     }
 
     /// 确定初始序列化格式和压缩算法
@@ -231,6 +235,21 @@ impl ClientCore {
         }
     }
 
+    /// 清空当前连接槽，用于断开连接时打断 connection -> observer -> core -> connection 的强引用链。
+    pub fn clear_client_connection(&self) {
+        if let Ok(mut conn) = self.client_connection.lock() {
+            *conn = None;
+        }
+    }
+
+    /// 取出当前连接槽；调用方仍可用返回值完成 close，但共享槽会立即释放旧连接。
+    pub fn take_client_connection(&self) -> Option<Arc<Mutex<Box<dyn Connection>>>> {
+        self.client_connection
+            .lock()
+            .ok()
+            .and_then(|mut conn| conn.take())
+    }
+
     /// 设置事件处理器
     pub fn set_event_handler(
         &mut self,
@@ -249,7 +268,7 @@ impl ClientCore {
 
     /// 协商完成后启动心跳（幂等）
     async fn try_start_heartbeat(&self) {
-        if !self.config.heartbeat.enabled {
+        if !self.current_heartbeat_config().enabled {
             return;
         }
         if !self.negotiation_completed.load(Ordering::SeqCst) {
@@ -271,10 +290,8 @@ impl ClientCore {
             return;
         };
 
-        let mut heartbeat = HeartbeatManager::new(
-            self.config.heartbeat.interval,
-            self.config.heartbeat.timeout,
-        );
+        let mut heartbeat =
+            HeartbeatManager::with_shared_config(Arc::clone(&self.heartbeat_config));
         let parser_ref = Arc::clone(&self.parser);
         heartbeat.start(connection, parser_ref);
         *slot = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
@@ -325,6 +342,10 @@ impl ClientCore {
             match PRE_NEGOTIATION_PARSER.parse(&data) {
                 Ok(frame) => frame,
                 Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(
+                        &format!("[flare-core] parse failed pre-negotiation: {e}").into(),
+                    );
                     tracing::warn!("Failed to parse message (pre-negotiation): {}", e);
                     return;
                 }
@@ -334,6 +355,10 @@ impl ClientCore {
             match self.parse_message(&data).await {
                 Ok(frame) => frame,
                 Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(
+                        &format!("[flare-core] parse failed negotiated: {e}").into(),
+                    );
                     tracing::warn!("Failed to parse message (negotiated): {}", e);
                     return;
                 }
@@ -599,13 +624,7 @@ impl ClientCore {
     /// 断开连接（被踢时调用）
     async fn disconnect_on_kicked(&self) {
         // 尝试从 client_connection 断开
-        let client_conn_opt = {
-            if let Ok(conn_guard) = self.client_connection.lock() {
-                conn_guard.clone()
-            } else {
-                None
-            }
-        };
+        let client_conn_opt = self.take_client_connection();
 
         if let Some(client_conn) = client_conn_opt {
             let mut conn = client_conn.lock().await;
@@ -850,6 +869,40 @@ impl ClientCore {
         self.state_manager.get_state().can_connect()
     }
 
+    /// 返回当前心跳策略快照。
+    pub fn current_heartbeat_config(&self) -> HeartbeatConfig {
+        self.heartbeat_config
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| self.config.heartbeat.clone())
+    }
+
+    /// 当前实际心跳间隔。
+    pub fn heartbeat_effective_interval(&self) -> std::time::Duration {
+        self.current_heartbeat_config().effective_interval()
+    }
+
+    /// 运行期更新心跳策略。启动前更新会影响后续启动，启动后更新会影响下一轮心跳。
+    pub fn update_heartbeat_config(&self, update: impl FnOnce(&mut HeartbeatConfig)) {
+        if let Ok(mut config) = self.heartbeat_config.write() {
+            update(&mut config);
+        }
+    }
+
+    /// 更新应用前后台状态。
+    pub fn set_heartbeat_app_state(&self, state: HeartbeatAppState) {
+        self.update_heartbeat_config(|config| {
+            config.app_state = state;
+        });
+    }
+
+    /// 更新 NAT 空闲超时探测结果。
+    pub fn set_heartbeat_nat_timeout(&self, timeout: Option<std::time::Duration>) {
+        self.update_heartbeat_config(|config| {
+            config.nat_timeout = timeout;
+        });
+    }
+
     /// 记录收到 PONG（心跳响应）
     ///
     /// 由消息观察者调用，用于更新心跳状态
@@ -919,6 +972,7 @@ impl Clone for ClientCore {
             state_manager: Arc::clone(&self.state_manager),
             parser: Arc::clone(&self.parser),
             heartbeat_manager: Arc::clone(&self.heartbeat_manager),
+            heartbeat_config: Arc::clone(&self.heartbeat_config),
             message_router: self.message_router.as_ref().map(|_| MessageRouter::new()), // 路由不克隆，创建新的
             observers: Arc::clone(&self.observers),
             config: self.config.clone(),
@@ -992,6 +1046,37 @@ mod client_core_tests {
         )))
         .await;
         assert!(!core.is_negotiation_completed());
+    }
+
+    #[test]
+    fn heartbeat_runtime_policy_is_shared_across_core_clones() {
+        let core = ClientCore::new(&ClientConfig::default());
+        let cloned = core.clone();
+
+        assert_eq!(core.heartbeat_effective_interval(), Duration::from_secs(30));
+        cloned.set_heartbeat_app_state(HeartbeatAppState::Background);
+        assert_eq!(
+            core.heartbeat_effective_interval(),
+            Duration::from_secs(120)
+        );
+
+        core.set_heartbeat_nat_timeout(Some(Duration::from_secs(40)));
+        assert_eq!(
+            cloned.heartbeat_effective_interval(),
+            Duration::from_secs(28)
+        );
+    }
+
+    #[test]
+    fn client_connection_take_clears_shared_core_slot() {
+        let mut core = ClientCore::new(&ClientConfig::default());
+        let cloned = core.clone();
+        core.set_client_connection(Arc::new(Mutex::new(
+            Box::new(MockConnection) as Box<dyn Connection>
+        )));
+
+        assert!(cloned.take_client_connection().is_some());
+        assert!(core.take_client_connection().is_none());
     }
 
     struct MockConnection;

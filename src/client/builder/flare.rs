@@ -30,11 +30,13 @@ use crate::client::HybridClient;
 use crate::client::WebSocketClient;
 use crate::client::builder::{BaseClientBuilderConfig, ClientWrapper};
 use crate::common::MessageParser;
+use crate::common::config_types::{HeartbeatAppState, HeartbeatConfig};
 use crate::common::error::Result;
 use crate::common::message::{
     ArcMessageMiddleware, ArcMessageProcessor, MessageContext, MessagePipeline, MessageProcessor,
 };
 use crate::common::protocol::Frame;
+use crate::common::protocol::flare::core::commands::command::Type as CommandType;
 use crate::transport::events::{ConnectionEvent, ConnectionObserver};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -366,6 +368,7 @@ impl FlareClientBuilder {
 }
 
 /// Flare 客户端
+#[derive(Clone)]
 pub struct FlareClient {
     wrapper: ClientWrapper,
     #[allow(dead_code)] // 保留用于未来扩展（如动态更新管道配置）
@@ -424,6 +427,26 @@ impl FlareClient {
     /// 获取活动协议
     pub fn active_protocol(&self) -> crate::common::config_types::TransportProtocol {
         self.wrapper.active_protocol()
+    }
+
+    /// 运行期替换心跳策略。
+    pub async fn update_heartbeat_config(&self, config: HeartbeatConfig) {
+        self.wrapper.update_heartbeat_config(config).await;
+    }
+
+    /// 更新应用前后台状态。移动端进入后台时可拉长心跳，回到前台时恢复较短心跳。
+    pub async fn set_heartbeat_app_state(&self, state: HeartbeatAppState) {
+        self.wrapper.set_heartbeat_app_state(state).await;
+    }
+
+    /// 更新 NAT 空闲超时探测结果。传入 `None` 表示清除探测值。
+    pub async fn set_heartbeat_nat_timeout(&self, timeout: Option<std::time::Duration>) {
+        self.wrapper.set_heartbeat_nat_timeout(timeout).await;
+    }
+
+    /// 当前实际心跳间隔。
+    pub async fn heartbeat_effective_interval(&self) -> std::time::Duration {
+        self.wrapper.heartbeat_effective_interval().await
     }
 
     /// 更新消息管道解析器（协商完成后调用）
@@ -522,7 +545,6 @@ impl ConnectionObserver for FlareObserver {
                 // 先尝试用 PRE_NEGOTIATION_PARSER 解析，检查是否是 CONNECT_ACK 消息
                 // CONNECT_ACK 消息必须使用 PRE_NEGOTIATION_PARSER（JSON、不压缩、不加密）
                 use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
-                use crate::common::protocol::flare::core::commands::command::Type as CommandType;
                 use crate::common::protocol::flare::core::commands::system_command::Type as SysType;
 
                 let pipeline = self.pipeline.clone();

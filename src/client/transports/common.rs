@@ -165,18 +165,26 @@ impl ClientConnectionHelper {
         // 停止心跳
         core.stop_heartbeat();
 
-        // 关闭连接
-        if let Some(conn) = connection {
+        // 先清掉共享连接槽，再用局部 Arc 关闭连接，避免
+        // connection -> observer -> cloned ClientCore -> client_connection -> connection
+        // 形成强引用环，导致切账号后旧引擎和上层 listener 无法释放。
+        core.clear_client_connection();
+
+        let close_result = if let Some(conn) = connection {
             let mut c = conn.lock().await;
-            c.close().await?;
-        }
+            c.close().await
+        } else {
+            Ok(())
+        };
+
+        core.cancel_all_pending_responses().await;
 
         // 通知连接断开事件
         core.handle_connection_event(&ConnectionEvent::Disconnected(
             "Client disconnected".to_string(),
         ));
 
-        Ok(())
+        close_result
     }
 
     /// 检查是否可以重连

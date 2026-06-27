@@ -2,20 +2,26 @@
 //!
 //! 提供心跳机制的实现，保持连接活跃
 
-use crate::common::MessageParser;
-use crate::common::platform::{MonotonicInstant, interval, monotonic_now};
+use crate::common::platform::{MonotonicInstant, monotonic_now, sleep};
+use crate::common::{HeartbeatAppState, HeartbeatConfig, MessageParser};
 use crate::transport::connection::Connection;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
 /// 心跳管理器
 pub struct HeartbeatManager {
-    interval: Duration,
-    timeout: Duration,
+    config: Arc<RwLock<HeartbeatConfig>>,
     // 使用 std::sync::Mutex，因为 record_pong 可能从同步上下文调用
     last_pong: Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
     stop_tx: Option<mpsc::Sender<()>>,
+}
+
+fn read_config(config: &Arc<RwLock<HeartbeatConfig>>) -> HeartbeatConfig {
+    config
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| HeartbeatConfig::default())
 }
 
 impl HeartbeatManager {
@@ -25,12 +31,56 @@ impl HeartbeatManager {
     /// - `interval`: 心跳发送间隔
     /// - `timeout`: 等待 PONG 的超时时间
     pub fn new(interval: Duration, timeout: Duration) -> Self {
+        Self::with_config(
+            HeartbeatConfig::new()
+                .with_interval(interval)
+                .with_timeout(timeout),
+        )
+    }
+
+    /// 使用完整心跳策略创建管理器。
+    pub fn with_config(config: HeartbeatConfig) -> Self {
+        Self::with_shared_config(Arc::new(RwLock::new(config)))
+    }
+
+    /// 使用共享心跳策略创建管理器；运行中更新该策略会影响后续心跳。
+    pub fn with_shared_config(config: Arc<RwLock<HeartbeatConfig>>) -> Self {
         Self {
-            interval,
-            timeout,
+            config,
             last_pong: Arc::new(std::sync::Mutex::new(None)),
             stop_tx: None,
         }
+    }
+
+    /// 返回当前心跳策略快照。
+    pub fn current_config(&self) -> HeartbeatConfig {
+        read_config(&self.config)
+    }
+
+    /// 当前实际心跳间隔。
+    pub fn effective_interval(&self) -> Duration {
+        self.current_config().effective_interval()
+    }
+
+    /// 原子更新心跳策略。
+    pub fn update_config(&self, update: impl FnOnce(&mut HeartbeatConfig)) {
+        if let Ok(mut config) = self.config.write() {
+            update(&mut config);
+        }
+    }
+
+    /// 更新应用前后台状态。
+    pub fn set_app_state(&self, state: HeartbeatAppState) {
+        self.update_config(|config| {
+            config.app_state = state;
+        });
+    }
+
+    /// 更新 NAT 空闲超时探测结果。
+    pub fn set_nat_timeout(&self, timeout: Option<Duration>) {
+        self.update_config(|config| {
+            config.nat_timeout = timeout;
+        });
     }
 
     /// 启动心跳
@@ -49,16 +99,14 @@ impl HeartbeatManager {
         let (tx, mut rx) = mpsc::channel(1);
         self.stop_tx = Some(tx);
 
-        let interval_duration = self.interval;
-        let timeout_duration = self.timeout;
+        let config = Arc::clone(&self.config);
         let last_pong = Arc::clone(&self.last_pong);
 
         let heartbeat_loop = async move {
-            let mut interval_timer = interval(interval_duration);
-
             loop {
+                let sleep_duration = read_config(&config).effective_interval();
                 tokio::select! {
-                    _ = interval_timer.tick() => {
+                    _ = sleep(sleep_duration) => {
                         // 发送心跳
                         let ping_frame = crate::common::protocol::frame_with_system_command(
                             crate::common::protocol::ping(),
@@ -85,6 +133,7 @@ impl HeartbeatManager {
                         if send_result.is_ok() {
                             // 检查是否超时（在锁外检查）
                             let should_close = {
+                                let timeout_duration = read_config(&config).timeout;
                                 let last = last_pong.lock().unwrap();
                                 if let Some(last_pong_time) = *last {
                                     last_pong_time.elapsed() > timeout_duration
@@ -136,7 +185,7 @@ impl HeartbeatManager {
         if let Ok(last) = self.last_pong.lock()
             && let Some(last_pong_time) = *last
         {
-            return last_pong_time.elapsed() > self.timeout;
+            return last_pong_time.elapsed() > self.current_config().timeout;
         }
         // 如果从未收到 PONG，且启动后已超过超时时间，则认为超时
         false
@@ -220,5 +269,20 @@ mod tests {
             stopped_count,
             "heartbeat should stop sending after stop signal is processed"
         );
+    }
+
+    #[test]
+    fn heartbeat_manager_reads_shared_runtime_policy_updates() {
+        let heartbeat = HeartbeatManager::with_config(
+            HeartbeatConfig::default().with_foreground_interval(Duration::from_secs(30)),
+        );
+
+        assert_eq!(heartbeat.effective_interval(), Duration::from_secs(30));
+
+        heartbeat.set_app_state(HeartbeatAppState::Background);
+        assert_eq!(heartbeat.effective_interval(), Duration::from_secs(120));
+
+        heartbeat.set_nat_timeout(Some(Duration::from_secs(40)));
+        assert_eq!(heartbeat.effective_interval(), Duration::from_secs(28));
     }
 }

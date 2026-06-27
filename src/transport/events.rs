@@ -3,7 +3,7 @@
 //! 定义连接事件类型和观察者模式接口，用于在传输层和上层之间传递事件
 
 use crate::common::error::FlareError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 连接事件
 ///
@@ -84,6 +84,42 @@ pub trait ConnectionObserver: Send + Sync {
 
 /// 线程安全的、引用计数的观察者类型别名
 pub type ArcObserver = Arc<dyn ConnectionObserver>;
+
+pub(crate) fn notify_observers(
+    observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
+    event: &ConnectionEvent,
+    lock_name: &str,
+) {
+    let observers = match observers_arc.lock() {
+        Ok(observers) => observers.clone(),
+        Err(e) => {
+            tracing::warn!("{lock_name} lock poisoned: {e}");
+            return;
+        }
+    };
+
+    for observer in observers {
+        observer.on_event(event);
+    }
+}
+
+pub(crate) fn notify_observers_and_clear(
+    observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
+    event: &ConnectionEvent,
+    lock_name: &str,
+) {
+    let observers = match observers_arc.lock() {
+        Ok(mut observers) => std::mem::take(&mut *observers),
+        Err(e) => {
+            tracing::warn!("{lock_name} lock poisoned: {e}");
+            return;
+        }
+    };
+
+    for observer in observers {
+        observer.on_event(event);
+    }
+}
 
 // ============================================================================
 // 便利观察者实现
@@ -184,5 +220,66 @@ impl ConnectionObserver for CompositeObserver {
 impl Default for CompositeObserver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingObserver {
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ConnectionObserver for CountingObserver {
+        fn on_event(&self, _event: &ConnectionEvent) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for CountingObserver {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn terminal_notify_clears_and_drops_observers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observers = Arc::new(Mutex::new(Vec::<ArcObserver>::new()));
+        observers.lock().unwrap().push(Arc::new(CountingObserver {
+            calls: Arc::clone(&calls),
+            drops: Arc::clone(&drops),
+        }));
+
+        notify_observers_and_clear(
+            &observers,
+            &ConnectionEvent::Disconnected("test".to_string()),
+            "test observers",
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(observers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn non_terminal_notify_keeps_observers_registered() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observers = Arc::new(Mutex::new(Vec::<ArcObserver>::new()));
+        observers.lock().unwrap().push(Arc::new(CountingObserver {
+            calls: Arc::clone(&calls),
+            drops: Arc::clone(&drops),
+        }));
+
+        notify_observers(&observers, &ConnectionEvent::Connected, "test observers");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(observers.lock().unwrap().len(), 1);
     }
 }

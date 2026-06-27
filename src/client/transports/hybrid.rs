@@ -7,12 +7,13 @@ use crate::client::config::ClientConfig;
 use crate::client::transports::{Client, ClientCore};
 use crate::common::config_types::TransportProtocol;
 use crate::common::error::{FlareError, Result};
+use crate::common::platform::{MonotonicInstant, monotonic_now, timeout as platform_timeout};
 use crate::common::protocol::Frame;
 use crate::transport::events::ArcObserver;
 use async_trait::async_trait;
 use futures_util::future::select_all;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[cfg(feature = "quic")]
@@ -168,7 +169,7 @@ impl HybridClient {
         inflight: RaceInflight,
     ) -> Result<(Box<dyn Client>, TransportProtocol)> {
         let protocols = config.get_protocols();
-        let race_start = Instant::now();
+        let race_start = monotonic_now();
 
         Self::spawn_connection_tasks(config, &protocols, &shared_core, Arc::clone(&inflight));
 
@@ -217,7 +218,7 @@ impl HybridClient {
             let protocol_index = index;
 
             let handle = tokio::spawn(async move {
-                let start_time = Instant::now();
+                let start_time = monotonic_now();
                 tracing::debug!(
                     "开始建立网络连接: {:?} (优先级: {}, 地址: {})",
                     protocol_clone,
@@ -309,7 +310,7 @@ impl HybridClient {
         core: ClientCore,
         priority: usize,
     ) -> Result<(WebSocketClient, Duration)> {
-        let start_time = Instant::now();
+        let start_time = monotonic_now();
         let mut client = WebSocketClient::with_core(config, core);
 
         // 仅建立网络连接，不发送 CONNECT
@@ -339,7 +340,8 @@ impl HybridClient {
     ) -> Result<(QUICClient, Duration)> {
         // 在计时开始之前创建 endpoint（排除 endpoint 创建时间）
         // 这样可以更公平地比较网络连接时间，而不是包含 endpoint 创建时间
-        let (endpoint, client_config) = match QUICClient::create_quic_endpoint() {
+        let (endpoint, client_config) = match QUICClient::create_quic_endpoint_with_tls(&config.tls)
+        {
             Ok(ep) => ep,
             Err(e) => {
                 tracing::warn!(
@@ -353,7 +355,7 @@ impl HybridClient {
         };
 
         // 现在开始计时（只测量网络连接建立时间）
-        let start_time = Instant::now();
+        let start_time = monotonic_now();
 
         let mut client = match QUICClient::with_core_and_endpoint(
             config.clone(),
@@ -393,7 +395,7 @@ impl HybridClient {
         core: ClientCore,
         priority: usize,
     ) -> Result<(TCPClient, Duration)> {
-        let start_time = Instant::now();
+        let start_time = monotonic_now();
         let mut client = TCPClient::with_core(config, core);
         let _connection_arc = client.establish_network_connection().await?;
         let elapsed = start_time.elapsed();
@@ -561,7 +563,7 @@ impl HybridClient {
         mut successful_clients: Vec<SuccessfulConnection>,
         errors: Vec<FailedConnection>,
         shared_core: ClientCore,
-        race_start: Instant,
+        race_start: MonotonicInstant,
     ) -> Result<(Box<dyn Client>, TransportProtocol)> {
         // 打印所有协议的耗时信息
         Self::log_protocol_timings(&first_success, &successful_clients, &errors);
@@ -865,7 +867,7 @@ impl HybridClient {
         );
 
         // 等待响应或超时
-        match tokio::time::timeout(timeout, rx).await {
+        match platform_timeout(timeout, rx).await {
             Ok(Ok(resp)) => {
                 tracing::debug!(
                     "[HybridClient] send_frame_and_wait: 收到响应, message_id={}, resp.message_id={}",
@@ -918,7 +920,7 @@ impl HybridClient {
         let inflight: RaceInflight = Arc::new(StdMutex::new(Vec::new()));
         let inflight_cleanup = Arc::clone(&inflight);
 
-        let race_result = tokio::time::timeout(
+        let race_result = platform_timeout(
             race_timeout,
             Self::race_connect(config, core.clone(), inflight),
         )
@@ -1043,7 +1045,7 @@ mod hybrid_race_tests {
             let winner_disconnected = Arc::clone(&winner_disconnected);
             let winner_requested = Arc::clone(&winner_requested);
             async move {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                crate::common::platform::sleep(Duration::from_millis(5)).await;
                 (
                     TransportProtocol::WebSocket,
                     0,
@@ -1057,7 +1059,7 @@ mod hybrid_race_tests {
             let loser_disconnected = Arc::clone(&loser_disconnected);
             let loser_requested = Arc::clone(&loser_requested);
             async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                crate::common::platform::sleep(Duration::from_millis(200)).await;
                 (
                     TransportProtocol::QUIC,
                     1,

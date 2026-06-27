@@ -191,6 +191,10 @@ pub enum ConversationType {
     Customer = 5,
     /// 临时会话 - 前缀：6
     Temp = 6,
+    /// 频道 - 前缀：7
+    Channel = 7,
+    /// 广播 - 前缀：8
+    Broadcast = 8,
 }
 
 impl FromStr for ConversationType {
@@ -205,6 +209,8 @@ impl FromStr for ConversationType {
             "4" | "system" => Ok(ConversationType::System),
             "5" | "customer" => Ok(ConversationType::Customer),
             "6" | "temp" => Ok(ConversationType::Temp),
+            "7" | "channel" => Ok(ConversationType::Channel),
+            "8" | "broadcast" => Ok(ConversationType::Broadcast),
             _ => Err(anyhow::anyhow!("Unknown session type: {}", s)),
         }
     }
@@ -220,6 +226,8 @@ impl ConversationType {
             ConversationType::System => "4",
             ConversationType::Customer => "5",
             ConversationType::Temp => "6",
+            ConversationType::Channel => "7",
+            ConversationType::Broadcast => "8",
         }
     }
 
@@ -232,6 +240,8 @@ impl ConversationType {
             "4" => Ok(ConversationType::System),
             "5" => Ok(ConversationType::Customer),
             "6" => Ok(ConversationType::Temp),
+            "7" => Ok(ConversationType::Channel),
+            "8" => Ok(ConversationType::Broadcast),
             _ => Err(anyhow::anyhow!("Unknown session type prefix: {}", prefix)),
         }
     }
@@ -322,6 +332,34 @@ pub fn generate_group_conversation_id(group_id: &str) -> String {
 
     // 格式：2A{opaque_id}
     format!("2A{}", opaque_id)
+}
+
+/// 生成频道会话ID（CID格式：7A + OpaqueID）。
+///
+/// Channel 是订阅者模型，不引入新的扩散模式；服务端仍按会话成员/订阅者集合解析接收者。
+pub fn generate_channel_conversation_id(channel_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let input = format!("CHANNEL:v1:{}", channel_id);
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let hash = hasher.finalize();
+    let opaque_id = base32::encode(base32::Alphabet::Crockford, &hash[..10]);
+    format!("7A{}", opaque_id)
+}
+
+/// 生成广播会话ID（CID格式：8A + OpaqueID）。
+///
+/// Broadcast 只表达业务语义；实际接收者仍由订阅者集合/成员读模型决定。
+pub fn generate_broadcast_conversation_id(broadcast_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let input = format!("BROADCAST:v1:{}", broadcast_id);
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let hash = hasher.finalize();
+    let opaque_id = base32::encode(base32::Alphabet::Crockford, &hash[..10]);
+    format!("8A{}", opaque_id)
 }
 
 /// 生成AI助手会话ID（CID格式：3A + OpaqueID）
@@ -479,6 +517,8 @@ pub fn generate_server_conversation_id(conversation_type: ConversationType) -> S
 /// - 系统通知：`4A{16字符Base32}`
 /// - 客服会话：`5A{16字符Base32}`
 /// - 临时会话：`6A{26字符ULID}`
+/// - 频道：`7A{16字符Base32}`
+/// - 广播：`8A{16字符Base32}`
 ///
 /// # 参数
 /// * `conversation_id` - 要验证的会话ID

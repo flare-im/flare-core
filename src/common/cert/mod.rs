@@ -5,8 +5,10 @@
 
 pub mod converter;
 pub mod loader;
+pub mod pinning;
 pub mod server;
 
 pub use converter::*;
 pub use loader::*;
+pub use pinning::*;
 pub use server::*;

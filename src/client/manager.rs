@@ -9,12 +9,13 @@ use crate::client::heartbeat::HeartbeatManager;
 use crate::client::transports::Client;
 use crate::common::MessageParser;
 use crate::common::error::Result;
+use crate::common::platform::sleep;
 use crate::common::protocol::Frame;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
 
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 /// 客户端连接管理器

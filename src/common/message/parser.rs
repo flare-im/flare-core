@@ -10,6 +10,12 @@ use crate::common::protocol::{Frame, SerializationFormat};
 use crate::common::serializer::SerializationUtil;
 use lazy_static::lazy_static;
 
+/// 小包压缩阈值。
+///
+/// 移动 IM 的心跳、ACK、已读等小帧通常低于该值；压缩这些帧会额外消耗 CPU，
+/// gzip 头部还可能让包体变大。超过该阈值才应用协商出的压缩算法。
+pub const MIN_COMPRESSION_PAYLOAD_BYTES: usize = 512;
+
 // 协商前的消息解析器（全局共享）
 // 所有连接在协商完成前都使用相同的配置：JSON、不压缩、不加密
 // 使用场景：CONNECT、CONNECT_ACK、NEGOTIATION_READY 消息的解析和序列化
@@ -229,8 +235,12 @@ impl MessageParser {
 
         let data = serializer.serialize(frame)?;
 
-        // 2. 应用压缩
-        let compressed = CompressionUtil::compress(&data, compression)?;
+        // 2. 应用压缩。低于阈值的小包保持未压缩，避免压缩头和 CPU 开销反噬。
+        let compressed = if Self::should_compress_payload(data.len(), &compression) {
+            CompressionUtil::compress(&data, compression)?
+        } else {
+            data
+        };
 
         // 3. 应用加密
         self.encrypt_data(&compressed, encryption)
@@ -254,6 +264,11 @@ impl MessageParser {
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(CompressionAlgorithm::from_str)
             .unwrap_or(CompressionAlgorithm::None)
+    }
+
+    /// 判断序列化后的 payload 是否值得压缩。
+    pub fn should_compress_payload(payload_len: usize, compression: &CompressionAlgorithm) -> bool {
+        *compression != CompressionAlgorithm::None && payload_len > MIN_COMPRESSION_PAYLOAD_BYTES
     }
 
     /// 从 Frame 的 metadata 中读取序列化格式
@@ -394,9 +409,9 @@ impl MessageParser {
                     Ok(decompressed)
                 } else {
                     // 如果自动检测没有检测到压缩，但配置了压缩
-                    if allow_fallback {
+                    if allow_fallback || data.len() <= MIN_COMPRESSION_PAYLOAD_BYTES {
                         tracing::trace!(
-                            "自动检测未发现压缩，尝试作为未压缩数据处理: compression={:?}, data_len={}",
+                            "自动检测未发现压缩，按阈值策略作为未压缩数据处理: compression={:?}, data_len={}",
                             self.default_compression,
                             data.len()
                         );
@@ -547,6 +562,53 @@ mod tests {
 
         let data = parser.serialize(&frame).unwrap();
         let parsed = parser.parse(&data).unwrap();
+        assert_eq!(parsed.message_id, frame.message_id);
+    }
+
+    #[test]
+    #[cfg(feature = "compression-gzip")]
+    fn small_payload_skips_compression_and_strict_parse_accepts_it() {
+        let parser = MessageParser::new(
+            SerializationFormat::Protobuf,
+            CompressionAlgorithm::Gzip,
+            EncryptionAlgorithm::None,
+        );
+        let frame = FrameBuilder::new()
+            .with_command(crate::common::protocol::Command {
+                r#type: Some(
+                    crate::common::protocol::flare::core::commands::command::Type::System(ping()),
+                ),
+            })
+            .build();
+
+        let data = parser.serialize(&frame).unwrap();
+        let (_, detected) = CompressionUtil::auto_decompress(&data).unwrap();
+        assert_eq!(detected, CompressionAlgorithm::None);
+
+        let parsed = parser.parse_with_fallback(&data, false).unwrap();
+        assert_eq!(parsed.message_id, frame.message_id);
+    }
+
+    #[test]
+    #[cfg(feature = "compression-gzip")]
+    fn large_payload_uses_negotiated_compression() {
+        let parser = MessageParser::new(
+            SerializationFormat::Protobuf,
+            CompressionAlgorithm::Gzip,
+            EncryptionAlgorithm::None,
+        );
+        let frame = FrameBuilder::new()
+            .with_metadata(
+                "padding".to_string(),
+                vec![b'x'; MIN_COMPRESSION_PAYLOAD_BYTES * 2],
+            )
+            .build();
+
+        let data = parser.serialize(&frame).unwrap();
+        let (_, detected) = CompressionUtil::auto_decompress(&data).unwrap();
+        assert_eq!(detected, CompressionAlgorithm::Gzip);
+
+        let parsed = parser.parse_with_fallback(&data, false).unwrap();
         assert_eq!(parsed.message_id, frame.message_id);
     }
 

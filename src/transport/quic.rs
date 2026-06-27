@@ -1,6 +1,9 @@
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    notify_observers_and_clear as notify_connection_observers_and_clear,
+};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
@@ -79,11 +82,11 @@ impl QUICTransport {
                 Ok(data) => {
                     if !data.is_empty() {
                         debug!("[QUIC Transport] Received message: {} bytes", data.len());
-                        Self::_notify_observers(&observers_arc, &ConnectionEvent::Message(data));
+                        Self::notify_observers(&observers_arc, &ConnectionEvent::Message(data));
                     } else {
                         // EOF，流结束
                         debug!("[QUIC Transport] Stream EOF, closing");
-                        Self::_notify_observers(
+                        Self::notify_observers_and_clear(
                             &observers_arc,
                             &ConnectionEvent::Disconnected("Stream closed by peer".to_string()),
                         );
@@ -93,7 +96,7 @@ impl QUICTransport {
                 Err(e) => {
                     // 读取失败，发送错误事件
                     debug!("[QUIC Transport] Read error: {}", e);
-                    Self::_notify_observers(
+                    Self::notify_observers_and_clear(
                         &observers_arc,
                         &ConnectionEvent::Error(FlareError::io(e.to_string())),
                     );
@@ -180,17 +183,19 @@ impl QUICTransport {
         Ok(buf)
     }
 
-    // 私有辅助方法，用于通知所有观察者
-    fn _notify_observers(observers_arc: &Arc<Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
-        if let Ok(observers) = observers_arc.lock() {
-            for observer in observers.iter() {
-                observer.on_event(event);
-            }
-        }
+    fn notify_observers(observers_arc: &Arc<Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
+        notify_connection_observers(observers_arc, event, "quic observers");
     }
 
-    fn notify_observers(&self, event: &ConnectionEvent) {
-        Self::_notify_observers(&self.observers, event);
+    fn notify_observers_and_clear(
+        observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
+        event: &ConnectionEvent,
+    ) {
+        notify_connection_observers_and_clear(observers_arc, event, "quic observers");
+    }
+
+    fn notify_self_observers_and_clear(&self, event: &ConnectionEvent) {
+        Self::notify_observers_and_clear(&self.observers, event);
     }
 }
 
@@ -240,13 +245,15 @@ impl Connection for QUICTransport {
         }
 
         // 关闭发送流
-        let mut send = self.send_stream.lock().await;
-        send.finish().map_err(|e| FlareError::io(e.to_string()))?;
+        let close_result = {
+            let mut send = self.send_stream.lock().await;
+            send.finish().map_err(|e| FlareError::io(e.to_string()))
+        };
 
-        self.notify_observers(&ConnectionEvent::Disconnected(
+        self.notify_self_observers_and_clear(&ConnectionEvent::Disconnected(
             "Closed by client".to_string(),
         ));
-        Ok(())
+        close_result
     }
 
     fn last_active_time(&self) -> std::time::Instant {

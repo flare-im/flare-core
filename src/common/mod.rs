@@ -30,7 +30,7 @@ pub mod utils;
 // 重新导出常用类型和函数，方便使用
 
 pub use compression::{CompressionAlgorithm, CompressionUtil, Compressor};
-pub use config_types::{HeartbeatConfig, TlsConfig, TransportProtocol};
+pub use config_types::{HeartbeatAppState, HeartbeatConfig, TlsConfig, TransportProtocol};
 pub use constants::*;
 pub use conversation::*;
 pub use device::{

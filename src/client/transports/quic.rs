@@ -5,8 +5,10 @@
 use crate::client::config::ClientConfig;
 use crate::client::transports::common::{ClientConnectionHelper, ClientMessageObserver};
 use crate::client::transports::{Client, ClientCore};
+use crate::common::config_types::TlsConfig;
 use crate::common::error::{FlareError, Result};
 use crate::common::generate_id;
+use crate::common::platform::{sleep, timeout};
 use crate::common::protocol::Frame;
 use crate::transport::connection::Connection;
 use crate::transport::events::{ArcObserver, ConnectionEvent};
@@ -17,7 +19,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 
 /// QUIC 客户端
 ///
@@ -38,7 +39,7 @@ impl QUICClient {
         let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
         let core = ClientCore::new(&config);
 
-        let (endpoint, client_config) = Self::create_quic_endpoint()?;
+        let (endpoint, client_config) = Self::create_quic_endpoint_with_tls(&config.tls)?;
 
         Ok(Self {
             config,
@@ -74,7 +75,8 @@ impl QUICClient {
         let connection_id = config.connection_id.clone().unwrap_or_else(generate_id);
 
         let (endpoint, client_config) = endpoint_opt.unwrap_or_else(|| {
-            Self::create_quic_endpoint().expect("Failed to create QUIC endpoint")
+            Self::create_quic_endpoint_with_tls(&config.tls)
+                .expect("Failed to create QUIC endpoint")
         });
 
         Ok(Self {
@@ -92,10 +94,22 @@ impl QUICClient {
     ///
     /// 公开方法，允许外部预创建 endpoint（用于协议竞速优化）
     pub fn create_quic_endpoint() -> Result<(Endpoint, quinn::ClientConfig)> {
+        Self::create_quic_endpoint_with_tls(&TlsConfig::none())
+    }
+
+    pub fn create_quic_endpoint_with_tls(
+        tls: &TlsConfig,
+    ) -> Result<(Endpoint, quinn::ClientConfig)> {
         use crate::common::cert::create_client_config;
+        use crate::common::cert::create_client_config_with_tls;
         use quinn::crypto::rustls::QuicClientConfig;
 
-        let rustls_config = create_client_config().map_err(|e| {
+        let rustls_config = if tls.requires_custom_client_tls() {
+            create_client_config_with_tls(tls)
+        } else {
+            create_client_config()
+        }
+        .map_err(|e| {
             FlareError::protocol_error(format!("Failed to create client TLS config: {}", e))
         })?;
 
@@ -265,7 +279,7 @@ impl QUICClient {
         self.reconnect_attempts += 1;
 
         // 等待重连间隔
-        tokio::time::sleep(self.config.reconnect_interval).await;
+        sleep(self.config.reconnect_interval).await;
 
         // 关闭旧连接
         if let Some(conn) = self.connection.take() {

@@ -168,7 +168,15 @@ async fn main() -> Result<()> {
         // ============================================================
         .with_default_format(SerializationFormat::Protobuf) // 默认 Protobuf（客户端可指定格式）
         .with_default_compression(CompressionAlgorithm::Gzip) // 默认 Gzip 压缩
-        .with_default_encryption(EncryptionAlgorithm::Aes256Gcm) // 默认 AES-256-GCM 加密
+        .with_default_encryption(
+            // 默认 None：flare-im-core-sdk 客户端（iOS/Android 示例）未注册 app 层 AES 加密器，
+            // 与服务端协商 Aes256Gcm 会失败（连接被当作未知用户断开）。用 FLARE_ENC=aes 可切回演示加密。
+            if std::env::var("FLARE_ENC").map(|v| v.eq_ignore_ascii_case("aes")).unwrap_or(false) {
+                EncryptionAlgorithm::Aes256Gcm
+            } else {
+                EncryptionAlgorithm::None
+            },
+        )
         // ============================================================
         // 其他配置
         // ============================================================

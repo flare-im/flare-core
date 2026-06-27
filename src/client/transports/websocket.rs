@@ -5,6 +5,8 @@
 use crate::client::config::ClientConfig;
 use crate::client::transports::common::{ClientConnectionHelper, ClientMessageObserver};
 use crate::client::transports::{Client, ClientCore};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::common::cert::create_client_config_with_tls;
 use crate::common::error::{FlareError, Result};
 use crate::common::generate_id;
 use crate::common::platform::{sleep, timeout};
@@ -19,7 +21,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
 /// WebSocket 客户端
 ///
@@ -106,9 +108,18 @@ impl WebSocketClient {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let ws_stream_result = timeout(self.config.connect_timeout, connect_async(&url_str))
-                .await
-                .map_err(|_| FlareError::connection_timeout("Connection timeout".to_string()))?;
+            // 入站消息上限 10MB，防超大帧 OOM；与 TCP/QUIC MAX_FRAME_LENGTH 及服务端
+            // max_message_size 对齐（tungstenite 默认 64MB 过大，也削弱 gzip 解压炸弹面）。
+            let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                .max_message_size(Some(10 * 1024 * 1024))
+                .max_frame_size(Some(10 * 1024 * 1024));
+            let tls_connector = self.tls_connector(&url_str)?;
+            let ws_stream_result = timeout(
+                self.config.connect_timeout,
+                connect_async_tls_with_config(&url_str, Some(ws_config), false, tls_connector),
+            )
+            .await
+            .map_err(|_| FlareError::connection_timeout("Connection timeout".to_string()))?;
 
             let (ws_stream, _) =
                 ws_stream_result.map_err(|e| FlareError::connection_failed(e.to_string()))?;
@@ -190,6 +201,24 @@ impl WebSocketClient {
         &self.core
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tls_connector(&self, url: &str) -> Result<Option<Connector>> {
+        if url.starts_with("ws://") {
+            return Ok(None);
+        }
+        if !self.config.tls.requires_custom_client_tls() {
+            return Ok(None);
+        }
+        if !url.starts_with("wss://") {
+            return Err(FlareError::connection_failed(format!(
+                "WebSocket URL must start with ws:// or wss://, got: {url}"
+            )));
+        }
+        let tls_config = create_client_config_with_tls(&self.config.tls)
+            .map_err(|error| FlareError::connection_failed(error.to_string()))?;
+        Ok(Some(Connector::Rustls(Arc::new(tls_config))))
+    }
+
     /// 发送消息并等待服务端响应（按 Frame.message_id 匹配）
     pub async fn send_frame_and_wait(
         &mut self,
@@ -228,6 +257,40 @@ impl WebSocketClient {
 unsafe impl Send for WebSocketClient {}
 #[cfg(target_arch = "wasm32")]
 unsafe impl Sync for WebSocketClient {}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::common::config_types::TlsConfig;
+    use std::path::PathBuf;
+
+    #[test]
+    fn plain_ws_ignores_custom_client_tls() {
+        let mut config = ClientConfig::new("ws://127.0.0.1:60051/ws".to_string()).websocket();
+        config.tls = TlsConfig::default().with_ca_cert(PathBuf::from("/tmp/flare-ca.crt"));
+        let client = WebSocketClient::new(config);
+
+        let connector = client
+            .tls_connector("ws://127.0.0.1:60051/ws")
+            .expect("plain ws must not require a TLS connector");
+
+        assert!(connector.is_none());
+    }
+
+    #[test]
+    fn secure_wss_uses_custom_client_tls() {
+        let mut config = ClientConfig::new("wss://127.0.0.1:60051/ws".to_string()).websocket();
+        config.tls = TlsConfig::default()
+            .with_spki_sha256_pin("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        let client = WebSocketClient::new(config);
+
+        let connector = client
+            .tls_connector("wss://127.0.0.1:60051/ws")
+            .expect("wss should accept custom TLS settings");
+
+        assert!(connector.is_some());
+    }
+}
 
 #[async_trait]
 impl Client for WebSocketClient {
