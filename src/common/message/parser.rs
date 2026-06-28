@@ -10,10 +10,11 @@ use crate::common::protocol::{Frame, SerializationFormat};
 use crate::common::serializer::SerializationUtil;
 use lazy_static::lazy_static;
 
-/// 小包压缩阈值。
+/// Historical tuning threshold retained for callers that inspect parser policy.
 ///
-/// 移动 IM 的心跳、ACK、已读等小帧通常低于该值；压缩这些帧会额外消耗 CPU，
-/// gzip 头部还可能让包体变大。超过该阈值才应用协商出的压缩算法。
+/// Once a connection negotiates compression, every post-negotiation frame must
+/// use that compression algorithm. Leaving small frames uncompressed breaks the
+/// wire contract because the server parses confirmed connections strictly.
 pub const MIN_COMPRESSION_PAYLOAD_BYTES: usize = 512;
 
 // 协商前的消息解析器（全局共享）
@@ -235,7 +236,7 @@ impl MessageParser {
 
         let data = serializer.serialize(frame)?;
 
-        // 2. 应用压缩。低于阈值的小包保持未压缩，避免压缩头和 CPU 开销反噬。
+        // 2. 应用压缩。协商压缩后必须所有帧都压缩，否则严格解析端会按协商算法拒绝未压缩小包。
         let compressed = if Self::should_compress_payload(data.len(), &compression) {
             CompressionUtil::compress(&data, compression)?
         } else {
@@ -266,9 +267,10 @@ impl MessageParser {
             .unwrap_or(CompressionAlgorithm::None)
     }
 
-    /// 判断序列化后的 payload 是否值得压缩。
+    /// 判断序列化后的 payload 是否必须按协商结果压缩。
     pub fn should_compress_payload(payload_len: usize, compression: &CompressionAlgorithm) -> bool {
-        *compression != CompressionAlgorithm::None && payload_len > MIN_COMPRESSION_PAYLOAD_BYTES
+        let _ = payload_len;
+        *compression != CompressionAlgorithm::None
     }
 
     /// 从 Frame 的 metadata 中读取序列化格式
@@ -567,7 +569,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "compression-gzip")]
-    fn small_payload_skips_compression_and_strict_parse_rejects_it() {
+    fn small_payload_uses_negotiated_compression_and_strict_parse_accepts_it() {
         let parser = MessageParser::new(
             SerializationFormat::Protobuf,
             CompressionAlgorithm::Gzip,
@@ -583,13 +585,10 @@ mod tests {
 
         let data = parser.serialize(&frame).unwrap();
         let (_, detected) = CompressionUtil::auto_decompress(&data).unwrap();
-        assert_eq!(detected, CompressionAlgorithm::None);
+        assert_eq!(detected, CompressionAlgorithm::Gzip);
 
-        let parsed = parser.parse_with_fallback(&data, true).unwrap();
+        let parsed = parser.parse_with_fallback(&data, false).unwrap();
         assert_eq!(parsed.message_id, frame.message_id);
-
-        let error = parser.parse_with_fallback(&data, false).unwrap_err();
-        assert!(error.to_string().contains("严格模式"));
     }
 
     #[test]

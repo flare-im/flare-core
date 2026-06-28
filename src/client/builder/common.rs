@@ -52,6 +52,7 @@ impl ClientWrapper {
     }
 
     pub async fn send_frame_and_wait(&self, frame: &Frame, timeout: Duration) -> Result<Frame> {
+        self.ensure_ready_for_send().await?;
         let mut client = self.client.lock().await;
         client.send_frame_and_wait(frame, timeout).await
     }

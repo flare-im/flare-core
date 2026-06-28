@@ -59,6 +59,25 @@ fn wasm_event_loop_yield_uses_macrotask_not_microtask_spin() {
 }
 
 #[test]
+fn client_rpc_send_waits_for_negotiated_connection() {
+    let source = fs::read_to_string(manifest_dir().join("src/client/builder/common.rs"))
+        .expect("client wrapper source should be readable");
+
+    let start = source
+        .find("pub async fn send_frame_and_wait")
+        .expect("send_frame_and_wait should exist");
+    let next_method = source[start..]
+        .find("\n    pub async fn send_frame(")
+        .expect("send_frame should follow send_frame_and_wait");
+    let body = &source[start..start + next_method];
+
+    assert!(
+        body.contains("self.ensure_ready_for_send().await?"),
+        "request-response sends must wait for CONNECT negotiation before sending DATA frames"
+    );
+}
+
+#[test]
 fn wasm_runtime_logs_are_forwarded_to_page_log_area() {
     let lib_source =
         fs::read_to_string(manifest_dir().join("examples/wasm_websocket_client/src/lib.rs"))
