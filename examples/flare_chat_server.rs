@@ -171,7 +171,10 @@ async fn main() -> Result<()> {
         .with_default_encryption(
             // 默认 None：flare-im-core-sdk 客户端（iOS/Android 示例）未注册 app 层 AES 加密器，
             // 与服务端协商 Aes256Gcm 会失败（连接被当作未知用户断开）。用 FLARE_ENC=aes 可切回演示加密。
-            if std::env::var("FLARE_ENC").map(|v| v.eq_ignore_ascii_case("aes")).unwrap_or(false) {
+            if std::env::var("FLARE_ENC")
+                .map(|v| v.eq_ignore_ascii_case("aes"))
+                .unwrap_or(false)
+            {
                 EncryptionAlgorithm::Aes256Gcm
             } else {
                 EncryptionAlgorithm::None

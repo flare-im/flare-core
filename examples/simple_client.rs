@@ -72,11 +72,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("\n正在连接到聊天室服务器...");
 
     // 配置心跳（30秒间隔，60秒超时）
-    let heartbeat_config = HeartbeatConfig {
-        enabled: true,
-        interval: Duration::from_secs(30),
-        timeout: Duration::from_secs(60),
-    };
+    let heartbeat_config = HeartbeatConfig::new()
+        .with_interval(Duration::from_secs(30))
+        .with_timeout(Duration::from_secs(60));
 
     // 使用 ClientBuilder 创建客户端，只需定义消息处理逻辑
     // 展示所有可用的配置选项

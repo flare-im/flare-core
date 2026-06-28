@@ -124,85 +124,6 @@ impl DefaultServerHandle {
     pub fn new(connection_manager: Arc<dyn ConnectionManagerTrait>) -> Self {
         Self { connection_manager }
     }
-
-    /// 获取连接数量（同步方法）
-    ///
-    /// 尝试从 ConnectionManager 获取同步统计（如果可能），否则使用异步方法
-    fn get_connection_count(&self) -> usize {
-        // 尝试将 trait object 转换为具体的 ConnectionManager 类型
-        // 如果成功，使用同步方法；否则使用异步方法
-        if let Some(manager) = self
-            .connection_manager
-            .as_any()
-            .downcast_ref::<crate::server::connection::ConnectionManager>()
-        {
-            // 使用同步方法（更快）
-            manager.connection_count()
-        } else {
-            // 回退到异步方法
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::try_current()
-                    .map(|handle| {
-                        handle.block_on(async { self.connection_manager.connection_count().await })
-                    })
-                    .unwrap_or_else(|_| {
-                        tokio::runtime::Runtime::new()
-                            .unwrap()
-                            .block_on(async { self.connection_manager.connection_count().await })
-                    })
-            })
-        }
-    }
-
-    /// 获取用户数量（同步方法）
-    ///
-    /// 尝试从 ConnectionManager 获取同步统计（如果可能），否则使用异步方法
-    fn get_user_count(&self) -> usize {
-        // 尝试将 trait object 转换为具体的 ConnectionManager 类型
-        if let Some(manager) = self
-            .connection_manager
-            .as_any()
-            .downcast_ref::<crate::server::connection::ConnectionManager>()
-        {
-            // 使用同步方法（更快）
-            manager.stats().total_users
-        } else {
-            // 回退到异步方法：遍历所有连接并统计不同的用户 ID
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::try_current()
-                    .map(|handle| {
-                        handle.block_on(async {
-                            let connection_ids = self.connection_manager.list_connections().await;
-                            let mut user_set = std::collections::HashSet::new();
-                            for conn_id in connection_ids {
-                                if let Some((_, info)) =
-                                    self.connection_manager.get_connection(&conn_id).await
-                                    && let Some(user_id) = info.user_id
-                                {
-                                    user_set.insert(user_id);
-                                }
-                            }
-                            user_set.len()
-                        })
-                    })
-                    .unwrap_or_else(|_| {
-                        tokio::runtime::Runtime::new().unwrap().block_on(async {
-                            let connection_ids = self.connection_manager.list_connections().await;
-                            let mut user_set = std::collections::HashSet::new();
-                            for conn_id in connection_ids {
-                                if let Some((_, info)) =
-                                    self.connection_manager.get_connection(&conn_id).await
-                                    && let Some(user_id) = info.user_id
-                                {
-                                    user_set.insert(user_id);
-                                }
-                            }
-                            user_set.len()
-                        })
-                    })
-            })
-        }
-    }
 }
 
 #[async_trait]
@@ -240,10 +161,11 @@ impl ServerHandle for DefaultServerHandle {
     }
 
     fn connection_count(&self) -> usize {
-        self.get_connection_count()
+        // 同步快照：廉价原子读，禁止阻塞/网络（见 ConnectionManagerTrait::connection_count_snapshot）。
+        self.connection_manager.connection_count_snapshot()
     }
 
     fn user_count(&self) -> usize {
-        self.get_user_count()
+        self.connection_manager.user_count_snapshot()
     }
 }

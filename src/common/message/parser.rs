@@ -409,7 +409,7 @@ impl MessageParser {
                     Ok(decompressed)
                 } else {
                     // 如果自动检测没有检测到压缩，但配置了压缩
-                    if allow_fallback || data.len() <= MIN_COMPRESSION_PAYLOAD_BYTES {
+                    if allow_fallback {
                         tracing::trace!(
                             "自动检测未发现压缩，按阈值策略作为未压缩数据处理: compression={:?}, data_len={}",
                             self.default_compression,
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "compression-gzip")]
-    fn small_payload_skips_compression_and_strict_parse_accepts_it() {
+    fn small_payload_skips_compression_and_strict_parse_rejects_it() {
         let parser = MessageParser::new(
             SerializationFormat::Protobuf,
             CompressionAlgorithm::Gzip,
@@ -585,8 +585,11 @@ mod tests {
         let (_, detected) = CompressionUtil::auto_decompress(&data).unwrap();
         assert_eq!(detected, CompressionAlgorithm::None);
 
-        let parsed = parser.parse_with_fallback(&data, false).unwrap();
+        let parsed = parser.parse_with_fallback(&data, true).unwrap();
         assert_eq!(parsed.message_id, frame.message_id);
+
+        let error = parser.parse_with_fallback(&data, false).unwrap_err();
+        assert!(error.to_string().contains("严格模式"));
     }
 
     #[test]

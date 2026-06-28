@@ -124,11 +124,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let observer_clone = Arc::clone(&observer);
 
     // 配置心跳（30秒间隔，60秒超时）
-    let heartbeat_config = HeartbeatConfig {
-        enabled: true,
-        interval: Duration::from_secs(30),
-        timeout: Duration::from_secs(60),
-    };
+    let heartbeat_config = HeartbeatConfig::new()
+        .with_interval(Duration::from_secs(30))
+        .with_timeout(Duration::from_secs(60));
 
     // 使用 ObserverClientBuilder 创建客户端（协议竞速）
     // 展示观察者模式的特点：协议竞速、ConnectionObserver
