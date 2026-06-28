@@ -96,12 +96,14 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// 获取连接总数
     async fn connection_count(&self) -> usize;
 
-    /// 连接总数的同步快照（用于同步 stats 路径，禁止阻塞/网络）。
+    /// Returns a synchronous snapshot of the total connection count.
     ///
-    /// 实现必须以缓存/原子计数等廉价方式返回，分布式实现可返回最近一次快照。
+    /// Implementations must use cheap local state such as cached counters or atomics.
+    /// Distributed implementations may return their most recent local snapshot.
     fn connection_count_snapshot(&self) -> usize;
 
-    /// 绑定用户数的同步快照（约束同 [`connection_count_snapshot`]）。
+    /// Returns a synchronous user-count snapshot with the same constraints as
+    /// [`Self::connection_count_snapshot`].
     fn user_count_snapshot(&self) -> usize;
 
     /// 清理超时连接

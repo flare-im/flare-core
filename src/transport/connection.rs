@@ -15,11 +15,12 @@
 //!
 //! ## WASM async rules (do not violate)
 //!
-//! 1. **Never** `Runtime::block_on` — use [`crate::client::wasm_tokio::run_async`].
+//! 1. **Never** `Runtime::block_on` — use the wasm async helper exported by
+//!    `crate::client` for browser entry points.
 //! 2. **Never** `async_trait(?Send)` on this trait — it breaks `Box<dyn Connection + Send + Sync>`.
 //! 3. **Browser callbacks are sync** (`onmessage`, `onopen`): enqueue bytes with
-//!    [`ClientCore::push_wasm_inbound`](crate::client::transports::ClientCore::push_wasm_inbound)
-//!    and drain inside `wait_for_negotiation` / `run_async` LocalSet (see `ClientMessageObserver`).
+//!    `ClientCore::push_wasm_inbound` and drain inside `wait_for_negotiation` /
+//!    the wasm LocalSet (see `ClientMessageObserver`).
 //! 4. **Yield to the JS event loop** during long waits (`yield_to_event_loop`) so WebSocket
 //!    I/O callbacks can run while Rust awaits CONNECT_ACK.
 //!

@@ -1,10 +1,10 @@
-//! 客户端模块
+//! Client-side builders, transports, heartbeat management, and connection state.
 //!
-//! Native: WebSocket + QUIC + Hybrid
-//! WASM: WebSocket-only client stack
+//! Native builds support WebSocket, QUIC, TCP, and hybrid protocol racing depending
+//! on enabled features. WASM builds support the browser WebSocket client stack.
 //!
 //! WASM integrators: read [`crate::transport::connection`] for `Send`/`Sync` and LocalSet rules,
-//! and use [`wasm_tokio::run_async`](crate::client::wasm_tokio::run_async) for all async entry points.
+//! and use the wasm async helpers re-exported by this module for browser entry points.
 
 #[cfg(not(any(
     feature = "websocket",
