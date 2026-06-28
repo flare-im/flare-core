@@ -44,13 +44,13 @@ API documentation: [docs.rs/flare-core](https://docs.rs/flare-core)
 
 ```toml
 [dependencies]
-flare-core = "1.0.0"
+flare-core = "1.0.1"
 ```
 
 Server-only gateway:
 
 ```toml
-flare-core = { version = "1.0.0", default-features = false, features = [
+flare-core = { version = "1.0.1", default-features = false, features = [
     "server",
     "websocket",
     "quic",
@@ -62,7 +62,7 @@ flare-core = { version = "1.0.0", default-features = false, features = [
 Native client:
 
 ```toml
-flare-core = { version = "1.0.0", default-features = false, features = [
+flare-core = { version = "1.0.1", default-features = false, features = [
     "client",
     "websocket",
     "quic",
@@ -74,14 +74,14 @@ flare-core = { version = "1.0.0", default-features = false, features = [
 TCP and full feature sets:
 
 ```toml
-flare-core = { version = "1.0.0", features = ["tcp"] }
-flare-core = { version = "1.0.0", features = ["full"] }
+flare-core = { version = "1.0.1", features = ["tcp"] }
+flare-core = { version = "1.0.1", features = ["full"] }
 ```
 
 WASM WebSocket client:
 
 ```toml
-flare-core = { version = "1.0.0", default-features = false, features = ["wasm"] }
+flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] }
 ```
 
 ```bash

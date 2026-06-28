@@ -18,7 +18,7 @@
 //!   transport implementations.
 //! - [`client`] contains client builders, connection orchestration, heartbeat
 //!   handling, reconnect support, and native or wasm WebSocket clients.
-//! - [`server`] contains native server builders, connection management,
+//! - `server` contains native server builders, connection management,
 //!   negotiation, event handling, and transport listeners.
 //!
 //! # Feature Flags
@@ -40,6 +40,47 @@
 //! exchange, and disconnect or reconnect cleanup. The public builders hide most
 //! of this lifecycle while keeping failure semantics explicit through typed
 //! errors and connection events.
+//!
+//! # Choosing An Entry Point
+//!
+//! - Start with `client::FlareClientBuilder` or `server::FlareServerBuilder`
+//!   for production integrations that need traits, middleware, and connection
+//!   lifecycle hooks.
+//! - Use `client::ClientBuilder` or `server::ServerBuilder` for compact
+//!   examples and closure-based prototypes.
+//! - Use [`transport`] directly only when building a custom runtime adapter or
+//!   transport-level integration.
+//!
+//! # Minimal Server Sketch
+//!
+//! ```no_run
+//! use async_trait::async_trait;
+//! use flare_core::common::error::Result;
+//! use flare_core::common::protocol::{Frame, PayloadCommand};
+//! use flare_core::server::events::handler::ServerEventHandler;
+//! use flare_core::server::FlareServerBuilder;
+//! use std::sync::Arc;
+//!
+//! struct Handler;
+//!
+//! #[async_trait]
+//! impl ServerEventHandler for Handler {
+//!     async fn handle_message(
+//!         &self,
+//!         _command: &PayloadCommand,
+//!         _connection_id: &str,
+//!     ) -> Result<Option<Frame>> {
+//!         Ok(None)
+//!     }
+//! }
+//!
+//! # #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
+//! # async fn run() -> Result<()> {
+//! let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(Handler)).build()?;
+//! server.run().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Documentation
 //!

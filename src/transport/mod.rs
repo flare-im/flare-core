@@ -1,8 +1,13 @@
 //! Transport layer: WebSocket / QUIC / TCP connections and frame I/O.
 //!
+//! This module is intentionally lower level than the public client and server
+//! builders. Use it when implementing custom transports, browser adapters,
+//! protocol-racing infrastructure, or transport-level tests.
+//!
 //! Platform split:
-//! - **Native**: `websocket`, `quic`, `tcp`, `framing`, `factory`
-//! - **WASM**: `websocket_wasm` only
+//!
+//! - **Native**: `websocket`, `quic`, `tcp`, `framing`, and `factory`.
+//! - **WASM**: `websocket_wasm` only.
 //!
 //! [`connection::Connection`] documents the cross-platform `Send + Sync` contract and WASM
 //! LocalSet / JS event-loop rules — read it before adding SDK or custom transports.

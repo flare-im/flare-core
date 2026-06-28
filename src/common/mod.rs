@@ -1,13 +1,19 @@
-//! Flare Core 公共模块
+//! Shared protocol, codec, error, and runtime support for `flare-core`.
 //!
-//! 提供核心功能的公共实现，包括：
-//! - 错误处理：统一的错误类型和处理机制
-//! - 协议定义：消息协议和命令定义
-//! - 压缩/序列化：可扩展的压缩和序列化框架
-//! - 消息处理：消息解析和处理机制
-//! - 连接管理：连接存储和查询
-//! - 会话ID生成：客户端和服务端通用的会话ID生成和验证
-//! - 工具函数：常用工具和常量
+//! This module is the stable foundation used by both client and server builds.
+//! It intentionally contains transport-neutral building blocks:
+//!
+//! - [`protocol`] defines the public frame and command model.
+//! - [`message`] provides parsers, processors, middleware, and pipelines.
+//! - [`serializer`], [`compression`], and [`encryption`] provide pluggable wire
+//!   transformations.
+//! - [`error`] exposes typed errors and localized error construction.
+//! - [`config_types`] contains cross-cutting configuration such as heartbeat,
+//!   TLS, and transport selection.
+//! - [`features`] reports the capability set compiled into the current binary.
+//!
+//! Higher-level IM semantics should not be placed here. Keep this module
+//! focused on reusable transport and protocol primitives.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cert;
@@ -27,7 +33,7 @@ pub mod protocol;
 pub mod serializer;
 pub mod utils;
 
-// 重新导出常用类型和函数，方便使用
+// Commonly used types are re-exported here for ergonomic imports.
 
 pub use compression::{CompressionAlgorithm, CompressionUtil, Compressor};
 pub use config_types::{HeartbeatAppState, HeartbeatConfig, TlsConfig, TransportProtocol};

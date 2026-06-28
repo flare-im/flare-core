@@ -1,6 +1,20 @@
-//! 服务端模块
+//! Native server runtime for WebSocket, QUIC, TCP, and hybrid listeners.
 //!
-//! 提供服务端实现，支持 WebSocket 和 QUIC 协议
+//! The server module is available on native targets when the `server` feature is
+//! enabled. It provides:
+//!
+//! - [`FlareServerBuilder`] for production integrations built around
+//!   [`ServerEventHandler`], authentication, message pipelines, and connection
+//!   lifecycle hooks.
+//! - [`ServerBuilder`] for closure-based demos and compact prototypes.
+//! - [`ObserverServerBuilder`] for integrations that need explicit connection
+//!   observation.
+//! - [`ConnectionManager`] and [`ServerHandle`] for sending frames, broadcasting,
+//!   disconnecting clients, and inspecting connection snapshots.
+//!
+//! The server stack owns transport admission, negotiation, heartbeat detection,
+//! backpressure-aware fanout, and cleanup. Business-specific message semantics
+//! should remain in application handlers or higher-level services.
 
 #[cfg(not(any(feature = "websocket", feature = "quic", feature = "tcp")))]
 compile_error!(
@@ -36,7 +50,7 @@ pub use transports::TCPServer;
 pub use transports::WebSocketServer;
 pub use transports::{ConnectionHandler, HybridServer, Server};
 
-// 重新导出错误类型，服务端使用 ServerError
+// Re-export server-oriented error types for ergonomic imports.
 pub use crate::common::error::Result;
 pub use crate::common::error::ServerError;
 

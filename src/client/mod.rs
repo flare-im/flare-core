@@ -3,6 +3,16 @@
 //! Native builds support WebSocket, QUIC, TCP, and hybrid protocol racing depending
 //! on enabled features. WASM builds support the browser WebSocket client stack.
 //!
+//! Main entry points:
+//!
+//! - `FlareClientBuilder` for production integrations with a message listener
+//!   and pipeline-oriented lifecycle.
+//! - `ClientBuilder` for closure-based examples and simple applications.
+//! - `ObserverClientBuilder` for native integrations that need explicit
+//!   connection observation and protocol racing.
+//! - `HybridClient` for native transport racing when multiple protocols are
+//!   available.
+//!
 //! WASM integrators: read [`crate::transport::connection`] for `Send`/`Sync` and LocalSet rules,
 //! and use the wasm async helpers re-exported by this module for browser entry points.
 
