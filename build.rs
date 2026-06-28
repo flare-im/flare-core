@@ -2,6 +2,7 @@ use std::io::Result;
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=PROTOC");
+    println!("cargo:rerun-if-env-changed=FLARE_CORE_REGENERATE_PROTO");
 
     // 创建输出目录
     std::fs::create_dir_all("src/common/protocol")?;
@@ -11,6 +12,13 @@ fn main() -> Result<()> {
     let commands_path = "src/common/protocol/flare.core.commands.rs";
     let files_exist = std::path::Path::new(flare_core_path).exists()
         && std::path::Path::new(commands_path).exists();
+    let regenerate_proto = std::env::var_os("FLARE_CORE_REGENERATE_PROTO").is_some();
+
+    if files_exist && !regenerate_proto {
+        println!("cargo:rerun-if-changed=proto/frame.proto");
+        println!("cargo:rerun-if-changed=proto/commands.proto");
+        return Ok(());
+    }
 
     // 检查是否有 PROTOC 环境变量
     let has_protoc = std::env::var("PROTOC").is_ok();
@@ -21,7 +29,7 @@ fn main() -> Result<()> {
         .unwrap_or(false);
 
     // 如果文件已存在且没有可用 protoc，跳过编译（使用已生成的文件）
-    if files_exist && !has_protoc && !has_protoc_on_path {
+    if files_exist && !regenerate_proto && !has_protoc && !has_protoc_on_path {
         println!("cargo:warning=protoc not found, using pre-generated protobuf files");
         println!("cargo:warning=If you modify proto files, install protoc: brew install protobuf");
         println!("cargo:rerun-if-changed=proto/frame.proto");
@@ -30,7 +38,7 @@ fn main() -> Result<()> {
     }
 
     // 如果有 protoc 或文件不存在，尝试编译
-    if has_protoc || has_protoc_on_path || !files_exist {
+    if regenerate_proto || has_protoc || has_protoc_on_path || !files_exist {
         // 配置prost-build输出路径
         let mut config = prost_build::Config::new();
         config.out_dir("src/common/protocol");
@@ -72,7 +80,9 @@ fn main() -> Result<()> {
                 "super::commands::Command",
             )
             .replace("commands::Command", "super::commands::Command");
-        std::fs::write(flare_core_path, fixed_content)?;
+        if fixed_content != content {
+            std::fs::write(flare_core_path, fixed_content)?;
+        }
     }
 
     println!("cargo:rerun-if-changed=proto/frame.proto");
