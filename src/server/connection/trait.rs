@@ -210,6 +210,29 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         Ok(())
     }
 
+    /// 同一 Frame 发送到多个连接（群扇出主路径）。
+    ///
+    /// 默认逐连接（每连接自协商格式序列化）；连接管理器实现按
+    /// （序列化格式, 压缩）分组、每组序列化一次共享给组内无加密连接。
+    ///
+    /// # 返回
+    /// （成功连接数, 失败连接数）
+    async fn send_frame_to_connections(
+        &self,
+        connection_ids: &[String],
+        frame: &Frame,
+    ) -> (i32, i32) {
+        let mut success = 0i32;
+        let mut failure = 0i32;
+        for connection_id in connection_ids {
+            match self.send_frame_to(connection_id, frame, None).await {
+                Ok(()) => success += 1,
+                Err(_) => failure += 1,
+            }
+        }
+        (success, failure)
+    }
+
     /// 广播 Frame 到所有连接（自动序列化）
     ///
     /// # 参数

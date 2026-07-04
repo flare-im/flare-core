@@ -119,88 +119,30 @@ impl ServerMessageWrapper {
         manager: &Arc<crate::server::connection::ConnectionManager>,
     ) {
         let manager_trait = Arc::clone(manager) as Arc<dyn ConnectionManagerTrait>;
-        // 使用 Arc<str> 避免 String clone，减少内存分配
         let conn_id: Arc<str> = Arc::from(connection_id);
-        // message_id 是 String，需要 clone（因为需要移动到异步任务中）
         let message_id = frame_to_send.message_id.clone();
-        // 使用 Arc<str> 避免 String clone，减少内存分配
         let log_ctx: Arc<str> = Arc::from(log_context);
 
         tokio::spawn(async move {
-            if let Some((conn, conn_info)) = manager_trait.get_connection(&conn_id).await {
-                // 先克隆值用于日志（避免在创建 parser 时移动）
-                let format = conn_info.serialization_format;
-                let compression = conn_info.compression.clone();
-                let encryption = conn_info.encryption.clone();
-                let negotiation_completed = conn_info.negotiation_completed;
-
-                // 使用缓存的 parser（避免每次消息发送都创建新的 parser）
-                let parser = if negotiation_completed {
-                    // 协商已完成，使用缓存的 parser
-                    conn_info.cached_parser.clone().unwrap_or_else(|| {
-                        // 如果缓存不存在（不应该发生），回退到动态创建
-                        tracing::warn!(
-                            "[ServerMessageWrapper] 协商已完成但缓存 parser 不存在，回退到动态创建: connection_id={}",
-                            conn_id
-                        );
-                        std::sync::Arc::new(crate::common::MessageParser::new(
-                            format,
-                            compression.clone(),
-                            encryption.clone(),
-                        ))
-                    })
-                } else {
-                    // 协商未完成，使用默认的 JSON、不压缩、不加密 parser
-                    // 注意：这里可以创建一个全局共享的 parser，但为了简单起见，暂时每次创建
-                    // 因为协商未完成的消息很少
-                    std::sync::Arc::new(crate::common::MessageParser::new(
-                        crate::common::protocol::SerializationFormat::Json,
-                        crate::common::compression::CompressionAlgorithm::None,
-                        crate::common::encryption::EncryptionAlgorithm::None,
-                    ))
-                };
-
-                tracing::trace!(
-                    "[ServerMessageWrapper] {}: 发送消息: connection_id={}, message_id={}, format={:?}",
-                    log_ctx,
-                    conn_id,
-                    message_id,
-                    format
-                );
-
-                if let Ok(data) = parser.serialize(&frame_to_send) {
-                    let mut c = conn.lock().await;
-                    match c.send(&data).await {
-                        Ok(_) => tracing::debug!(
-                            "[ServerMessageWrapper] {}: 已发送, connection_id={}, message_id={}, data_len={}",
-                            log_ctx,
-                            conn_id,
-                            message_id,
-                            data.len()
-                        ),
-                        Err(e) => tracing::error!(
-                            "[ServerMessageWrapper] {}: 发送失败, connection_id={}, message_id={}, error={}",
-                            log_ctx,
-                            conn_id,
-                            message_id,
-                            e
-                        ),
-                    }
-                } else {
-                    tracing::error!(
-                        "[ServerMessageWrapper] {}: 序列化失败, connection_id={}, message_id={}",
-                        log_ctx,
-                        conn_id,
-                        message_id
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "[ServerMessageWrapper] {}: 连接不存在，无法发送消息: connection_id={}, message_id={}",
+            match manager_trait
+                .send_frame_to(conn_id.as_ref(), &frame_to_send, None)
+                .await
+            {
+                Ok(()) => tracing::debug!(
+                    "[ServerMessageWrapper] {}: 已发送, connection_id={}, message_id={}",
                     log_ctx,
                     conn_id,
                     message_id
-                );
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        "[ServerMessageWrapper] {}: 发送失败, connection_id={}, message_id={}, error={}",
+                        log_ctx,
+                        conn_id,
+                        message_id,
+                        e
+                    );
+                }
             }
         });
     }

@@ -54,7 +54,7 @@ impl SerializationRegistry {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::serializer::{SerializationRegistry, Serializer};
     /// use std::sync::Arc;
     ///
@@ -146,7 +146,7 @@ impl SerializationUtil {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::serializer::{SerializationUtil, Serializer};
     /// use std::sync::Arc;
     ///

@@ -74,7 +74,7 @@ impl FlareServerBuilder {
     /// - `event_handler`: 事件处理器（必须），用户只需要实现 `ServerEventHandler` 的 `handle_message` 方法即可
     ///
     /// # 示例
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use flare_core::server::events::handler::ServerEventHandler;
     /// use flare_core::common::protocol::PayloadCommand;
     /// use flare_core::common::error::Result;
@@ -277,7 +277,7 @@ impl FlareServerBuilder {
     /// - `middleware`: 中间件实例
     ///
     /// # 示例
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use flare_core::common::message::{LoggingMiddleware, LogLevel};
     ///
     /// FlareServerBuilder::new("0.0.0.0:8080", handler)

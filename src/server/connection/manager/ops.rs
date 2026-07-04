@@ -100,22 +100,164 @@ impl ConnectionManager {
             .sum()
     }
 
-    pub(super) fn record_successful_connection_id(
-        successful_ids: &Arc<std::sync::Mutex<Vec<String>>>,
-        connection_id: String,
-    ) {
-        if let Ok(mut ids) = successful_ids.lock() {
-            ids.push(connection_id);
-        }
+    pub(super) async fn fanout_serialized_frame_to_auth_snapshots(
+        &self,
+        snapshots: Vec<ConnectionAuthSnapshot>,
+        frame: &crate::common::protocol::Frame,
+        data: &[u8],
+        fanout: &'static str,
+    ) -> Vec<String> {
+        stream::iter(snapshots)
+            .map(|snapshot| async move {
+                let connection_id = snapshot.0.clone();
+                match self
+                    .send_serialized_frame_to_auth_snapshot_without_active(snapshot, frame, data)
+                    .await
+                {
+                    Ok(connection_id) => Some(connection_id),
+                    Err(error) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            error = ?error,
+                            fanout,
+                            "Connection frame fanout failed"
+                        );
+                        None
+                    }
+                }
+            })
+            .buffer_unordered(self.fanout_concurrency)
+            .filter_map(|connection_id| async move { connection_id })
+            .collect()
+            .await
     }
 
-    pub(super) fn take_successful_connection_ids(
-        successful_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    /// 多连接同帧扇出：无加密连接按（序列化格式, 压缩）分组，**每组只序列化一次**共享字节；
+    /// 带加密连接回退逐连接序列化（密文可能与连接态绑定，不可跨连接共享）。
+    /// 群聊单节点 N 订阅者的下行从 N 次 serialize+compress → 组数次（通常 1）。
+    /// 返回（成功数, 失败数），成功连接统一批量刷新活跃时间。
+    pub(super) async fn fanout_frame_grouped_by_encoding(
+        &self,
+        connection_ids: Vec<String>,
+        frame: &crate::common::protocol::Frame,
+    ) -> (i32, i32) {
+        use std::collections::HashMap;
+
+        let snapshots = self.connection_snapshots_for_ids(connection_ids);
+        let total = snapshots.len();
+        if total == 0 {
+            return (0, 0);
+        }
+
+        let mut plain_groups: HashMap<
+            (
+                crate::common::protocol::SerializationFormat,
+                crate::common::compression::CompressionAlgorithm,
+            ),
+            Vec<ConnectionSnapshot>,
+        > = HashMap::new();
+        let mut encrypted: Vec<ConnectionSnapshot> = Vec::new();
+        for snapshot in snapshots {
+            let info = &snapshot.2;
+            if info.encryption == crate::common::encryption::EncryptionAlgorithm::None {
+                plain_groups
+                    .entry((info.serialization_format, info.compression.clone()))
+                    .or_default()
+                    .push(snapshot);
+            } else {
+                encrypted.push(snapshot);
+            }
+        }
+
+        let mut successful: Vec<String> = Vec::with_capacity(total);
+        for ((format, compression), group) in plain_groups {
+            let parser = crate::common::MessageParser::new(
+                format,
+                compression,
+                crate::common::encryption::EncryptionAlgorithm::None,
+            );
+            let data = match parser.serialize(frame) {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        group_size = group.len(),
+                        "grouped frame serialization failed; group counted as failures"
+                    );
+                    continue;
+                }
+            };
+            let sent: Vec<String> = stream::iter(group)
+                .map(|snapshot| {
+                    let data = &data;
+                    async move {
+                        let (connection_id, connection, info) = snapshot;
+                        if let Err(error) =
+                            Self::ensure_frame_allowed_for_connection(&connection_id, &info, frame)
+                        {
+                            tracing::warn!(connection_id = %connection_id, error = ?error, "grouped fanout skipped");
+                            return None;
+                        }
+                        match self
+                            .send_to_connection_handle(&connection_id, connection, data)
+                            .await
+                        {
+                            Ok(()) => Some(connection_id),
+                            Err(error) => {
+                                tracing::warn!(connection_id = %connection_id, error = ?error, "grouped fanout write failed");
+                                None
+                            }
+                        }
+                    }
+                })
+                .buffer_unordered(self.fanout_concurrency)
+                .filter_map(|connection_id| async move { connection_id })
+                .collect()
+                .await;
+            successful.extend(sent);
+        }
+        if !encrypted.is_empty() {
+            let sent = self
+                .fanout_frame_to_snapshots(encrypted, frame, None, "grouped_fanout_encrypted")
+                .await;
+            successful.extend(sent);
+        }
+
+        let success = successful.len() as i32;
+        self.update_connections_active(successful);
+        (success, (total as i32).saturating_sub(success))
+    }
+
+    pub(super) async fn fanout_frame_to_snapshots(
+        &self,
+        snapshots: Vec<ConnectionSnapshot>,
+        frame: &crate::common::protocol::Frame,
+        parser: Option<&crate::common::MessageParser>,
+        fanout: &'static str,
     ) -> Vec<String> {
-        Arc::try_unwrap(successful_ids)
-            .ok()
-            .and_then(|ids| ids.into_inner().ok())
-            .unwrap_or_default()
+        stream::iter(snapshots)
+            .map(|snapshot| async move {
+                let connection_id = snapshot.0.clone();
+                match self
+                    .send_frame_to_snapshot_without_active(snapshot, frame, parser)
+                    .await
+                {
+                    Ok(connection_id) => Some(connection_id),
+                    Err(error) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            error = ?error,
+                            fanout,
+                            "Connection frame fanout failed"
+                        );
+                        None
+                    }
+                }
+            })
+            .buffer_unordered(self.fanout_concurrency)
+            .filter_map(|connection_id| async move { connection_id })
+            .collect()
+            .await
     }
 
     /// 设置连接为已验证状态

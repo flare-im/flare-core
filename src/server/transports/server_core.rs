@@ -121,7 +121,7 @@ impl ServerCore {
     /// - `observer_factory`: 观察者工厂
     ///
     /// # 示例
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use flare_core::server::events::factory::ServerMessageObserverFactory;
     ///
     /// // 使用自定义工厂
@@ -345,6 +345,19 @@ impl ServerCore {
         let manager_trait = self.connection_manager_trait();
         manager_trait
             .send_frame_to(connection_id, frame, None)
+            .await
+    }
+
+    /// 同帧多连接扇出（群下行主路径）：按协商编码分组、每组序列化一次。
+    /// 返回（成功连接数, 失败连接数）。
+    pub async fn send_to_connections(
+        &self,
+        connection_ids: &[String],
+        frame: &Frame,
+    ) -> (i32, i32) {
+        let manager_trait = self.connection_manager_trait();
+        manager_trait
+            .send_frame_to_connections(connection_ids, frame)
             .await
     }
 

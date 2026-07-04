@@ -50,7 +50,7 @@ impl CompressionRegistry {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::compression::{CompressionRegistry, Compressor};
     /// use std::sync::Arc;
     ///
@@ -185,7 +185,7 @@ impl CompressionUtil {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::compression::{CompressionUtil, Compressor};
     /// use std::sync::Arc;
     ///

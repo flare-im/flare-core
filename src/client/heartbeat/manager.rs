@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, mpsc};
 /// 心跳管理器
 pub struct HeartbeatManager {
     config: Arc<RwLock<HeartbeatConfig>>,
+    last_ping: Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
     // 使用 std::sync::Mutex，因为 record_pong 可能从同步上下文调用
     last_pong: Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
     stop_tx: Option<mpsc::Sender<()>>,
@@ -47,6 +48,7 @@ impl HeartbeatManager {
     pub fn with_shared_config(config: Arc<RwLock<HeartbeatConfig>>) -> Self {
         Self {
             config,
+            last_ping: Arc::new(std::sync::Mutex::new(None)),
             last_pong: Arc::new(std::sync::Mutex::new(None)),
             stop_tx: None,
         }
@@ -100,6 +102,7 @@ impl HeartbeatManager {
         self.stop_tx = Some(tx);
 
         let config = Arc::clone(&self.config);
+        let last_ping = Arc::clone(&self.last_ping);
         let last_pong = Arc::clone(&self.last_pong);
 
         let heartbeat_loop = async move {
@@ -107,6 +110,16 @@ impl HeartbeatManager {
                 let sleep_duration = read_config(&config).effective_interval();
                 tokio::select! {
                     _ = sleep(sleep_duration) => {
+                        if unanswered_ping_timed_out(
+                            &last_ping,
+                            &last_pong,
+                            read_config(&config).timeout,
+                        ) {
+                            let mut conn = connection.lock().await;
+                            let _ = conn.close().await;
+                            break;
+                        }
+
                         // 发送心跳
                         let ping_frame = crate::common::protocol::frame_with_system_command(
                             crate::common::protocol::ping(),
@@ -124,32 +137,19 @@ impl HeartbeatManager {
                             }
                         };
 
+                        record_ping_start_if_idle(&last_ping, &last_pong);
+
                         // 使用 tokio::sync::Mutex，支持跨 await
                         let send_result = {
                             let mut conn = connection.lock().await;
                             conn.send(&data).await
                         };
 
-                        if send_result.is_ok() {
-                            // 检查是否超时（在锁外检查）
-                            let should_close = {
-                                let timeout_duration = read_config(&config).timeout;
-                                let last = last_pong.lock().unwrap();
-                                if let Some(last_pong_time) = *last {
-                                    last_pong_time.elapsed() > timeout_duration
-                                } else {
-                                    false
-                                }
-                            };
-
-                            if should_close {
-                                // 心跳超时，触发断开
-                                {
-                                    let mut conn = connection.lock().await;
-                                    let _ = conn.close().await;
-                                }
-                                break;
-                            }
+                        if let Err(error) = send_result {
+                            tracing::warn!("[HeartbeatManager] 发送心跳失败: {}", error);
+                            let mut conn = connection.lock().await;
+                            let _ = conn.close().await;
+                            break;
                         }
                     }
                     _ = rx.recv() => {
@@ -182,14 +182,55 @@ impl HeartbeatManager {
 
     /// 检查心跳是否超时
     pub fn is_timeout(&self) -> bool {
-        if let Ok(last) = self.last_pong.lock()
-            && let Some(last_pong_time) = *last
-        {
-            return last_pong_time.elapsed() > self.current_config().timeout;
-        }
-        // 如果从未收到 PONG，且启动后已超过超时时间，则认为超时
-        false
+        unanswered_ping_timed_out(
+            &self.last_ping,
+            &self.last_pong,
+            self.current_config().timeout,
+        )
     }
+}
+
+fn unanswered_ping_timed_out(
+    last_ping: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
+    last_pong: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
+    timeout: Duration,
+) -> bool {
+    let Ok(last_ping) = last_ping.lock() else {
+        return false;
+    };
+    let Some(ping_time) = *last_ping else {
+        return false;
+    };
+    if pong_covers_ping(last_pong, ping_time) {
+        return false;
+    }
+    ping_time.elapsed() > timeout
+}
+
+fn record_ping_start_if_idle(
+    last_ping: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
+    last_pong: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
+) {
+    let Ok(mut last_ping) = last_ping.lock() else {
+        return;
+    };
+    if let Some(ping_time) = *last_ping
+        && !pong_covers_ping(last_pong, ping_time)
+    {
+        return;
+    }
+    *last_ping = Some(monotonic_now());
+}
+
+fn pong_covers_ping(
+    last_pong: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
+    ping_time: MonotonicInstant,
+) -> bool {
+    last_pong
+        .lock()
+        .ok()
+        .and_then(|last_pong| *last_pong)
+        .is_some_and(|pong_time| pong_time >= ping_time)
 }
 
 #[cfg(test)]
@@ -268,6 +309,38 @@ mod tests {
             sends.load(Ordering::SeqCst),
             stopped_count,
             "heartbeat should stop sending after stop signal is processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn unanswered_ping_closes_connection_after_timeout() {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let connection: Arc<Mutex<Box<dyn Connection>>> =
+            Arc::new(Mutex::new(Box::new(CountingConnection {
+                sends: Arc::clone(&sends),
+                closes: Arc::clone(&closes),
+                last_active: monotonic_now(),
+            })));
+        let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
+
+        let mut heartbeat =
+            HeartbeatManager::new(Duration::from_millis(5), Duration::from_millis(15));
+        heartbeat.start(connection, parser);
+
+        let deadline = monotonic_now() + Duration::from_millis(200);
+        while closes.load(Ordering::SeqCst) == 0 && monotonic_now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        heartbeat.stop();
+
+        assert!(
+            sends.load(Ordering::SeqCst) > 0,
+            "heartbeat should send ping before timeout"
+        );
+        assert!(
+            closes.load(Ordering::SeqCst) > 0,
+            "unanswered ping should close the connection"
         );
     }
 

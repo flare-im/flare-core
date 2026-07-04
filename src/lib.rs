@@ -77,7 +77,7 @@
 //! # #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 //! # async fn run() -> Result<()> {
 //! let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(Handler)).build()?;
-//! server.run().await?;
+//! server.start().await?;
 //! # Ok(())
 //! # }
 //! ```

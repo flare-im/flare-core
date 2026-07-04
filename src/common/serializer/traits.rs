@@ -12,7 +12,8 @@ use crate::common::protocol::Frame;
 /// # 示例
 ///
 /// ```rust
-/// use flare_core::common::serializer::{Serializer, SerializationFormat};
+/// use flare_core::common::serializer::Serializer;
+/// use flare_core::common::protocol::SerializationFormat;
 /// use flare_core::common::protocol::Frame;
 /// use flare_core::common::error::Result;
 ///

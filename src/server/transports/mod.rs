@@ -54,6 +54,7 @@ pub trait ConnectionHandler: Send + Sync {
 /// # 示例
 ///
 /// ```rust
+/// use async_trait::async_trait;
 /// use flare_core::server::Server;
 /// use flare_core::common::error::Result;
 ///

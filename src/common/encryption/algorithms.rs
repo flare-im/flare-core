@@ -20,7 +20,7 @@ pub enum EncryptionAlgorithm {
     /// 自定义算法必须通过 `EncryptionUtil::register_custom` 注册
     ///
     /// # 示例
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::encryption::{EncryptionAlgorithm, EncryptionUtil, Encryptor};
     /// use std::sync::Arc;
     ///

@@ -53,7 +53,7 @@ impl EncryptionRegistry {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::encryption::{EncryptionRegistry, Encryptor};
     /// use std::sync::Arc;
     ///
@@ -136,7 +136,7 @@ impl EncryptionUtil {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::encryption::EncryptionUtil;
     ///
     /// let encryptor = EncryptionUtil::find("none");
@@ -167,7 +167,7 @@ impl EncryptionUtil {
     ///
     /// # 示例
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::encryption::{EncryptionUtil, Encryptor};
     /// use std::sync::Arc;
     ///

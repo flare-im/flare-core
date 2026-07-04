@@ -375,6 +375,12 @@ impl ConnectionHandlerObserverAdapter {
                 "[ConnectionHandlerObserverAdapter] 处理 CONNECT 消息失败: connection_id={}, error={}",
                 conn_id, e
             );
+            if let Err(remove_err) = manager.remove_connection(conn_id) {
+                warn!(
+                    "[ConnectionHandlerObserverAdapter] CONNECT 失败后移除连接失败: connection_id={}, error={}",
+                    conn_id, remove_err
+                );
+            }
         }
         // CONNECT 消息已由 handle_connect_complete 处理，不需要再调用 handle_frame
     }

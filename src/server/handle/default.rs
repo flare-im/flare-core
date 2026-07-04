@@ -17,6 +17,8 @@ use std::sync::Arc;
 ///
 /// ```rust
 /// use flare_core::server::ServerHandle;
+/// use flare_core::common::error::Result;
+/// use flare_core::common::protocol::Frame;
 /// use std::sync::Arc;
 ///
 /// struct MyHandler {
@@ -40,6 +42,21 @@ pub trait ServerHandle: Send + Sync {
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
     async fn send_to(&self, connection_id: &str, frame: &Frame) -> Result<()>;
+
+    /// 同一 Frame 发送到多个连接（群扇出主路径）。
+    /// 默认逐连接；带连接管理器的实现按（序列化格式, 压缩）分组、
+    /// 每组序列化一次共享给组内无加密连接。返回（成功数, 失败数）。
+    async fn send_to_connections(&self, connection_ids: &[String], frame: &Frame) -> (i32, i32) {
+        let mut success = 0i32;
+        let mut failure = 0i32;
+        for connection_id in connection_ids {
+            match self.send_to(connection_id, frame).await {
+                Ok(()) => success += 1,
+                Err(_) => failure += 1,
+            }
+        }
+        (success, failure)
+    }
 
     /// 向指定用户的所有连接发送消息
     ///
@@ -101,6 +118,7 @@ pub trait ServerHandle: Send + Sync {
 /// ```rust
 /// use flare_core::server::DefaultServerHandle;
 /// use flare_core::server::connection::ConnectionManager;
+/// use flare_core::server::ConnectionManagerTrait;
 /// use std::sync::Arc;
 ///
 /// let connection_manager = Arc::new(ConnectionManager::new());
@@ -132,6 +150,12 @@ impl ServerHandle for DefaultServerHandle {
         // 传入 None，让 ConnectionManager 根据连接的协商信息创建 parser
         self.connection_manager
             .send_frame_to(connection_id, frame, None)
+            .await
+    }
+
+    async fn send_to_connections(&self, connection_ids: &[String], frame: &Frame) -> (i32, i32) {
+        self.connection_manager
+            .send_frame_to_connections(connection_ids, frame)
             .await
     }
 

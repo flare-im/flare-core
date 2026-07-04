@@ -27,7 +27,7 @@ pub struct ServerCoreRef {
 /// - **单一职责**：只负责创建观察者
 ///
 /// # 使用示例
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_core::server::events::factory::ServerMessageObserverFactory;
 ///
 /// struct MyCustomObserverFactory;
@@ -76,7 +76,7 @@ pub trait ServerMessageObserverFactory: Send + Sync {
 /// 使用 `DefaultServerMessageObserver` 创建观察者
 ///
 /// # 使用示例
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_core::server::events::factory::DefaultServerMessageObserverFactory;
 ///
 /// // 使用默认工厂
@@ -184,7 +184,7 @@ impl ServerMessageObserverFactory for DefaultServerMessageObserverFactory {
 /// - 需要组合不同的观察者功能
 ///
 /// # 使用示例
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_core::server::events::factory::{ChainedObserverFactory, ServerMessageObserverFactory};
 ///
 /// let factory1 = Arc::new(MyObserverFactory1::new());

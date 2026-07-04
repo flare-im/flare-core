@@ -243,6 +243,15 @@ impl ConnectionManagerTrait for ConnectionManager {
         self.send_frame_to_snapshot(snapshot, frame, parser).await
     }
 
+    async fn send_frame_to_connections(
+        &self,
+        connection_ids: &[String],
+        frame: &crate::common::protocol::Frame,
+    ) -> (i32, i32) {
+        self.fanout_frame_grouped_by_encoding(connection_ids.to_vec(), frame)
+            .await
+    }
+
     async fn send_frame_to_user(
         &self,
         user_id: &str,
@@ -261,67 +270,24 @@ impl ConnectionManagerTrait for ConnectionManager {
                 }
             };
 
-            let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-            stream::iter(connections)
-                .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                    let successful_ids = Arc::clone(&successful_ids);
-                    let data = data.as_slice();
-                    async move {
-                        let connection_id = snapshot.0.clone();
-                        let result = self
-                            .send_serialized_frame_to_auth_snapshot_without_active(
-                                snapshot, frame, data,
-                            )
-                            .await;
-                        match result {
-                            Ok(connection_id) => {
-                                Self::record_successful_connection_id(
-                                    &successful_ids,
-                                    connection_id,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to send frame to connection {}: {:?}",
-                                    connection_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                })
+            let successful_ids = self
+                .fanout_serialized_frame_to_auth_snapshots(
+                    connections,
+                    frame,
+                    &data,
+                    "send_frame_to_user",
+                )
                 .await;
-            self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+            self.update_connections_active(successful_ids);
 
             return Ok(());
         }
 
         let connections = self.connection_snapshots_for_ids(connection_ids);
-        let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-        stream::iter(connections)
-            .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                let successful_ids = Arc::clone(&successful_ids);
-                async move {
-                    let connection_id = snapshot.0.clone();
-                    let result = self
-                        .send_frame_to_snapshot_without_active(snapshot, frame, parser)
-                        .await;
-                    match result {
-                        Ok(connection_id) => {
-                            Self::record_successful_connection_id(&successful_ids, connection_id);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to send frame to connection {}: {:?}",
-                                connection_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            })
+        let successful_ids = self
+            .fanout_frame_to_snapshots(connections, frame, parser, "send_frame_to_user")
             .await;
-        self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+        self.update_connections_active(successful_ids);
 
         Ok(())
     }
@@ -341,67 +307,24 @@ impl ConnectionManagerTrait for ConnectionManager {
                 }
             };
 
-            let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-            stream::iter(connections)
-                .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                    let successful_ids = Arc::clone(&successful_ids);
-                    let data = data.as_slice();
-                    async move {
-                        let connection_id = snapshot.0.clone();
-                        let result = self
-                            .send_serialized_frame_to_auth_snapshot_without_active(
-                                snapshot, frame, data,
-                            )
-                            .await;
-                        match result {
-                            Ok(connection_id) => {
-                                Self::record_successful_connection_id(
-                                    &successful_ids,
-                                    connection_id,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to broadcast frame to connection {}: {:?}",
-                                    connection_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                })
+            let successful_ids = self
+                .fanout_serialized_frame_to_auth_snapshots(
+                    connections,
+                    frame,
+                    &data,
+                    "broadcast_frame",
+                )
                 .await;
-            self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+            self.update_connections_active(successful_ids);
 
             return Ok(());
         }
 
         let connections = self.connection_snapshots();
-        let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-        stream::iter(connections)
-            .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                let successful_ids = Arc::clone(&successful_ids);
-                async move {
-                    let connection_id = snapshot.0.clone();
-                    let result = self
-                        .send_frame_to_snapshot_without_active(snapshot, frame, parser)
-                        .await;
-                    match result {
-                        Ok(connection_id) => {
-                            Self::record_successful_connection_id(&successful_ids, connection_id);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to broadcast frame to connection {}: {:?}",
-                                connection_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            })
+        let successful_ids = self
+            .fanout_frame_to_snapshots(connections, frame, parser, "broadcast_frame")
             .await;
-        self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+        self.update_connections_active(successful_ids);
 
         Ok(())
     }
@@ -422,67 +345,24 @@ impl ConnectionManagerTrait for ConnectionManager {
                 }
             };
 
-            let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-            stream::iter(connections)
-                .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                    let successful_ids = Arc::clone(&successful_ids);
-                    let data = data.as_slice();
-                    async move {
-                        let connection_id = snapshot.0.clone();
-                        let result = self
-                            .send_serialized_frame_to_auth_snapshot_without_active(
-                                snapshot, frame, data,
-                            )
-                            .await;
-                        match result {
-                            Ok(connection_id) => {
-                                Self::record_successful_connection_id(
-                                    &successful_ids,
-                                    connection_id,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to broadcast frame to connection {}: {:?}",
-                                    connection_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                })
+            let successful_ids = self
+                .fanout_serialized_frame_to_auth_snapshots(
+                    connections,
+                    frame,
+                    &data,
+                    "broadcast_frame_except",
+                )
                 .await;
-            self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+            self.update_connections_active(successful_ids);
 
             return Ok(());
         }
 
         let connections = self.connection_snapshots_except(exclude_connection_id);
-        let successful_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
-        stream::iter(connections)
-            .for_each_concurrent(self.fanout_concurrency, |snapshot| {
-                let successful_ids = Arc::clone(&successful_ids);
-                async move {
-                    let connection_id = snapshot.0.clone();
-                    let result = self
-                        .send_frame_to_snapshot_without_active(snapshot, frame, parser)
-                        .await;
-                    match result {
-                        Ok(connection_id) => {
-                            Self::record_successful_connection_id(&successful_ids, connection_id);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to broadcast frame to connection {}: {:?}",
-                                connection_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            })
+        let successful_ids = self
+            .fanout_frame_to_snapshots(connections, frame, parser, "broadcast_frame_except")
             .await;
-        self.update_connections_active(Self::take_successful_connection_ids(successful_ids));
+        self.update_connections_active(successful_ids);
 
         Ok(())
     }

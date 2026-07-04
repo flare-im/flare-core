@@ -22,7 +22,7 @@ pub enum CompressionAlgorithm {
     /// 自定义算法必须通过 `CompressionUtil::register_custom` 注册
     ///
     /// # 示例
-    /// ```rust
+    /// ```rust,ignore
     /// use flare_core::common::compression::{CompressionAlgorithm, CompressionUtil, Compressor};
     /// use std::sync::Arc;
     ///

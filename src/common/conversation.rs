@@ -30,14 +30,18 @@
 //! 二、统一 CID 格式（最终规范）
 //! -----------------------------------------------------------------------------
 //!
-//!     <TypePrefix><Version><OpaqueID>
+//! ```text
+//! <TypePrefix><Version><OpaqueID>
+//! ```
 //!
 //! 示例：
 //!
-//!     1A7K9Q2FZ8M3P4C   // 单聊
-//!     2A0ZP9N8Q4J2      // 群聊
-//!     3A8F2QZK9M7       // AI 会话
-//!     6A01HYRZ4F6T2     // 临时会话
+//! ```text
+//! 1A7K9Q2FZ8M3P4C   // 单聊
+//! 2A0ZP9N8Q4J2      // 群聊
+//! 3A8F2QZK9M7       // AI 会话
+//! 6A01HYRZ4F6T2     // 临时会话
+//! ```
 //!
 //! -----------------------------------------------------------------------------
 //! 三、字段定义
@@ -95,13 +99,17 @@
 //!
 //! #### 输入规则：
 //!
-//!     uids = sort(uid_a, uid_b)
-//!     input = "DM:v1:" + uids[0] + ":" + uids[1]
+//! ```text
+//! uids = sort(uid_a, uid_b)
+//! input = "DM:v1:" + uids[0] + ":" + uids[1]
+//! ```
 //!
 //! #### 生成：
 //!
-//!     opaque = Base32(SHA256(input)[0..10])
-//!     cid = "1A" + opaque
+//! ```text
+//! opaque = Base32(SHA256(input)[0..10])
+//! cid = "1A" + opaque
+//! ```
 //!
 //! 特性：
 //! - 双向一致
@@ -114,11 +122,15 @@
 //!
 //! #### 输入：
 //!
-//!     input = "GROUP:v1:" + group_id
+//! ```text
+//! input = "GROUP:v1:" + group_id
+//! ```
 //!
 //! #### 生成：
 //!
-//!     cid = "2A" + Base32(SHA256(input)[0..10])
+//! ```text
+//! cid = "2A" + Base32(SHA256(input)[0..10])
+//! ```
 //!
 //! -----------------------------------------------------------------------------
 //!
@@ -126,17 +138,23 @@
 //!
 //! #### 输入：
 //!
-//!     input = "AI:v1:" + user_id + ":" + ai_scope
+//! ```text
+//! input = "AI:v1:" + user_id + ":" + ai_scope
+//! ```
 //!
 //! 示例 ai_scope：
 //!
-//!     openai:gpt-4
-//!     claude:sonnet
-//!     local:rag:kb42
+//! ```text
+//! openai:gpt-4
+//! claude:sonnet
+//! local:rag:kb42
+//! ```
 //!
 //! #### 生成：
 //!
-//!     cid = "3A" + Base32(SHA256(input)[0..10])
+//! ```text
+//! cid = "3A" + Base32(SHA256(input)[0..10])
+//! ```
 //!
 //! -----------------------------------------------------------------------------
 //!
@@ -144,19 +162,25 @@
 //!
 //! #### 系统：
 //!
-//!     input = "SYS:v1:" + system_id + ":" + scope
-//!     cid = "4A" + Base32(SHA256(input)[0..10])
+//! ```text
+//! input = "SYS:v1:" + system_id + ":" + scope
+//! cid = "4A" + Base32(SHA256(input)[0..10])
+//! ```
 //!
 //! #### 客服：
 //!
-//!     input = "CS:v1:" + customer_id + ":" + channel
-//!     cid = "5A" + Base32(SHA256(input)[0..10])
+//! ```text
+//! input = "CS:v1:" + customer_id + ":" + channel
+//! cid = "5A" + Base32(SHA256(input)[0..10])
+//! ```
 //!
 //! -----------------------------------------------------------------------------
 //!
 //! ### 5️⃣ 临时会话（非确定性）
 //!
-//!     cid = "6A" + ULID()
+//! ```text
+//! cid = "6A" + ULID()
+//! ```
 //!
 //! 特性：
 //! - 不参与消息漫游
@@ -265,7 +289,7 @@ impl ConversationType {
 ///
 /// # 示例
 /// ```
-/// use flare_core::common::conversation_id::generate_single_chat_conversation_id;
+/// use flare_core::common::generate_single_chat_conversation_id;
 ///
 /// let id1 = generate_single_chat_conversation_id("user1", "user2");
 /// let id2 = generate_single_chat_conversation_id("user2", "user1");

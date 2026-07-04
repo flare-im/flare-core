@@ -73,7 +73,7 @@ impl ObserverServerBuilder {
     /// 设置认证器（如果启用认证，必须提供）
     ///
     /// 如果设置了认证器，还需要在配置中启用认证：
-    /// ```rust
+    /// ```rust,ignore
     /// .enable_auth()
     /// .with_authenticator(authenticator)
     /// ```

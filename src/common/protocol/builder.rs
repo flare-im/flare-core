@@ -284,6 +284,7 @@ pub fn auth_ack(
 /// ```rust
 /// use flare_core::common::protocol::builder::kicked;
 /// use flare_core::common::protocol::frame_with_system_command;
+/// use flare_core::common::Reliability;
 /// use std::collections::HashMap;
 ///
 /// let mut metadata = HashMap::new();
