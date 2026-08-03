@@ -111,7 +111,7 @@ impl Compressor for RleCompressor {
             return Ok(vec![]);
         }
 
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             return Err(FlareError::deserialization_error(
                 "Invalid RLE data: length must be even".to_string(),
             ));
@@ -278,23 +278,22 @@ struct SimpleMessageListener;
 #[async_trait]
 impl MessageListener for SimpleMessageListener {
     async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
-        if let Some(cmd) = &frame.command {
-            if let Some(
+        if let Some(cmd) = &frame.command
+            && let Some(
                 flare_core::common::protocol::flare::core::commands::command::Type::Payload(
                     msg_cmd,
                 ),
             ) = &cmd.r#type
-            {
-                // 尝试解析protobuf消息内容
-                let payload_str = match String::from_utf8(msg_cmd.payload.clone()) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        // 如果不是有效的UTF-8，则显示十六进制调试信息
-                        format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
-                    }
-                };
-                info!("📨 [客户端] 收到消息: payload={}", payload_str);
-            }
+        {
+            // 尝试解析protobuf消息内容
+            let payload_str = match String::from_utf8(msg_cmd.payload.clone()) {
+                Ok(text) => text,
+                Err(_) => {
+                    // 如果不是有效的UTF-8，则显示十六进制调试信息
+                    format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                }
+            };
+            info!("📨 [客户端] 收到消息: payload={}", payload_str);
         }
         Ok(None)
     }

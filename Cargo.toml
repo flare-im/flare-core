@@ -1,13 +1,13 @@
 [package]
 name = "flare-core"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.94.0"
 description = "A high-performance, reliable long-connection communication toolkit for Rust, supporting WebSocket and QUIC protocols with features like authentication, device management, serialization negotiation, and protocol racing."
 keywords = ["websocket", "quic", "tokio", "realtime", "instant-messaging"]
 categories = ["network-programming", "asynchronous", "web-programming"]
 authors = ["Flare Team"]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/flare-im/flare-core"
 homepage = "https://github.com/flare-im/flare-core"
 documentation = "https://docs.rs/flare-core"
@@ -86,6 +86,8 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
+# 属性测试：给处理不可信网络字节的解析路径做随机输入覆盖。
+proptest = "1"
 
 [features]
 default = [

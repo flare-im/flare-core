@@ -491,22 +491,22 @@ struct ChatListener {
 impl MessageListener for ChatListener {
     async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
         // 解析消息（消息管道已自动处理序列化、压缩等）
-        if let Some(cmd) = &frame.command {
-            if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
-                // 尝试解析protobuf消息内容
-                let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        // 如果不是有效的UTF-8，则显示十六进制调试信息
-                        format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
-                    }
-                };
-                let count = self
-                    .message_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                info!("[消息 #{}] {}", count, message_text);
-            }
+        if let Some(cmd) = &frame.command
+            && let Some(Type::Payload(msg_cmd)) = &cmd.r#type
+        {
+            // 尝试解析protobuf消息内容
+            let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
+                Ok(text) => text,
+                Err(_) => {
+                    // 如果不是有效的UTF-8，则显示十六进制调试信息
+                    format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                }
+            };
+            let count = self
+                .message_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            info!("[消息 #{}] {}", count, message_text);
         }
         Ok(None)
     }

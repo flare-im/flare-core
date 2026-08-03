@@ -205,17 +205,13 @@ impl TlsConfig {
 /// 心跳所处的应用状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum HeartbeatAppState {
     /// 前台活跃，保持更短心跳以降低静默断连概率。
+    #[default]
     Foreground,
     /// 后台/锁屏，允许更长心跳以节省电量。
     Background,
-}
-
-impl Default for HeartbeatAppState {
-    fn default() -> Self {
-        Self::Foreground
-    }
 }
 
 fn default_heartbeat_adaptive() -> bool {

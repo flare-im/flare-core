@@ -399,13 +399,12 @@ impl ServerEventHandler for ChatRoomHandler {
         let broadcast_frame = frame_with_message_command(broadcast_cmd, Reliability::AtLeastOnce);
 
         // 使用 ServerHandle 广播消息
-        if let Some(ref handle) = *self.server_handle.lock().await {
-            if let Err(e) = handle
+        if let Some(ref handle) = *self.server_handle.lock().await
+            && let Err(e) = handle
                 .broadcast_except(&broadcast_frame, connection_id)
                 .await
-            {
-                error!("广播消息失败: {}", e);
-            }
+        {
+            error!("广播消息失败: {}", e);
         }
 
         // 返回 None，框架会自动发送 ACK
@@ -482,10 +481,10 @@ impl ServerEventHandler for ChatRoomHandler {
         let welcome_frame = frame_with_message_command(welcome_cmd, Reliability::AtLeastOnce);
 
         // 使用 ServerHandle 发送消息
-        if let Some(ref handle) = *self.server_handle.lock().await {
-            if let Err(e) = handle.send_to(connection_id, &welcome_frame).await {
-                error!("发送欢迎消息失败: {}", e);
-            }
+        if let Some(ref handle) = *self.server_handle.lock().await
+            && let Err(e) = handle.send_to(connection_id, &welcome_frame).await
+        {
+            error!("发送欢迎消息失败: {}", e);
         }
 
         Ok(())
