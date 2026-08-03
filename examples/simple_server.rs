@@ -47,71 +47,70 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let usernames = Arc::clone(&usernames_for_message);
             Box::pin(async move {
                 // 检查是否是消息命令
-                if let Some(cmd) = &frame.command {
-                    if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
-                        // 提取消息内容
-                        let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
-                            Ok(text) => text,
-                            Err(_) => {
-                                // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
-                            }
-                        };
-
-                        // 获取或创建用户名
-                        let username = {
-                            let mut usernames = usernames.lock().await;
-                            usernames
-                                .entry(ctx.connection_id.clone())
-                                .or_insert_with(|| {
-                                    // 如果消息包含用户名信息，提取用户名
-                                    if let Some(username_bytes) = msg_cmd.metadata.get("username") {
-                                        match String::from_utf8(username_bytes.clone()) {
-                                            Ok(username) => username,
-                                            Err(_) => {
-                                                // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                                format!(
-                                                    "<invalid_username_{}>",
-                                                    hex::encode(username_bytes)
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        format!(
-                                            "用户_{}",
-                                            &ctx.connection_id[..8.min(ctx.connection_id.len())]
-                                        )
-                                    }
-                                })
-                                .clone()
-                        };
-
-                        info!("[聊天室] {} 说: {}", username, message_text);
-
-                        // 构建广播消息（包含用户名）
-                        let mut broadcast_metadata = HashMap::new();
-                        broadcast_metadata
-                            .insert("username".to_string(), username.as_bytes().to_vec());
-                        broadcast_metadata.insert(
-                            "connection_id".to_string(),
-                            ctx.connection_id.as_bytes().to_vec(),
-                        );
-
-                        let broadcast_msg = send_message(
-                            generate_message_id(),
-                            format!("[{}] {}", username, message_text).into_bytes(),
-                            Some(broadcast_metadata),
-                            None,
-                        );
-
-                        let broadcast_frame =
-                            frame_with_message_command(broadcast_msg, Reliability::BestEffort);
-
-                        // 广播给除发送者外的所有连接
-                        let conn_id = ctx.connection_id.clone();
-                        if let Err(e) = ctx.broadcast_except(&broadcast_frame, &conn_id).await {
-                            error!("广播消息失败: {}", e);
+                if let Some(cmd) = &frame.command
+                    && let Some(Type::Payload(msg_cmd)) = &cmd.r#type
+                {
+                    // 提取消息内容
+                    let message_text = match String::from_utf8(msg_cmd.payload.clone()) {
+                        Ok(text) => text,
+                        Err(_) => {
+                            // 如果不是有效的UTF-8，则显示十六进制调试信息
+                            format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
                         }
+                    };
+
+                    // 获取或创建用户名
+                    let username = {
+                        let mut usernames = usernames.lock().await;
+                        usernames
+                            .entry(ctx.connection_id.clone())
+                            .or_insert_with(|| {
+                                // 如果消息包含用户名信息，提取用户名
+                                if let Some(username_bytes) = msg_cmd.metadata.get("username") {
+                                    match String::from_utf8(username_bytes.clone()) {
+                                        Ok(username) => username,
+                                        Err(_) => {
+                                            // 如果不是有效的UTF-8，则显示十六进制调试信息
+                                            format!(
+                                                "<invalid_username_{}>",
+                                                hex::encode(username_bytes)
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    format!(
+                                        "用户_{}",
+                                        &ctx.connection_id[..8.min(ctx.connection_id.len())]
+                                    )
+                                }
+                            })
+                            .clone()
+                    };
+
+                    info!("[聊天室] {} 说: {}", username, message_text);
+
+                    // 构建广播消息（包含用户名）
+                    let mut broadcast_metadata = HashMap::new();
+                    broadcast_metadata.insert("username".to_string(), username.as_bytes().to_vec());
+                    broadcast_metadata.insert(
+                        "connection_id".to_string(),
+                        ctx.connection_id.as_bytes().to_vec(),
+                    );
+
+                    let broadcast_msg = send_message(
+                        generate_message_id(),
+                        format!("[{}] {}", username, message_text).into_bytes(),
+                        Some(broadcast_metadata),
+                        None,
+                    );
+
+                    let broadcast_frame =
+                        frame_with_message_command(broadcast_msg, Reliability::BestEffort);
+
+                    // 广播给除发送者外的所有连接
+                    let conn_id = ctx.connection_id.clone();
+                    if let Err(e) = ctx.broadcast_except(&broadcast_frame, &conn_id).await {
+                        error!("广播消息失败: {}", e);
                     }
                 }
                 Ok(None)

@@ -61,10 +61,10 @@ impl ChatRoomHandler {
     // 广播消息给所有连接的客户端（排除发送者）
     async fn broadcast_message_except(&self, frame: &Frame, exclude_connection_id: &str) {
         let handle_guard = self.server_handle.lock().await;
-        if let Some(ref handle) = *handle_guard {
-            if let Err(e) = handle.broadcast_except(frame, exclude_connection_id).await {
-                error!("广播消息失败: {}", e);
-            }
+        if let Some(ref handle) = *handle_guard
+            && let Err(e) = handle.broadcast_except(frame, exclude_connection_id).await
+        {
+            error!("广播消息失败: {}", e);
         }
     }
 }

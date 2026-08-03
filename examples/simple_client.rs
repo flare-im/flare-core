@@ -87,38 +87,38 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 MESSAGE_COUNT.fetch_add(1, Ordering::Relaxed);
 
                 // 检查是否是消息命令
-                if let Some(cmd) = &frame.command {
-                    if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
-                        let message = match String::from_utf8(msg_cmd.payload.clone()) {
+                if let Some(cmd) = &frame.command
+                    && let Some(Type::Payload(msg_cmd)) = &cmd.r#type
+                {
+                    let message = match String::from_utf8(msg_cmd.payload.clone()) {
+                        Ok(text) => text,
+                        Err(_) => {
+                            // 如果不是有效的UTF-8，则显示十六进制调试信息
+                            format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                        }
+                    };
+
+                    // 检查是否是系统通知
+                    if let Some(type_bytes) = msg_cmd.metadata.get("type") {
+                        let msg_type = match String::from_utf8(type_bytes.clone()) {
                             Ok(text) => text,
                             Err(_) => {
                                 // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                format!("<protobuf_binary_data: {} bytes>", msg_cmd.payload.len())
+                                format!("<invalid_type_{}>", hex::encode(type_bytes))
                             }
                         };
-
-                        // 检查是否是系统通知
-                        if let Some(type_bytes) = msg_cmd.metadata.get("type") {
-                            let msg_type = match String::from_utf8(type_bytes.clone()) {
-                                Ok(text) => text,
-                                Err(_) => {
-                                    // 如果不是有效的UTF-8，则显示十六进制调试信息
-                                    format!("<invalid_type_{}>", hex::encode(type_bytes))
-                                }
-                            };
-                            if msg_type == "join" || msg_type == "leave" {
-                                println!("\n[系统] {}", message);
-                            } else {
-                                println!("\n{}", message);
-                            }
+                        if msg_type == "join" || msg_type == "leave" {
+                            println!("\n[系统] {}", message);
                         } else {
                             println!("\n{}", message);
                         }
-
-                        // 显示输入提示
-                        print!("{}> ", username);
-                        let _ = io::stdout().flush();
+                    } else {
+                        println!("\n{}", message);
                     }
+
+                    // 显示输入提示
+                    print!("{}> ", username);
+                    let _ = io::stdout().flush();
                 }
                 Ok(())
             }

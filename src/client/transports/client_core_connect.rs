@@ -284,11 +284,12 @@ mod tests {
     use std::collections::HashMap;
 
     fn sample_config(user_id: &str, token: &str) -> crate::client::config::ClientConfig {
-        let mut config = crate::client::config::ClientConfig::default();
-        config.user_id = Some(user_id.to_string());
-        config.token = Some(token.to_string());
-        config.serialization_format = SerializationFormat::Protobuf;
-        config
+        crate::client::config::ClientConfig {
+            user_id: Some(user_id.to_string()),
+            token: Some(token.to_string()),
+            serialization_format: SerializationFormat::Protobuf,
+            ..Default::default()
+        }
     }
 
     #[test]
