@@ -1,5 +1,9 @@
 # flare-core Performance Baseline
 
+> ⚠️ **本文为 2026-06-05 的历史基线，数据可能已过时。**
+> 最新数据与复现方法见 [`performance-report.md`](./performance-report.md)。
+> 保留本文用于对比历史趋势。
+
 Date: 2026-06-05
 
 ## Scope
