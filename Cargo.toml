@@ -86,6 +86,8 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
+# 属性测试：给处理不可信网络字节的解析路径做随机输入覆盖。
+proptest = "1"
 
 [features]
 default = [

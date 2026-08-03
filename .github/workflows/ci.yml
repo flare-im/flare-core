@@ -31,7 +31,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: test
-        run: cargo test 
+        run: cargo test
+
+      # 不可信输入解析路径的属性测试跑得比默认更深。
+      # 这条路径吃的是网络原始字节，解析时 panic 会撕掉连接任务，
+      # panic 若发生在临界区还会毒化锁、波及整个进程 —— 值得多花这一分钟。
+      - name: 解析路径属性测试（加深）
+        run: cargo test --test parse_untrusted_input
+        env:
+          PROPTEST_CASES: 20000
 
   # 供应链审计与主流程解耦：advisory DB 每天在变，
   # 不该因为上游新披露的 CVE 就让无关的功能 PR 变红。
