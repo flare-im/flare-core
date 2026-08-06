@@ -163,6 +163,13 @@ impl FlareError {
         Self::localized(ErrorCode::GeneralError, reason)
     }
 
+    /// 创建配置错误
+    ///
+    /// 用于必填配置项缺失等启动期可诊断的错误，例如未设置 `ServerEventHandler`。
+    pub fn configuration_error(reason: impl Into<String>) -> Self {
+        Self::localized(ErrorCode::ConfigurationError, reason)
+    }
+
     /// 创建操作超时错误
     pub fn timeout(reason: impl Into<String>) -> Self {
         Self::localized(ErrorCode::OperationTimeout, reason)

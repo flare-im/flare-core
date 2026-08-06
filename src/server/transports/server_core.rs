@@ -208,34 +208,35 @@ impl ServerCore {
     /// - `core_arc`: ServerCore 的 Arc 包装（由调用方提供，避免循环引用）
     ///
     /// # 返回
-    /// 创建的观察者实例
+    /// 创建的观察者实例；若 `event_handler` 未设置则返回配置错误
     ///
-    /// # Panics
-    /// 如果 `event_handler` 未设置，此方法会 panic
+    /// # Errors
+    /// 如果 `event_handler` 未设置，返回 [`FlareError::configuration_error`]
     pub fn create_observer_with_core(
         &self,
         connection_id: String,
         core_arc: Arc<ServerCore>,
-    ) -> Arc<dyn crate::transport::events::ConnectionObserver> {
+    ) -> Result<Arc<dyn crate::transport::events::ConnectionObserver>> {
         // 创建 ServerCore 的引用（避免循环引用）
         let core_ref = Arc::new(crate::server::events::factory::ServerCoreRef {
             device_manager: self.device_manager.clone(),
             event_handler: self.event_handler.clone(),
         });
 
-        let event_handler = self
-            .event_handler
-            .clone()
-            .expect("ServerEventHandler is required for creating observer");
+        let event_handler = self.event_handler.clone().ok_or_else(|| {
+            crate::common::error::FlareError::configuration_error(
+                "ServerEventHandler is required for creating observer but was not configured",
+            )
+        })?;
 
-        self.observer_factory.create_observer(
+        Ok(self.observer_factory.create_observer(
             Arc::clone(&self.connection_manager),
             self.parser.clone(),
             event_handler,
             connection_id,
             core_ref,
             core_arc,
-        )
+        ))
     }
 
     /// 获取事件处理器
@@ -500,8 +501,8 @@ impl ServerCore {
     /// # 返回
     /// 处理成功返回 `Ok(())`，失败返回错误
     ///
-    /// # Panics
-    /// 如果 `event_handler` 未设置，此方法会 panic
+    /// # Errors
+    /// 如果 `event_handler` 未设置，返回 [`FlareError::configuration_error`]
     pub async fn handle_connect_complete(
         &self,
         frame: &Frame,
@@ -547,10 +548,11 @@ impl ServerCore {
 
         // 4. 通知连接建立（在协商完成后）
         // 使用 ServerEventHandler.on_connect
-        let event_handler = self
-            .event_handler
-            .as_ref()
-            .expect("ServerEventHandler is required");
+        let event_handler = self.event_handler.as_ref().ok_or_else(|| {
+            crate::common::error::FlareError::configuration_error(
+                "ServerEventHandler is required to complete connection but was not configured",
+            )
+        })?;
         if let Err(e) = event_handler.on_connect(connection_id).await {
             error!(
                 "[ServerCore] ServerEventHandler.on_connect 失败: connection_id={}, error={}",

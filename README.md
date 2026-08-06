@@ -2,27 +2,32 @@
 
 English · [中文](README.zh-CN.md)
 
-> ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
+> ## ℹ️ This is communication infrastructure, not a ready-to-use IM product
 >
-> 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**
-> （没有注册登录、好友关系、群角色/审批/禁言、朋友圈）。
+> Up front, so you don't discover after cloning that you can't log in:
+> **the open-source part does not include an account system** (no
+> registration/login, friend relationships, group roles/approval/muting, or
+> moments/feed).
 >
-> 但它自带完整且可插拔的鉴权契约，两条路都在开源侧：
+> It does ship a complete, pluggable authentication contract, and both paths
+> live on the open-source side:
 >
-> - **`CoreJwtTokenValidator`** —— 本地验 JWT。手签一个 token 就能跑起来做
->   demo / POC，**不需要任何用户体系**。
-> - **`HttpHookTokenValidator`** —— 把 token POST 到你自己的接口，
->   **这是接入自有用户体系的入口**。
+> - **`CoreJwtTokenValidator`** — validates JWTs locally. Hand-sign a token and
+>   you can run a demo / POC, **without any user system**.
+> - **`HttpHookTokenValidator`** — POSTs the token to your own endpoint. **This
+>   is the entry point for integrating your own user system.**
 >
-> 业务规则同理：`flare-im-core/crates/flare-im-hooks` 提供 9 个扩展点
-> （PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
-> ConversationLifecycle / ConversationMember / GetConversationParticipants）。
+> Business rules work the same way: `flare-im-core/crates/flare-im-hooks`
+> provides 9 extension points (PreSend / PostSend / Delivery / Recall /
+> MessageRead / MessageReaction / ConversationLifecycle / ConversationMember /
+> GetConversationParticipants).
 >
-> 要上生产，你需要自行实现用户体系并按上述契约接入 —— 与 Sendbird /
-> Twilio Conversations 的「自带身份」模型一致，区别是 Flare 可自托管、
-> 协议与核心可审计。
+> To go to production, you implement your own user system and wire it in via
+> the contracts above — the same "bring your own identity" model as Sendbird /
+> Twilio Conversations, the difference being that Flare can be self-hosted and
+> its protocol and core are auditable.
 >
-> 边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+> See [GOVERNANCE.md](GOVERNANCE.md) for the boundary details.
 
 
 [![Crates.io](https://img.shields.io/crates/v/flare-core.svg)](https://crates.io/crates/flare-core)
