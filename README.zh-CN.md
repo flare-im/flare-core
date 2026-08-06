@@ -1,6 +1,6 @@
 # Flare Core
 
-English · [中文](README.zh-CN.md)
+[English](README.md) · 中文
 
 > ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
 >
@@ -38,41 +38,33 @@ English · [中文](README.zh-CN.md)
 [![Protobuf](https://img.shields.io/badge/Protobuf-negotiation-9C27B0)](https://github.com/flare-im/flare-core)
 [![WASM](https://img.shields.io/badge/WASM-web%20client-FF9800)](https://github.com/flare-im/flare-core)
 
-`flare-core` is a production-oriented long-connection toolkit for Rust.
-It provides the transport foundation for realtime systems such as instant
-messaging gateways, chat rooms, push channels, collaboration tools, and
-low-latency application backends.
+`flare-core` 是一个面向生产的 Rust 长连接工具库。它为即时通讯网关、聊天室、
+推送通道、协作工具、低延迟应用后端等实时系统提供传输层基座。
 
-The crate focuses on transport-level concerns: WebSocket, QUIC, TCP,
-connection negotiation, heartbeats, reconnection, serialization,
-compression, encryption, and extensible message pipelines. IM product
-semantics such as sequence allocation, inbox sync, push policy, and business
-rules should live in higher-level crates or services.
+该 crate 聚焦传输层关注点：WebSocket、QUIC、TCP、连接协商、心跳、重连、
+序列化、压缩、加密以及可扩展的消息管道。诸如序列号分配、收件箱同步、
+推送策略、业务规则等 IM 产品语义，应当放在更上层的 crate 或服务中。
 
-API documentation: [docs.rs/flare-core](https://docs.rs/flare-core)
+API 文档：[docs.rs/flare-core](https://docs.rs/flare-core)
 
-## Highlights
+## 亮点
 
-- **Transports**: WebSocket, QUIC, optional TCP, and native protocol racing.
-- **Negotiation**: CONNECT / CONNECT_ACK / NEGOTIATION_READY flow for format,
-  compression, and encryption alignment.
-- **Codecs**: Protobuf and JSON with pluggable serializers.
-- **Reliability basics**: heartbeat policy, active detection, reconnect hooks,
-  connection snapshots, and slow-consumer isolation.
-- **Security hooks**: token authentication, TLS support, certificate pinning,
-  and AES-256-GCM encryption when enabled.
-- **Runtime targets**: native Tokio applications and wasm32 WebSocket clients.
-- **Extension points**: custom serializers, compressors, encryptors,
-  middleware, observers, and server event handlers.
+- **传输**：WebSocket、QUIC、可选 TCP，以及原生协议竞速。
+- **协商**：面向格式、压缩、加密对齐的 CONNECT / CONNECT_ACK / NEGOTIATION_READY 流程。
+- **编解码**：Protobuf 与 JSON，序列化器可插拔。
+- **可靠性基础**：心跳策略、主动探测、重连钩子、连接快照，以及慢消费者隔离。
+- **安全钩子**：token 鉴权、TLS 支持、证书固定，以及启用后的 AES-256-GCM 加密。
+- **运行时目标**：原生 Tokio 应用与 wasm32 WebSocket 客户端。
+- **扩展点**：自定义序列化器、压缩器、加密器、中间件、观察者，以及服务端事件处理器。
 
-## Installation
+## 安装
 
 ```toml
 [dependencies]
 flare-core = "1.0.1"
 ```
 
-Server-only gateway:
+仅服务端网关：
 
 ```toml
 flare-core = { version = "1.0.1", default-features = false, features = [
@@ -84,7 +76,7 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 ] }
 ```
 
-Native client:
+原生客户端：
 
 ```toml
 flare-core = { version = "1.0.1", default-features = false, features = [
@@ -96,14 +88,14 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 ] }
 ```
 
-TCP and full feature sets:
+TCP 与完整特性集：
 
 ```toml
 flare-core = { version = "1.0.1", features = ["tcp"] }
 flare-core = { version = "1.0.1", features = ["full"] }
 ```
 
-WASM WebSocket client:
+WASM WebSocket 客户端：
 
 ```toml
 flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] }
@@ -113,24 +105,23 @@ flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] 
 cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
 ```
 
-## Feature Flags
+## 特性开关（Feature Flags）
 
 | Feature | Default | Description |
 |---------|:-------:|-------------|
-| `client` | yes | Client builders, transports, negotiation, reconnect, and send APIs. |
-| `server` | yes | Native server builders, connection management, and event handling. |
-| `websocket` | yes | WebSocket transport. |
-| `quic` | yes | Native QUIC transport. |
-| `tcp` | no | TCP transport with length-prefixed frames. |
-| `wasm` | no | wasm32 WebSocket client stack. |
-| `compression-gzip` | yes | Gzip compression support. |
-| `encryption-aes-gcm` | yes | AES-256-GCM encryption support. |
-| `full` | no | Default capabilities plus TCP. |
+| `client` | yes | 客户端构建器、传输、协商、重连与发送 API。 |
+| `server` | yes | 原生服务端构建器、连接管理与事件处理。 |
+| `websocket` | yes | WebSocket 传输。 |
+| `quic` | yes | 原生 QUIC 传输。 |
+| `tcp` | no | 采用定长前缀帧的 TCP 传输。 |
+| `wasm` | no | wasm32 WebSocket 客户端栈。 |
+| `compression-gzip` | yes | Gzip 压缩支持。 |
+| `encryption-aes-gcm` | yes | AES-256-GCM 加密支持。 |
+| `full` | no | 默认能力加上 TCP。 |
 
-At runtime, use `flare_core::common::FeatureSet::current()` to inspect the
-compiled capability set.
+运行时可用 `flare_core::common::FeatureSet::current()` 查看已编译的能力集合。
 
-## Architecture
+## 架构
 
 ```text
 Application   ServerEventHandler | MessageListener | Authenticator
@@ -140,27 +131,26 @@ Core          ServerCore | ClientCore | ConnectionManager | MessagePipeline
 Transport     HybridServer | HybridClient | WebSocket | QUIC | TCP
 ```
 
-Connection lifecycle:
+连接生命周期：
 
-1. Establish a transport connection.
-2. Send CONNECT metadata for serialization, compression, encryption, and
-   authentication.
-3. Receive CONNECT_ACK and align both parser profiles.
-4. Emit NEGOTIATION_READY and start heartbeat processing.
-5. Exchange application frames.
-6. Disconnect, reconnect, or clean up connection state.
+1. 建立传输连接。
+2. 发送 CONNECT 元数据，用于序列化、压缩、加密与鉴权。
+3. 接收 CONNECT_ACK 并对齐双方的解析器配置。
+4. 发出 NEGOTIATION_READY 并开始心跳处理。
+5. 交换应用帧。
+6. 断开、重连或清理连接状态。
 
-Builder families:
+构建器家族：
 
 | Mode | Builder | Integration style | Typical use |
 |------|---------|-------------------|-------------|
-| Simple | `ServerBuilder` / `ClientBuilder` | closures | prototypes and small demos |
-| Observer | `Observer*Builder` | observer traits | connection-aware integrations |
-| Flare | `FlareServerBuilder` / `FlareClientBuilder` | traits and pipeline | production-facing integrations |
+| Simple | `ServerBuilder` / `ClientBuilder` | closures | 原型与小型 demo |
+| Observer | `Observer*Builder` | observer traits | 感知连接的集成 |
+| Flare | `FlareServerBuilder` / `FlareClientBuilder` | traits and pipeline | 面向生产的集成 |
 
-## Quick Start
+## 快速开始
 
-Minimal Flare-mode server:
+最小的 Flare 模式服务端：
 
 ```rust
 use async_trait::async_trait;
@@ -190,24 +180,24 @@ async fn main() -> Result<()> {
 }
 ```
 
-Run the chat examples from the repository checkout:
+从仓库检出运行聊天示例：
 
 ```bash
 RUST_LOG=info cargo run --example flare_chat_server
 RUST_LOG=info cargo run --example flare_chat_client -- user1
 ```
 
-TCP example:
+TCP 示例：
 
 ```bash
 cargo run --example flare_chat_server --features tcp
 RUST_LOG=info cargo run --example tcp_client --features tcp
 ```
 
-More examples are documented in the repository:
-[examples/README.md](https://github.com/flare-im/flare-core/blob/main/examples/README.md).
+更多示例见仓库文档：
+[examples/README.md](https://github.com/flare-im/flare-core/blob/main/examples/README.md)。
 
-## Native And WASM Support
+## 原生与 WASM 支持
 
 | Capability | Native | WASM |
 |------------|:------:|:----:|
@@ -219,19 +209,19 @@ More examples are documented in the repository:
 | Hybrid server / QUIC server | yes | no |
 | Negotiated heartbeat | yes | yes |
 
-For browser demos, see
-[examples/wasm_websocket_client](https://github.com/flare-im/flare-core/tree/main/examples/wasm_websocket_client).
+浏览器 demo 见
+[examples/wasm_websocket_client](https://github.com/flare-im/flare-core/tree/main/examples/wasm_websocket_client)。
 
-## Verification
+## 验证
 
-The repository verification script runs formatting, linting, native tests,
-feature matrix checks, wasm checks, and example builds:
+仓库的验证脚本会运行格式化、静态检查、原生测试、特性矩阵检查、wasm 检查
+以及示例构建：
 
 ```bash
 ./scripts/verify.sh
 ```
 
-For a focused pre-publish check:
+若只需聚焦的发布前检查：
 
 ```bash
 cargo test --lib --tests --examples --all-features
@@ -239,18 +229,15 @@ cargo doc --no-deps --all-features
 cargo publish --dry-run
 ```
 
-Note: historical doctest snippets in lower-level module comments are not used
-as the release gate yet. The public README and crate-level docs are kept in
-English for crates.io and docs.rs.
+注意：底层模块注释中的历史 doctest 片段目前尚未作为发布门禁。公开 README 与
+crate 级文档为 crates.io 和 docs.rs 保持英文。
 
-## Performance Baseline
+## 性能基线
 
-The current baseline covers frame encoding, message parsing, pipeline
-processing, connection lifecycle, and in-memory fanout. It does not model
-higher-level IM semantics such as sequence allocation, sync, inbox storage, or
-push delivery.
+当前基线覆盖帧编码、消息解析、管道处理、连接生命周期，以及内存内扇出。它不建模
+更上层的 IM 语义，例如序列号分配、同步、收件箱存储或推送投递。
 
-Test environment for the published baseline:
+已发布基线的测试环境：
 
 | Item | Value |
 |------|-------|
@@ -260,7 +247,7 @@ Test environment for the published baseline:
 | Rust | 1.94.1 |
 | Build | release mode, single-process benchmark |
 
-Summary:
+汇总：
 
 | Benchmark | Throughput |
 |-----------|-----------:|
@@ -273,10 +260,10 @@ Summary:
 | Broadcast 1,000 x 256B frame | ~2,789 broadcasts/s |
 | Timeout cleanup, 1,000 connections | ~0.727 ms/op |
 
-Full report:
-[docs/performance-baseline.md](https://github.com/flare-im/flare-core/blob/main/docs/performance-baseline.md).
+完整报告：
+[docs/performance-baseline.md](https://github.com/flare-im/flare-core/blob/main/docs/performance-baseline.md)。
 
-## Documentation
+## 文档
 
 | Resource | Link |
 |----------|------|
@@ -285,9 +272,9 @@ Full report:
 | Performance report | [docs/performance-baseline.md](https://github.com/flare-im/flare-core/blob/main/docs/performance-baseline.md) |
 | Issues | [GitHub Issues](https://github.com/flare-im/flare-core/issues) |
 
-## License
+## 许可证
 
-Licensed under the [MIT License](LICENSE).
+依据 [MIT License](LICENSE) 授权。
 
 ---
 
