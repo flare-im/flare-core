@@ -47,8 +47,7 @@ impl ServerConnectionHelper {
             })?;
 
         // 创建观察者
-        let observer =
-            core.create_observer_with_core(connection_id.clone(), Arc::clone(&core))?;
+        let observer = core.create_observer_with_core(connection_id.clone(), Arc::clone(&core))?;
 
         // 添加观察者到连接
         if let Some((conn, _)) = manager.get_connection(&connection_id) {
