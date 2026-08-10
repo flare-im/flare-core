@@ -2,14 +2,14 @@
 
 覆盖不可信输入的解析路径 —— 网络原始字节进入系统的第一道门。
 
-## ⚠️ 当前状态
+## 注意：当前状态
 
 **这些 target 尚未实际跑过。** 它们的代码是照 cargo-fuzz 标准布局写的，但
 `cargo fuzz` 需要 nightly 工具链（依赖 `-Z sanitizer`），落地时的开发机上
 只有 stable，因此无法验证。**首次运行前请当作未验证代码对待**，编译不过是
 预期内的，按报错修即可。
 
-已经实际跑过并全绿的是 stable 上的属性测试：
+已经实际跑过并全部通过的是 stable 上的属性测试：
 
 ```bash
 cargo test --test parse_untrusted_input
@@ -23,7 +23,7 @@ cargo test --test parse_untrusted_input
 
 属性测试和模糊测试解决的不是同一个问题，缺一不可：
 
-| | 属性测试（已跑） | 模糊测试（待跑） |
+|  | 属性测试（已跑） | 模糊测试（待跑） |
 |---|---|---|
 | 工具链 | stable | **nightly** |
 | 进 CI | 是，每个 PR | 否，长跑任务 |

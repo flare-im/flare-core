@@ -4,17 +4,17 @@ Flare 模式提供完整功能，包含所有 `common` 和 `server` 模块的能
 
 ## 特点
 
-- ✅ **必须实现 `ServerEventHandler` trait**（核心接口）
-- ✅ **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
-- ✅ **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
-- ✅ **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
-- ✅ **设备管理**：完整的设备冲突策略（平台互斥、移动端互斥等）
-- ✅ **认证机制**：JWT Token 认证（可选）
-- ✅ **心跳检测**：自动心跳和超时管理
-- ✅ **多协议支持**：WebSocket + QUIC 双协议
-- ✅ **序列化协商**：自动协商最佳序列化格式和压缩算法
-- ✅ **加密支持**：支持 AES-256-GCM 等加密算法
-- ✅ **连接管理**：完整的连接状态管理和统计
+- ✓ **必须实现 `ServerEventHandler` trait**（核心接口）
+- ✓ **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
+- ✓ **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
+- ✓ **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
+- ✓ **设备管理**：完整的设备冲突策略（平台互斥、移动端互斥等）
+- ✓ **认证机制**：JWT Token 认证（可选）
+- ✓ **心跳检测**：自动心跳和超时管理
+- ✓ **多协议支持**：WebSocket + QUIC 双协议
+- ✓ **序列化协商**：自动协商最佳序列化格式和压缩算法
+- ✓ **加密支持**：支持 AES-256-GCM 等加密算法
+- ✓ **连接管理**：完整的连接状态管理和统计
 
 ## 适用场景
 
@@ -153,7 +153,7 @@ impl ServerEventHandler for ChatRoomHandler {
     // 连接建立完成
     // ============================================================
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        info!("[聊天室] ✅ 用户 {} 加入聊天室", connection_id);
+        info!("[聊天室] ✓ 用户 {} 加入聊天室", connection_id);
         Ok(())
     }
 
@@ -169,7 +169,7 @@ impl ServerEventHandler for ChatRoomHandler {
         let display_name = username
             .as_deref()
             .unwrap_or(&connection_id[..8.min(connection_id.len())]);
-        info!("[聊天室] ❌ {} 离开了聊天室", display_name);
+        info!("[聊天室] ✗ {} 离开了聊天室", display_name);
 
         if let Some(reason) = reason {
             debug!("断开原因: {}", reason);
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    info!("🚀 启动 Flare 聊天室服务器（完整功能演示）");
+    info!(" 启动 Flare 聊天室服务器（完整功能演示）");
 
     // ============================================================
     // 1. 注册加密器（可选，用于加密通信）
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     let encryption_key = b"01234567890123456789012345678901"; // 32 bytes for AES-256
     let encryptor = Aes256GcmEncryptor::new(encryption_key)?;
     EncryptionUtil::register_custom(Arc::new(encryptor));
-    info!("🔐 已注册 AES-256-GCM 加密器");
+    info!(" 已注册 AES-256-GCM 加密器");
 
     // ============================================================
     // 2. 创建连接管理器（可选，用于共享连接状态）
@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
     // ============================================================
     server.start().await?;
 
-    info!("✅ 服务器已启动");
+    info!("✓ 服务器已启动");
     info!("   WebSocket: ws://127.0.0.1:8080");
     info!("   QUIC: quic://127.0.0.1:8081");
     info!("\n服务器运行中，按 Ctrl+C 停止...");

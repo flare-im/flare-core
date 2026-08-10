@@ -39,14 +39,14 @@
 //! ## 测试多设备互斥
 //!
 //! 1. **测试同一用户同一平台互斥**：
-//!    - 启动第一个客户端：`cargo run --example flare_chat_client -- user1`
-//!    - 启动第二个客户端（相同用户ID + 相同平台）：`cargo run --example flare_chat_client -- user1`
-//!    - 预期：第二个客户端登录后，第一个客户端会被踢掉
+//! - 启动第一个客户端：`cargo run --example flare_chat_client -- user1`
+//! - 启动第二个客户端（相同用户ID + 相同平台）：`cargo run --example flare_chat_client -- user1`
+//! - 预期：第二个客户端登录后，第一个客户端会被踢掉
 //!
 //! 2. **测试同一用户不同平台共存**：
-//!    - 启动第一个客户端：`DEVICE_PLATFORM=pc cargo run --example flare_chat_client -- user1`
-//!    - 启动第二个客户端（相同用户ID + 不同平台）：`DEVICE_PLATFORM=android cargo run --example flare_chat_client -- user1`
-//!    - 预期：两个客户端可以同时在线
+//! - 启动第一个客户端：`DEVICE_PLATFORM=pc cargo run --example flare_chat_client -- user1`
+//! - 启动第二个客户端（相同用户ID + 不同平台）：`DEVICE_PLATFORM=android cargo run --example flare_chat_client -- user1`
+//! - 预期：两个客户端可以同时在线
 
 use async_trait::async_trait;
 use flare_core::client::*;
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     // ============================================================
     // 1. 注册加密器（可选，用于加密通信）
     // ============================================================
-    // ⚠️  安全警告：当前示例使用硬编码密钥，仅用于演示！
+    // 注意：安全警告：当前示例使用硬编码密钥，仅用于演示！
     // 生产环境必须使用安全的密钥管理方案，不要硬编码密钥。
     // 详细说明请参考：docs/ENCRYPTION_SECURITY.md
     //

@@ -2,7 +2,7 @@
 
 本文档介绍 Flare Core 提供的三种服务端构建器，帮助您根据需求选择合适的构建器。
 
-## 📋 目录
+## 目录
 
 - [三种构建器对比](#三种构建器对比)
 - [SimpleServerBuilder（毛坯房）](#simpleserverbuilder毛坯房)
@@ -72,10 +72,10 @@ Flare Core 提供三种不同抽象级别的服务端构建器，从简单到复
 
 ### 特点
 
-- ✅ **最小依赖**：只提供基本的消息处理（闭包）
-- ✅ **零配置**：使用默认配置即可运行
-- ✅ **轻量级**：不包含中间件、管道等高级功能
-- ✅ **快速上手**：几行代码即可启动服务器
+- ✓ **最小依赖**：只提供基本的消息处理（闭包）
+- ✓ **零配置**：使用默认配置即可运行
+- ✓ **轻量级**：不包含中间件、管道等高级功能
+- ✓ **快速上手**：几行代码即可启动服务器
 
 ### 适用场景
 
@@ -112,10 +112,10 @@ async fn main() -> Result<()> {
             Ok(())
         })
         .build()?;
-    
+
     // 启动服务器
     server.start().await?;
-    
+
     // 发送消息示例
     let frame = frame_with_message_command(
         generate_message_id(),
@@ -124,11 +124,11 @@ async fn main() -> Result<()> {
         None,
     );
     server.send_to("connection_id", &frame).await?;
-    
+
     // 等待停止信号
     tokio::signal::ctrl_c().await?;
     server.stop().await?;
-    
+
     Ok(())
 }
 ```
@@ -141,33 +141,33 @@ ServerBuilder::new("0.0.0.0:8080")
     .with_protocol(TransportProtocol::WebSocket)
     // 或启用多协议
     .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
-    
+
     // 连接配置
     .with_max_connections(1000)
     .with_heartbeat(HeartbeatConfig::default())
-    
+
     // 序列化和压缩（用于协商）
     .with_default_format(SerializationFormat::Json)
     .with_default_compression(CompressionAlgorithm::None)
-    
+
     // TLS 配置（QUIC 需要）
     .with_tls(TlsConfig::default())
-    
+
     // 认证（可选）
     .enable_auth()
     .with_authenticator(authenticator)
     .with_auth_timeout(Duration::from_secs(30))
-    
+
     .build()?;
 ```
 
 ### 限制
 
-- ❌ 不支持中间件
-- ❌ 不支持消息管道
-- ❌ 不支持自定义观察器
-- ❌ 不支持设备管理
-- ❌ 不支持事件处理器
+- ✗ 不支持中间件
+- ✗ 不支持消息管道
+- ✗ 不支持自定义观察器
+- ✗ 不支持设备管理
+- ✗ 不支持事件处理器
 
 ---
 
@@ -179,11 +179,11 @@ ServerBuilder::new("0.0.0.0:8080")
 
 ### 特点
 
-- ✅ **自定义观察器**：实现 `ConnectionHandler` trait 自定义消息处理
-- ✅ **设备管理**：支持设备冲突策略和多端管理
-- ✅ **事件处理**：支持自定义事件处理器
-- ✅ **连接管理**：支持共享连接管理器
-- ✅ **灵活扩展**：可以添加自定义的观察器和处理器
+- ✓ **自定义观察器**：实现 `ConnectionHandler` trait 自定义消息处理
+- ✓ **设备管理**：支持设备冲突策略和多端管理
+- ✓ **事件处理**：支持自定义事件处理器
+- ✓ **连接管理**：支持共享连接管理器
+- ✓ **灵活扩展**：可以添加自定义的观察器和处理器
 
 ### 适用场景
 
@@ -213,12 +213,12 @@ impl ConnectionHandler for MyConnectionHandler {
         // 自定义处理逻辑
         Ok(None)
     }
-    
+
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
         println!("连接建立: {}", connection_id);
         Ok(())
     }
-    
+
     async fn on_disconnect(&self, connection_id: &str) -> Result<()> {
         println!("连接断开: {}", connection_id);
         Ok(())
@@ -233,21 +233,21 @@ async fn main() -> Result<()> {
             .platform_exclusive()
             .build()
     ));
-    
+
     // 创建自定义处理器
     let handler = Arc::new(MyConnectionHandler {});
-    
+
     // 创建服务器
     let mut server = ObserverServerBuilder::new("0.0.0.0:8080")
         .with_handler(handler)
         .with_device_manager(device_manager)
         .build()?;
-    
+
     server.start().await?;
-    
+
     tokio::signal::ctrl_c().await?;
     server.stop().await?;
-    
+
     Ok(())
 }
 ```
@@ -288,7 +288,7 @@ impl ServerEventHandler for MyEventHandler {
         // 处理系统命令
         Ok(None)
     }
-    
+
     async fn handle_message_command(&self, cmd: &MessageCommand, connection_id: &str) -> Result<Option<Frame>> {
         // 处理消息命令
         Ok(None)
@@ -324,34 +324,34 @@ let server2 = ObserverServerBuilder::new("0.0.0.0:8081")
 ObserverServerBuilder::new("0.0.0.0:8080")
     // 必须：设置连接处理器
     .with_handler(handler)
-    
+
     // 可选：设备管理
     .with_device_manager(device_manager)
-    
+
     // 可选：事件处理器
     .with_event_handler(event_handler)
-    
+
     // 可选：共享连接管理器
     .with_connection_manager(connection_manager)
-    
+
     // 协议配置
     .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
     .with_protocol_address(TransportProtocol::WebSocket, "0.0.0.0:8080".to_string())
     .with_protocol_address(TransportProtocol::QUIC, "0.0.0.0:8081".to_string())
-    
+
     // 其他配置（同 SimpleServerBuilder）
     .with_max_connections(1000)
     .with_default_format(SerializationFormat::Protobuf)
     .with_default_compression(CompressionAlgorithm::Gzip)
-    
+
     .build()?;
 ```
 
 ### 限制
 
-- ❌ 不支持消息管道
-- ❌ 不支持中间件
-- ❌ 不支持自动序列化/压缩协商（需要手动处理）
+- ✗ 不支持消息管道
+- ✗ 不支持中间件
+- ✗ 不支持自动序列化/压缩协商（需要手动处理）
 
 ---
 
@@ -363,18 +363,18 @@ ObserverServerBuilder::new("0.0.0.0:8080")
 
 ### 特点
 
-- ✅ **消息管道**：自动处理序列化、压缩、加密
-- ✅ **中间件支持**：日志、性能监控、验证等
-- ✅ **处理器链**：可组合多个处理器
-- ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
-- ✅ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
-- ✅ **加密支持**：AES-256-GCM 加密
-- ✅ **设备管理**：完整的设备冲突策略
-- ✅ **认证机制**：JWT Token 认证
-- ✅ **心跳检测**：自动心跳和超时管理
-- ✅ **多协议支持**：WebSocket + QUIC 双协议
-- ✅ **简单易用**：只需实现 `MessageListener` 即可
-- ✅ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
+- ✓ **消息管道**：自动处理序列化、压缩、加密
+- ✓ **中间件支持**：日志、性能监控、验证等
+- ✓ **处理器链**：可组合多个处理器
+- ✓ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
+- ✓ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
+- ✓ **加密支持**：AES-256-GCM 加密
+- ✓ **设备管理**：完整的设备冲突策略
+- ✓ **认证机制**：JWT Token 认证
+- ✓ **心跳检测**：自动心跳和超时管理
+- ✓ **多协议支持**：WebSocket + QUIC 双协议
+- ✓ **简单易用**：只需实现 `MessageListener` 即可
+- ✓ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
 
 ### 适用场景
 
@@ -401,12 +401,12 @@ impl MessageListener for MyListener {
         println!("收到消息: {:?}", frame);
         Ok(None)
     }
-    
+
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
         println!("连接建立: {}", connection_id);
         Ok(())
     }
-    
+
     async fn on_disconnect(&self, connection_id: &str, reason: Option<&str>) -> Result<()> {
         println!("连接断开: {}", connection_id);
         Ok(())
@@ -416,17 +416,17 @@ impl MessageListener for MyListener {
 #[tokio::main]
 async fn main() -> Result<()> {
     let listener = Arc::new(MyListener);
-    
+
     // 创建服务器（自动包含所有功能）
     let server = FlareServerBuilder::new("0.0.0.0:8080")
         .with_listener(listener)
         .build()?;
-    
+
     server.start().await?;
-    
+
     tokio::signal::ctrl_c().await?;
     server.stop().await?;
-    
+
     Ok(())
 }
 ```
@@ -440,7 +440,7 @@ use flare_core::common::message::{
 
 FlareServerBuilder::new("0.0.0.0:8080")
     .with_listener(listener)
-    
+
     // 添加中间件（按添加顺序执行）
     .with_middleware(Arc::new(
         LoggingMiddleware::new("ServerLogging")
@@ -459,7 +459,7 @@ FlareServerBuilder::new("0.0.0.0:8080")
             }
         })
     ))
-    
+
     .build()?;
 ```
 
@@ -498,38 +498,38 @@ let device_manager = Arc::new(DeviceManager::new(
 let server = FlareServerBuilder::new("0.0.0.0:8080")
     // 必须：设置消息监听器
     .with_listener(listener)
-    
+
     // 中间件
     .with_middleware(Arc::new(LoggingMiddleware::new("ServerLogging")))
     .with_middleware(Arc::new(MetricsMiddleware::new("ServerMetrics")))
-    
+
     // 设备管理
     .with_device_manager(device_manager)
-    
+
     // 协议配置
     .with_protocols(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
     .with_protocol_address(TransportProtocol::WebSocket, "0.0.0.0:8080".to_string())
     .with_protocol_address(TransportProtocol::QUIC, "0.0.0.0:8081".to_string())
-    
+
     // 序列化和压缩（用于协商）
     .with_default_format(SerializationFormat::Json)  // 初始使用 JSON，协商后可能切换到 Protobuf
     .with_default_compression(CompressionAlgorithm::Gzip)
-    
+
     // 连接配置
     .with_max_connections(2000)
     .with_connection_timeout(Duration::from_secs(60))
     .with_heartbeat(HeartbeatConfig::default()
         .with_interval(Duration::from_secs(30))
         .with_timeout(Duration::from_secs(90)))
-    
+
     // 设备冲突策略
     .with_device_conflict_strategy(DeviceConflictStrategy::PlatformExclusive)
-    
+
     // 认证（可选）
     .enable_auth()
     .with_authenticator(authenticator)
     .with_auth_timeout(Duration::from_secs(30))
-    
+
     .build()?;
 ```
 
@@ -561,11 +561,11 @@ impl MessageMiddleware for MyCustomMiddleware {
         println!("[{}] 处理前: {:?}", self.name, ctx.frame);
         Ok(())
     }
-    
+
     async fn after(&self, ctx: &MessageContext, result: &mut Result<Option<Frame>>) {
         println!("[{}] 处理后: {:?}", self.name, result);
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -592,7 +592,7 @@ impl MessageProcessor for MyCustomProcessor {
         // 自定义处理逻辑
         Ok(None)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -610,23 +610,23 @@ FlareServerBuilder::new("0.0.0.0:8080")
 
 | 功能 | SimpleServerBuilder | ObserverServerBuilder | FlareServerBuilder |
 |------|---------------------|----------------------|-------------------|
-| **消息处理** | ✅ 闭包 | ✅ ConnectionHandler | ✅ MessageListener |
-| **中间件** | ❌ | ❌ | ✅ |
-| **消息管道** | ❌ | ❌ | ✅ |
-| **序列化协商** | ✅ 手动 | ✅ 手动 | ✅ 自动 |
-| **压缩协商** | ✅ 手动 | ✅ 手动 | ✅ 自动 |
-| **加密支持** | ❌ | ❌ | ✅ |
-| **设备管理** | ❌ | ✅ | ✅ |
-| **事件处理器** | ❌ | ✅ | ✅ |
-| **连接管理器** | ❌ | ✅ | ✅ |
-| **心跳检测** | ✅ | ✅ | ✅ |
-| **多协议支持** | ✅ | ✅ | ✅ |
-| **认证** | ✅ | ✅ | ✅ |
-| **自定义观察器** | ❌ | ✅ | ❌ |
-| **自定义中间件** | ❌ | ❌ | ✅ |
-| **自定义处理器** | ❌ | ❌ | ✅ |
-| **代码复杂度** | ⭐ 低 | ⭐⭐ 中 | ⭐⭐⭐ 高 |
-| **功能完整性** | ⭐ 基础 | ⭐⭐ 中等 | ⭐⭐⭐ 完整 |
+| **消息处理** | ✓ 闭包 | ✓ ConnectionHandler | ✓ MessageListener |
+| **中间件** | ✗ | ✗ | ✓ |
+| **消息管道** | ✗ | ✗ | ✓ |
+| **序列化协商** | ✓ 手动 | ✓ 手动 | ✓ 自动 |
+| **压缩协商** | ✓ 手动 | ✓ 手动 | ✓ 自动 |
+| **加密支持** | ✗ | ✗ | ✓ |
+| **设备管理** | ✗ | ✓ | ✓ |
+| **事件处理器** | ✗ | ✓ | ✓ |
+| **连接管理器** | ✗ | ✓ | ✓ |
+| **心跳检测** | ✓ | ✓ | ✓ |
+| **多协议支持** | ✓ | ✓ | ✓ |
+| **认证** | ✓ | ✓ | ✓ |
+| **自定义观察器** | ✗ | ✓ | ✗ |
+| **自定义中间件** | ✗ | ✗ | ✓ |
+| **自定义处理器** | ✗ | ✗ | ✓ |
+| **代码复杂度** |  低 |  中 |  高 |
+| **功能完整性** |  基础 |  中等 |  完整 |
 
 ---
 

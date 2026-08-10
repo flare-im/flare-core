@@ -4,11 +4,11 @@
 
 ## 特点
 
-- ✅ **零配置**：使用默认配置即可运行
-- ✅ **轻量级**：不包含中间件、管道等高级功能
-- ✅ **快速上手**：几行代码即可启动客户端
-- ✅ **灵活**：使用闭包定义处理逻辑，无需实现 trait
-- ✅ **仅支持 WebSocket**：默认使用 WebSocket 协议（ws://）
+- ✓ **零配置**：使用默认配置即可运行
+- ✓ **轻量级**：不包含中间件、管道等高级功能
+- ✓ **快速上手**：几行代码即可启动客户端
+- ✓ **灵活**：使用闭包定义处理逻辑，无需实现 trait
+- ✓ **仅支持 WebSocket**：默认使用 WebSocket 协议（ws://）
 
 ## 适用场景
 
@@ -113,12 +113,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             move |event| {
                 match event {
                     ConnectionEvent::Connected => {
-                        println!("\n[系统] ✅ 已连接到服务器！");
+                        println!("\n[系统] ✓ 已连接到服务器！");
                         print!("{}> ", username);
                         let _ = io::stdout().flush();
                     }
                     ConnectionEvent::Disconnected(reason) => {
-                        println!("\n[系统] ❌ 连接已断开: {}", reason);
+                        println!("\n[系统] ✗ 连接已断开: {}", reason);
                     }
                     ConnectionEvent::Error(e) => {
                         eprintln!("\n[错误] {:?}", e);
@@ -142,13 +142,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("正在连接...");
     match client.connect().await {
         Ok(_) => {
-            println!("✅ 连接成功！");
+            println!("✓ 连接成功！");
             println!("使用的协议: {:?}", client.active_protocol());
             println!("连接 ID: {:?}", client.connection_id());
             println!();
         }
         Err(e) => {
-            eprintln!("❌ 连接失败: {}", e);
+            eprintln!("✗ 连接失败: {}", e);
             return Err(format!("连接失败: {}", e).into());
         }
     }
@@ -156,7 +156,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // ============================================================
     // 发送消息
     // ============================================================
-    println!("💬 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
+    println!(" 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
 
     let stdin = tokio::io::stdin();
     let mut reader = tokio::io::BufReader::new(stdin);
@@ -197,7 +197,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // 发送消息
         if let Err(e) = client.send_frame(&frame).await {
-            eprintln!("❌ 发送消息失败: {}", e);
+            eprintln!("✗ 发送消息失败: {}", e);
             break;
         }
     }
@@ -206,8 +206,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // 断开连接
     // ============================================================
     client.disconnect().await?;
-    println!("\n✅ 已断开连接");
-    println!("📊 总共接收了 {} 条消息", MESSAGE_COUNT.load(Ordering::Relaxed));
+    println!("\n✓ 已断开连接");
+    println!(" 总共接收了 {} 条消息", MESSAGE_COUNT.load(Ordering::Relaxed));
 
     Ok(())
 }

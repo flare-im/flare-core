@@ -3,15 +3,15 @@
 //! 提供完整功能实现，包含所有 `common` 和 `server` 模块的能力，推荐用于生产环境。
 //!
 //! ## 特点
-//! - ✅ **实现 `ServerEventHandler` trait（必需）**：提供细化的命令处理方法
-//! - ✅ **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
-//! - ✅ **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
-//! - ✅ **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
-//! - ✅ **设备管理**：完整的设备冲突策略和多端管理
-//! - ✅ **认证机制**：JWT Token 认证
-//! - ✅ **心跳检测**：自动心跳和超时管理
-//! - ✅ **多协议支持**：WebSocket + QUIC 双协议
-//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
+//! - **实现 `ServerEventHandler` trait（必需）**：提供细化的命令处理方法
+//! - **自动消息路由**：`ServerMessageWrapper` 自动将消息路由到对应的处理方法
+//! - **自动 ACK 处理**：如果 handler 返回 `None`，框架自动发送 ACK
+//! - **错误处理**：处理失败时自动发送错误 ACK，确保客户端能收到响应
+//! - **设备管理**：完整的设备冲突策略和多端管理
+//! - **认证机制**：JWT Token 认证
+//! - **心跳检测**：自动心跳和超时管理
+//! - **多协议支持**：WebSocket + QUIC 双协议
+//! - **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
 //!
 //! ## 适用场景
 //! - 生产环境
@@ -86,18 +86,18 @@ impl FlareServerBuilder {
     ///
     /// #[async_trait]
     /// impl ServerEventHandler for MyHandler {
-    ///     async fn handle_message(
-    ///         &self,
-    ///         command: &PayloadCommand,
-    ///         connection_id: &str,
-    ///     ) -> Result<Option<Frame>> {
-    ///         // 处理消息
-    ///         Ok(None)
-    ///     }
+    /// async fn handle_message(
+    /// &self,
+    /// command: &PayloadCommand,
+    /// connection_id: &str,
+    /// ) -> Result<Option<Frame>> {
+    /// // 处理消息
+    /// Ok(None)
+    /// }
     /// }
     ///
     /// let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(MyHandler))
-    ///     .build()?;
+    /// .build()?;
     /// ```
     pub fn new(
         bind_address: impl Into<String>,
@@ -281,9 +281,9 @@ impl FlareServerBuilder {
     /// use flare_core::common::message::{LoggingMiddleware, LogLevel};
     ///
     /// FlareServerBuilder::new("0.0.0.0:8080", handler)
-    ///     .with_middleware(Arc::new(LoggingMiddleware::new("ServerLogging")
-    ///         .with_level(LogLevel::Info)))
-    ///     .build()?;
+    /// .with_middleware(Arc::new(LoggingMiddleware::new("ServerLogging")
+    /// .with_level(LogLevel::Info)))
+    /// .build()?;
     /// ```
     pub fn with_middleware(mut self, middleware: ArcMessageMiddleware) -> Self {
         self.middlewares.push(middleware);

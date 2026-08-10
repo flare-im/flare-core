@@ -2,7 +2,7 @@
 
 English · [中文](README.zh-CN.md)
 
-> ## ℹ️ This is communication infrastructure, not a ready-to-use IM product
+> ## ℹ This is communication infrastructure, not a ready-to-use IM product
 >
 > Up front, so you don't discover after cloning that you can't log in:
 > **the open-source part does not include an account system** (no

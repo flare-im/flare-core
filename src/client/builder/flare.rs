@@ -3,15 +3,15 @@
 //! 提供完整功能实现，包含所有 `common` 和 `client` 模块的能力，推荐用于生产环境。
 //!
 //! ## 特点
-//! - ✅ **实现 `MessageListener` trait（必需）**：提供统一的消息处理接口
-//! - ✅ **消息管道**：自动处理序列化、压缩、加密
-//! - ✅ **中间件支持**：日志、性能监控、验证等
-//! - ✅ **处理器链**：可组合多个处理器
-//! - ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
-//! - ✅ **心跳管理**：自动心跳和超时管理
-//! - ✅ **自动重连**：支持断线重连
-//! - ✅ **多协议支持**：WebSocket + QUIC 双协议竞速
-//! - ✅ **统一事件处理**：使用 Observer 模式统一处理所有事件（连接事件、消息事件等）
+//! - **实现 `MessageListener` trait（必需）**：提供统一的消息处理接口
+//! - **消息管道**：自动处理序列化、压缩、加密
+//! - **中间件支持**：日志、性能监控、验证等
+//! - **处理器链**：可组合多个处理器
+//! - **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）和压缩算法（None/Gzip/Zstd）
+//! - **心跳管理**：自动心跳和超时管理
+//! - **自动重连**：支持断线重连
+//! - **多协议支持**：WebSocket + QUIC 双协议竞速
+//! - **统一事件处理**：使用 Observer 模式统一处理所有事件（连接事件、消息事件等）
 //!
 //! ## 适用场景
 //! - 生产环境
@@ -145,27 +145,27 @@ impl FlareClientBuilder {
     /// struct MyObserver;
     ///
     /// impl ConnectionObserver for MyObserver {
-    ///     fn on_event(&self, event: &ConnectionEvent) {
-    ///         match event {
-    ///             ConnectionEvent::Connected => {
-    ///                 println!("已连接");
-    ///             }
-    ///             ConnectionEvent::Disconnected(reason) => {
-    ///                 println!("连接断开: {}", reason);
-    ///             }
-    ///             ConnectionEvent::Message(data) => {
-    ///                 // 处理原始消息数据
-    ///                 println!("收到消息: {} bytes", data.len());
-    ///             }
-    ///             ConnectionEvent::Error(err) => {
-    ///                 println!("连接错误: {:?}", err);
-    ///             }
-    ///         }
-    ///     }
+    /// fn on_event(&self, event: &ConnectionEvent) {
+    /// match event {
+    /// ConnectionEvent::Connected => {
+    /// println!("已连接");
+    /// }
+    /// ConnectionEvent::Disconnected(reason) => {
+    /// println!("连接断开: {}", reason);
+    /// }
+    /// ConnectionEvent::Message(data) => {
+    /// // 处理原始消息数据
+    /// println!("收到消息: {} bytes", data.len());
+    /// }
+    /// ConnectionEvent::Error(err) => {
+    /// println!("连接错误: {:?}", err);
+    /// }
+    /// }
+    /// }
     /// }
     ///
     /// let builder = FlareClientBuilder::new("ws://127.0.0.1:8080")
-    ///     .with_observer(Arc::new(MyObserver));
+    /// .with_observer(Arc::new(MyObserver));
     /// ```
     pub fn with_observer(mut self, observer: Arc<dyn ConnectionObserver>) -> Self {
         self.observers.push(observer);
