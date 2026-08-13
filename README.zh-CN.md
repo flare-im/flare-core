@@ -27,7 +27,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/flare-core.svg)](https://crates.io/crates/flare-core)
 [![Documentation](https://docs.rs/flare-core/badge.svg)](https://docs.rs/flare-core)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 [![GitHub](https://img.shields.io/github/stars/flare-im/flare-core?style=social&label=GitHub)](https://github.com/flare-im/flare-core)
 
@@ -274,7 +274,7 @@ crate 级文档为 crates.io 和 docs.rs 保持英文。
 
 ## 许可证
 
-依据 [MIT License](LICENSE) 授权。
+依据 [Apache License 2.0](LICENSE) 授权。
 
 ---
 
