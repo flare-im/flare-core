@@ -1,6 +1,6 @@
 [package]
 name = "flare-core"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 rust-version = "1.94.0"
 description = "A high-performance, reliable long-connection communication toolkit for Rust, supporting WebSocket and QUIC protocols with features like authentication, device management, serialization negotiation, and protocol racing."
@@ -21,8 +21,13 @@ exclude = [
     "certs/",
     ".git/",
     ".github/",
+    # 排除全部 md 再放回必要的几份：仓里有大量过程性文档，不该塞进发布包。
+    # CHANGELOG 必须在包里 —— 用户在 docs.rs / crates.io 上看到的就是它，
+    # 这次正是一个安全修复版本，变更记录比什么都重要。
     "*.md",
     "!README.md",
+    "!README.zh-CN.md",
+    "!CHANGELOG.md",
 ]
 
 [package.metadata.docs.rs]
