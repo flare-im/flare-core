@@ -143,11 +143,17 @@ impl ConnectionManager {
     ) -> (i32, i32) {
         use std::collections::HashMap;
 
+        // 分段计时：实测扩散随在线连接数线性增长 ≈2.2ms/连接，但每连接的工作
+        // （try_enqueue 非阻塞入队、快照按分片批量读）都极便宜，对不上这个斜率。
+        // 分三段量出来，避免又一次靠读代码推断热点——这轮排查里推断已经错过四次。
+        let t_snapshot = std::time::Instant::now();
         let snapshots = self.connection_snapshots_for_ids(connection_ids);
+        let snapshot_us = t_snapshot.elapsed().as_micros() as u64;
         let total = snapshots.len();
         if total == 0 {
             return (0, 0);
         }
+        let t_serialize = std::time::Instant::now();
 
         let mut plain_groups: HashMap<
             (
@@ -168,6 +174,10 @@ impl ConnectionManager {
                 encrypted.push(snapshot);
             }
         }
+
+        let group_us = t_serialize.elapsed().as_micros() as u64;
+        let group_count = plain_groups.len();
+        let t_write = std::time::Instant::now();
 
         let mut successful: Vec<String> = Vec::with_capacity(total);
         for ((format, compression), group) in plain_groups {
@@ -223,8 +233,25 @@ impl ConnectionManager {
             successful.extend(sent);
         }
 
+        let write_us = t_write.elapsed().as_micros() as u64;
         let success = successful.len() as i32;
+        let t_active = std::time::Instant::now();
         self.update_connections_active(successful);
+
+        // 只在连接数达到一定规模时记：小扇出（单聊 2 个连接）每条消息都打一行
+        // 会把日志刷爆，而斜率问题只在大扇出时才看得见。
+        if total >= 16 {
+            tracing::info!(
+                connections = total,
+                groups = group_count,
+                snapshot_us,
+                group_us,
+                write_us,
+                active_us = t_active.elapsed().as_micros() as u64,
+                per_conn_us = write_us / total.max(1) as u64,
+                "grouped fanout timing"
+            );
+        }
         (success, (total as i32).saturating_sub(success))
     }
 
