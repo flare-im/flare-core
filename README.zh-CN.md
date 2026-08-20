@@ -61,13 +61,13 @@ API 文档：[docs.rs/flare-core](https://docs.rs/flare-core)
 
 ```toml
 [dependencies]
-flare-core = "1.0.1"
+flare-core = "1.1"
 ```
 
 仅服务端网关：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "server",
     "websocket",
     "quic",
@@ -79,7 +79,7 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 原生客户端：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "client",
     "websocket",
     "quic",
@@ -91,14 +91,14 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 TCP 与完整特性集：
 
 ```toml
-flare-core = { version = "1.0.1", features = ["tcp"] }
-flare-core = { version = "1.0.1", features = ["full"] }
+flare-core = { version = "1.1", features = ["tcp"] }
+flare-core = { version = "1.1", features = ["full"] }
 ```
 
 WASM WebSocket 客户端：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] }
+flare-core = { version = "1.1", default-features = false, features = ["wasm"] }
 ```
 
 ```bash
@@ -150,7 +150,14 @@ Transport     HybridServer | HybridClient | WebSocket | QUIC | TCP
 
 ## 快速开始
 
-最小的 Flare 模式服务端：
+最小的 Flare 模式服务端。样例需要的全部依赖：
+
+```toml
+[dependencies]
+flare-core = "1.1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+```
 
 ```rust
 use async_trait::async_trait;
@@ -176,7 +183,11 @@ impl ServerEventHandler for Handler {
 #[tokio::main]
 async fn main() -> Result<()> {
     let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(Handler)).build()?;
-    server.run().await
+
+    // start() 启动监听后即返回，不阻塞；进程需要自己保持存活。
+    server.start().await?;
+    tokio::signal::ctrl_c().await.expect("等待 Ctrl-C");
+    server.stop().await
 }
 ```
 

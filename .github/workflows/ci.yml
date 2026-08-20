@@ -120,3 +120,21 @@ jobs:
         with:
           name: perf-baseline
           path: perf-baseline.txt
+
+  # README 是 crates.io 页面渲染的内容。官网文档站在私有仓、没有部署路径，
+  # 所以**外部使用者实际拿得到的文档就是它**——它坏了没有任何别的信号。
+  #
+  # 两条判据，缺一不可（第一版只做了编译那条，把版本号改回 1.0.1 照样绿）：
+  #   1. 依赖块 + 代码块原样落成 crate、依赖走 registry 真编一遍 —— 抓 API 漂移
+  #   2. 依赖示例里的版本号还是不是当前发布版 —— 编译抓不到，因为 cargo 的 ^
+  #      语义会把旧 pin 解析到新版本，两边都编得过
+  readme:
+    name: README 样例能否编过
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验 README 样例与版本号
+        run: python3 scripts/check_readme_sample.py

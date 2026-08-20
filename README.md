@@ -74,13 +74,13 @@ API documentation: [docs.rs/flare-core](https://docs.rs/flare-core)
 
 ```toml
 [dependencies]
-flare-core = "1.0.1"
+flare-core = "1.1"
 ```
 
 Server-only gateway:
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "server",
     "websocket",
     "quic",
@@ -92,7 +92,7 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 Native client:
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "client",
     "websocket",
     "quic",
@@ -104,14 +104,14 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 TCP and full feature sets:
 
 ```toml
-flare-core = { version = "1.0.1", features = ["tcp"] }
-flare-core = { version = "1.0.1", features = ["full"] }
+flare-core = { version = "1.1", features = ["tcp"] }
+flare-core = { version = "1.1", features = ["full"] }
 ```
 
 WASM WebSocket client:
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] }
+flare-core = { version = "1.1", default-features = false, features = ["wasm"] }
 ```
 
 ```bash
@@ -165,7 +165,14 @@ Builder families:
 
 ## Quick Start
 
-Minimal Flare-mode server:
+Minimal Flare-mode server. Everything the sample needs:
+
+```toml
+[dependencies]
+flare-core = "1.1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+```
 
 ```rust
 use async_trait::async_trait;
@@ -191,7 +198,12 @@ impl ServerEventHandler for Handler {
 #[tokio::main]
 async fn main() -> Result<()> {
     let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(Handler)).build()?;
-    server.run().await
+
+    // `start` returns once the listener is up; it does not block.
+    // The process has to keep itself alive.
+    server.start().await?;
+    tokio::signal::ctrl_c().await.expect("listen for ctrl-c");
+    server.stop().await
 }
 ```
 
