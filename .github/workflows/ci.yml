@@ -60,3 +60,63 @@ jobs:
 
       - name: cargo deny（许可 / 来源 / 重复依赖）
         run: cargo deny check
+
+  # MSRV 门禁：Cargo.toml 里一直写着 rust-version，但在此之前**没有任何地方验证过**。
+  # 声明一个最低版本却不验证，等于对外承诺了一个没人试过的编译环境:开发机常年跟着
+  # stable 走,哪天用上了更新的特性也不会有任何信号——直到外部用户按我们写的
+  # 最低版本去编,然后编不过。
+  #
+  # 工具链版本从 Cargo.toml 现读,不在这里再写一遍:同一个数字放两处必然漂移。
+  msrv:
+    name: 最低支持 Rust 版本
+    runs-on: ubuntu-latest
+    # 这道门禁问的是「编不编得过」,不是「lint 干不干净」。老工具链的 lint 集合
+    # 与 stable 不同,带 -D warnings 会因为无关的 lint 差异变红,把一个有意义的
+    # 判据变成噪音,最后没人看——这个项目已经吃过一次长期红的亏。
+    env:
+      RUSTFLAGS: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 Cargo.toml 声明的 MSRV
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check（按声明的 MSRV）
+        run: cargo check --all-targets
+
+  # 性能基线：benches/perf_baseline.rs 一直存在，但**在此之前没有任何 CI 跑过它**。
+  # `scripts/verify.sh` 里的 `cargo check --benches` 只证明它能编过,而且 verify.sh
+  # 本身只在有人手动执行时才跑。基线建了没人看,等于没建。
+  #
+  # 判据刻意不按绝对耗时设阈值:共享 runner 上同一段代码能差好几倍,按本机数字
+  # 设卡必然长期红——这个项目已经吃过一次「非阻塞 + 长期红 = 告警彻底失效」的亏。
+  # 实际判的是齐全性 + 同轮比值 + 留够量级余量的天花板,细节见脚本头部。
+  perf:
+    name: 性能基线
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `shell: bash` 是必须的,不能省:默认 shell 只带 -e 不带 pipefail,
+      # 管道给了 tee 之后退出码取的是 tee 的——门禁判红也会被吞成绿。
+      # 这个仓库要的正是「别再造装饰性门禁」,这里自己踩一次就说不过去了。
+      - name: 跑基线并判回归
+        shell: bash
+        run: python3 scripts/check_perf_baseline.py | tee perf-baseline.txt
+
+      # 数字要能被外部复现和引用——「公开性能基准」这半件事靠这个产物落地。
+      - name: 上传本轮数字
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline
+          path: perf-baseline.txt
