@@ -162,12 +162,33 @@ def main() -> int:
 
         if proc.returncode == 0:
             checked += 1
-            m = re.search(rf'{CRATE}\s*=\s*"([^"]+)"', deps)
-            pin = m.group(1) if m else None
-            print(f"  ✓ {name}：样例按 registry 依赖编得过（钉 {CRATE} {pin or '?'}）")
+            # 两种写法都要认，只认字符串式会在依赖块改成表式那天悄悄失效：
+            #   flare-x = "1.2"
+            #   flare-x = { version = "1.2", features = [...] }
+            # 这不是假设——本仓的安装块正是为了标注 feature 才改成表式的，
+            # 第一版正则当场就把 pin 读成了空，版本判据静默变成空断言。
+            dep_line = next(
+                (l for l in deps.splitlines() if re.match(rf'\s*{re.escape(CRATE)}\s*=', l)),
+                None,
+            )
+            pin = None
+            if dep_line:
+                m = re.search(r'"(\d[^"]*)"', dep_line)
+                pin = m.group(1) if m else None
+
+            if not pin:
+                failed += 1
+                print(f"✗ {name}：抽不出 {CRATE} 的版本号", file=sys.stderr)
+                print(
+                    "  依赖块的写法变了？抽不出就等于版本判据没跑——按红处理，别静默放过。",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"  ✓ {name}：样例按 registry 依赖编得过（钉 {CRATE} {pin}）")
 
             # 编译判据到此为止——它对版本号是瞎的。下面这条才管数字准不准。
-            if latest and pin and not pin_is_current(pin, latest):
+            if latest and not pin_is_current(pin, latest):
                 failed += 1
                 print(
                     f"✗ {name}：依赖示例写的是 {CRATE} {pin}，当前发布版是 {latest}",
