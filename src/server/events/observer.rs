@@ -25,6 +25,13 @@ struct ConnectionState {
 /// 这样可以在需要 `ConnectionObserver` 的地方使用 `ServerMessageWrapper`
 ///
 /// 注意：每个连接都有自己的协商结果，parser 应该根据连接信息动态创建，而不是固定存储
+/// 单连接入站队列容量。
+///
+/// 满了说明客户端灌入速度持续超过处理速度——正常客户端不会到这一步。
+/// 宁可响亮报错也不能静默丢帧：静默丢在 IM 里表现为「消息偶尔不见」，
+/// 是最难查的一类故障。
+const INBOUND_QUEUE_CAPACITY: usize = 1024;
+
 pub struct ConnectionHandlerObserverAdapter {
     /// 内部的 ConnectionHandler（ServerMessageWrapper）
     handler: Arc<ServerMessageWrapper>,
@@ -34,6 +41,17 @@ pub struct ConnectionHandlerObserverAdapter {
     connection_manager: Arc<ConnectionManager>,
     /// ServerCore 引用（用于处理 CONNECT 消息）
     server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
+    /// 本连接的入站帧队列。
+    ///
+    /// **同一连接的帧必须按序处理**。这里以前是每帧 `tokio::spawn`，等于把连接上
+    /// 天然有序的帧丢进运行时抢跑：两条连发的消息谁先跑到序列号分配谁拿小号，
+    /// 于是会话时间线**永久**错乱（实测连打 8 条必现 2–3 个逆序对，
+    /// 间隔 ≥300ms 才看不出来）。
+    ///
+    /// 改成「每连接一个队列 + 单消费任务」：连接内严格有序，连接之间照旧并行，
+    /// 吞吐仍随连接数扩展。顺带把「每帧一个任务」降成「每连接一个任务」，
+    /// 高频小包场景下调度开销更低。
+    inbound: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 impl ConnectionHandlerObserverAdapter {
@@ -44,11 +62,39 @@ impl ConnectionHandlerObserverAdapter {
         connection_manager: Arc<ConnectionManager>,
         server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
     ) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(INBOUND_QUEUE_CAPACITY);
+
+        // 每连接一个消费任务，串行处理本连接的帧。
+        // 适配器被丢弃时 tx 随之析构，rx.recv() 返回 None，任务自然退出。
+        {
+            let handler = Arc::clone(&handler);
+            let manager = Arc::clone(&connection_manager);
+            let server_core = server_core.clone();
+            let conn_id: Arc<str> = Arc::from(connection_id.as_str());
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    Self::handle_message_event(
+                        &handler,
+                        data,
+                        Arc::clone(&conn_id),
+                        Arc::clone(&manager),
+                        server_core.clone(),
+                    )
+                    .await;
+                }
+                debug!(
+                    "[ConnectionHandlerObserverAdapter] 入站队列关闭，消费任务退出: connection_id={}",
+                    conn_id
+                );
+            });
+        }
+
         Self {
             handler,
             connection_id,
             connection_manager,
             server_core,
+            inbound: tx,
         }
     }
 
@@ -414,16 +460,25 @@ impl ConnectionObserver for ConnectionHandlerObserverAdapter {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                let handler = Arc::clone(&self.handler);
-                let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
-                let manager = Arc::clone(&self.connection_manager);
-                let server_core = self.server_core.clone();
-                // 克隆 data 以便在异步任务中使用
-                let data = data.to_vec();
-
-                tokio::spawn(async move {
-                    Self::handle_message_event(&handler, data, conn_id, manager, server_core).await;
-                });
+                // 投递到本连接的有序队列，由单个消费任务按序处理。
+                // 这里不能 spawn：同一连接的帧一旦并行，序列号分配就会乱序。
+                if let Err(e) = self.inbound.try_send(data.to_vec()) {
+                    match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                            error!(
+                                "[ConnectionHandlerObserverAdapter] 入站队列已满({}), 丢弃该帧: connection_id={}。\
+                                 客户端灌入速度持续超过处理速度，请检查是否有异常重发。",
+                                INBOUND_QUEUE_CAPACITY, self.connection_id
+                            );
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            debug!(
+                                "[ConnectionHandlerObserverAdapter] 入站队列已关闭，忽略该帧: connection_id={}",
+                                self.connection_id
+                            );
+                        }
+                    }
+                }
             }
             ConnectionEvent::Connected => {
                 // 物理连接建立不等于 IM 会话建立。业务 on_connect 必须等 CONNECT
@@ -468,6 +523,72 @@ impl ConnectionObserver for ConnectionHandlerObserverAdapter {
                     }
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
+
+    /// 锁住「同一连接的帧按投递顺序处理」这个不变量。
+    ///
+    /// 这里复刻的是适配器的分发骨架（有界 mpsc + 单消费任务），不拉起整个
+    /// ServerMessageWrapper——要点在于**不能每帧 spawn**。
+    /// 之前正是每帧 spawn 让同连接的帧在运行时里抢跑：连发的消息谁先跑到
+    /// 序列号分配谁拿小号，会话时间线永久错乱。
+    /// 如果有人把分发改回并发，这个测试会红。
+    #[tokio::test]
+    async fn frames_from_one_connection_are_processed_in_order() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(1024);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicUsize::new(0));
+
+        let worker = {
+            let seen = Arc::clone(&seen);
+            let done = Arc::clone(&done);
+            tokio::spawn(async move {
+                while let Some(i) = rx.recv().await {
+                    // 故意让「先到的帧处理更慢」——并发分发下这必然导致乱序。
+                    let delay = if i % 2 == 0 { 8 } else { 1 };
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    seen.lock().await.push(i);
+                    done.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        const N: usize = 24;
+        for i in 0..N {
+            tx.try_send(i).expect("入站队列不该在这个规模下满");
+        }
+        drop(tx);
+        worker.await.expect("消费任务不该 panic");
+
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            N,
+            "所有帧都必须被处理，一帧不能少"
+        );
+        let got = seen.lock().await.clone();
+        assert_eq!(
+            got,
+            (0..N).collect::<Vec<_>>(),
+            "同一连接的帧必须按投递顺序处理；乱序说明分发又变成并发的了"
+        );
+    }
+
+    /// 队列满时必须**报错而不是静默丢**：静默丢在 IM 里表现为「消息偶尔不见」。
+    #[tokio::test]
+    async fn full_queue_is_observable_not_silent() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<usize>(2);
+        assert!(tx.try_send(1).is_ok());
+        assert!(tx.try_send(2).is_ok());
+        match tx.try_send(3) {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(v)) => assert_eq!(v, 3),
+            other => panic!("队列满必须可观测地失败，实际: {other:?}"),
         }
     }
 }
