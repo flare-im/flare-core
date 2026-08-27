@@ -37,10 +37,6 @@ pub struct ConnectionHandlerObserverAdapter {
     handler: Arc<ServerMessageWrapper>,
     /// 连接 ID
     connection_id: String,
-    /// 连接管理器（用于查询连接信息，获取协商结果）
-    connection_manager: Arc<ConnectionManager>,
-    /// ServerCore 引用（用于处理 CONNECT 消息）
-    server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
     /// 本连接的入站帧队列。
     ///
     /// **同一连接的帧必须按序处理**。这里以前是每帧 `tokio::spawn`，等于把连接上
@@ -89,11 +85,11 @@ impl ConnectionHandlerObserverAdapter {
             });
         }
 
+        // connection_manager / server_core 只在帧处理里用到，已被消费任务捕获，
+        // 不必再挂在结构体上。
         Self {
             handler,
             connection_id,
-            connection_manager,
-            server_core,
             inbound: tx,
         }
     }
