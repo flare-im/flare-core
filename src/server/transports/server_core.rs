@@ -873,8 +873,13 @@ impl ServerCore {
                     let error_msg = auth_result
                         .error_message
                         .unwrap_or_else(|| "Token 验证失败".to_string());
-                    error!(
-                        "[ServerCore] ❌ Token 验证失败: connection_id={}, error={}",
+                    // warn 而不是 error：客户端 token 过期是**常态**，
+                    // 端上会带着旧 token 重连、拿到 401 后再刷新，一次过期
+                    // 就是十几条日志。用 ERROR 记它会把真正的服务端故障淹掉
+                    // （实测一个开着的客户端 10 分钟刷了 30 条 ERROR）。
+                    // 鉴权失败本身仍然照常拒绝，只是不再冒充服务端错误。
+                    warn!(
+                        "[ServerCore] Token 验证失败: connection_id={}, error={}",
                         connection_id, error_msg
                     );
                     Err(crate::common::error::FlareError::authentication_failed(

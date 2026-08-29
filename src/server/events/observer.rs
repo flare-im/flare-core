@@ -413,10 +413,23 @@ impl ConnectionHandlerObserverAdapter {
             .handle_connect_complete(frame, conn_id, connection)
             .await
         {
-            error!(
-                "[ConnectionHandlerObserverAdapter] 处理 CONNECT 消息失败: connection_id={}, error={}",
-                conn_id, e
-            );
+            // 鉴权失败是客户端侧的常态（token 过期后带旧 token 重连），
+            // 用 warn；其余 CONNECT 失败仍是服务端问题，保持 error。
+            // 不做区分的话，一个客户端过期就能刷屏并淹掉真故障。
+            if matches!(
+                e.code(),
+                Some(crate::common::error::ErrorCode::AuthenticationFailed)
+            ) {
+                warn!(
+                    "[ConnectionHandlerObserverAdapter] CONNECT 鉴权失败: connection_id={}, error={}",
+                    conn_id, e
+                );
+            } else {
+                error!(
+                    "[ConnectionHandlerObserverAdapter] 处理 CONNECT 消息失败: connection_id={}, error={}",
+                    conn_id, e
+                );
+            }
             if let Err(remove_err) = manager.remove_connection(conn_id) {
                 warn!(
                     "[ConnectionHandlerObserverAdapter] CONNECT 失败后移除连接失败: connection_id={}, error={}",
