@@ -85,7 +85,7 @@ npm run typecheck && npm test
 
 ## 许可
 
-提交贡献即表示你同意你的贡献按 [Apache-2.0](LICENSE) 授权，且你有权这么做。
+提交贡献即表示你同意你的贡献按 [Apache-2.0](../LICENSE) 授权，且你有权这么做。
 
 ## 安全问题
 
