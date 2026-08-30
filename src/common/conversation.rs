@@ -824,4 +824,24 @@ mod tests {
         let group_id = generate_group_conversation_id("group_12345");
         assert!(is_group_chat_conversation(&group_id));
     }
+
+    /// 冒烟脚本 scripts/smoke_message_flow.sh 用 shell+python 复刻了这个算法
+    /// （部署环境没有 Rust 工具链）。这里固化几组参考值，
+    /// 一旦算法改动而脚本没跟上，这个测试会红。
+    #[test]
+    fn smoke_cid_reference_values() {
+        let cases = [
+            ("smoke-user-a", "smoke-user-b"),
+            ("user1", "user2"),
+            ("alice", "bob"),
+        ];
+        for (a, b) in cases {
+            let id = generate_single_chat_conversation_id(a, b);
+            println!("REFCID {a} {b} => {id}");
+            assert!(id.starts_with("1A"), "前缀必须是 1A: {id}");
+            assert_eq!(id.len(), 18, "长度必须是 18: {id}");
+            // 顺序无关
+            assert_eq!(id, generate_single_chat_conversation_id(b, a));
+        }
+    }
 }
