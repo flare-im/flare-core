@@ -30,6 +30,11 @@ use crate::client::transports::websocket::WebSocketClient;
 pub struct HybridClient {
     /// 内部客户端（根据配置动态选择）
     inner: Arc<Mutex<Box<dyn Client>>>,
+    /// 最近一次**成功读到**的连接状态。
+    ///
+    /// `is_connected` 是同步 trait 方法，撞上 `inner` 锁时没有阻塞以外的选择——
+    /// 而阻塞在这里两头不讨好（见 `is_connected` 处的说明）。缓存让它可以无锁降级。
+    last_known_connected: Arc<std::sync::atomic::AtomicBool>,
     /// 使用的协议
     active_protocol: TransportProtocol,
     /// 客户端核心功能（统一管理连接状态、心跳、消息路由）
@@ -84,6 +89,7 @@ impl HybridClient {
 
         Ok(Self {
             inner: Arc::new(Mutex::new(client)),
+            last_known_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_protocol: protocol,
             core,
         })
@@ -107,6 +113,7 @@ impl HybridClient {
 
         Ok(Self {
             inner: Arc::new(Mutex::new(client)),
+            last_known_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_protocol: default_protocol,
             core,
         })
@@ -790,18 +797,23 @@ impl Client for HybridClient {
     }
 
     fn is_connected(&self) -> bool {
-        // 优先使用 try_lock 避免阻塞，如果无法立即获取锁则使用 block_in_place
-        // 这样可以避免在异步运行时中直接使用 blocking_lock 导致的 panic
+        use std::sync::atomic::Ordering;
         match self.inner.try_lock() {
-            Ok(client) => client.is_connected(),
-            Err(_) => {
-                // 如果无法立即获取锁，使用 block_in_place 在专用线程中执行
-                // 这会将阻塞操作移到专用线程，避免阻塞 Tokio 运行时
-                tokio::task::block_in_place(|| {
-                    let client = self.inner.blocking_lock();
-                    client.is_connected()
-                })
+            Ok(client) => {
+                let connected = client.is_connected();
+                self.last_known_connected.store(connected, Ordering::Relaxed);
+                connected
             }
+            // 撞锁不阻塞，退回上一次观察到的状态。
+            //
+            // 这里原来是 `block_in_place` + `blocking_lock`，注释说它"避免阻塞 Tokio
+            // 运行时"——恰恰相反：`block_in_place` 要把本 worker 的整个任务队列交接给
+            // 另一个线程，而 `blocking_lock` 随后把这个线程真的挂住，只为读一个布尔；
+            // 在 current-thread runtime 上它更是直接 panic。
+            //
+            // 而"拿不到锁"本身就意味着底层正在收发，缓存值是那一刻的真实状态；
+            // 每次成功读取都会刷新它，所以最多只会陈旧一个临界区的时间。
+            Err(_) => self.last_known_connected.load(Ordering::Relaxed),
         }
     }
 
@@ -939,6 +951,7 @@ impl HybridClient {
 
         Ok(Self {
             inner: Arc::new(Mutex::new(client)),
+            last_known_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_protocol: protocol,
             core,
         })

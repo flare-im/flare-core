@@ -312,20 +312,7 @@ impl ClientCore {
 
     /// 异步停止心跳（内部辅助函数）
     fn stop_heartbeat_async(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::client::runtime::run_client_async(async {
-                let mut hb_guard = heartbeat.lock().await;
-                hb_guard.stop();
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::client::runtime::spawn_client_task(async move {
-                let mut hb_guard = heartbeat.lock().await;
-                hb_guard.stop();
-            });
-        }
+        stop_heartbeat_on(heartbeat);
     }
 
     /// 处理接收到的消息
@@ -916,23 +903,7 @@ impl ClientCore {
         let Some(heartbeat) = heartbeat else {
             return;
         };
-        // HeartbeatManager::record_pong 是 `&self` 方法
-        // 但由于我们使用了 Arc<Mutex<>>，需要先获取锁
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::client::runtime::run_client_async(async {
-                let hb_guard = heartbeat.lock().await;
-                hb_guard.record_pong();
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let heartbeat = Arc::clone(&heartbeat);
-            crate::client::runtime::spawn_client_task(async move {
-                let hb_guard = heartbeat.lock().await;
-                hb_guard.record_pong();
-            });
-        }
+        record_pong_on(heartbeat);
     }
 }
 
@@ -1095,5 +1066,114 @@ mod client_core_tests {
             crate::common::platform::monotonic_now()
         }
         fn update_active_time(&mut self) {}
+    }
+}
+
+/// 拿到心跳管理器并记一次 PONG，**不阻塞、不 panic**。
+///
+/// 这里曾经用 `run_client_async`（`block_in_place` + `block_on`）去取那把 async 锁，
+/// 两个代价：
+/// ① current-thread runtime 上 `block_in_place` 直接 panic，而 PONG 是每个心跳周期
+///    都要走的路径 —— 任务被打死后心跳记账不再更新，连接会被自己判成超时；
+/// ② 多线程 runtime 上不 panic，但每收一个 PONG 就要把本 worker 的任务队列交接给
+///    另一个线程，只为了写一个时间戳。
+///
+/// 而 `HeartbeatManager::record_pong` 只要 `&self`，内部已经是 `std::sync::Mutex`
+/// 自带互斥 —— 那把外层 async 锁只是取引用的手段。所以常态走 `try_lock` 内联完成，
+/// 只有真撞上锁时才丢给后台任务（顺序无所谓：记的是"最近一次 PONG 的时刻"）。
+fn record_pong_on(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
+    if let Ok(hb_guard) = heartbeat.try_lock() {
+        hb_guard.record_pong();
+        return;
+    }
+    crate::client::runtime::spawn_client_task(async move {
+        let hb_guard = heartbeat.lock().await;
+        hb_guard.record_pong();
+    });
+}
+
+/// 停止心跳，同上：常态同步完成，撞锁才异步。
+///
+/// 停止只是把 stop_tx 发一次信号，重复/延后执行都是幂等的。
+fn stop_heartbeat_on(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
+    if let Ok(mut hb_guard) = heartbeat.try_lock() {
+        hb_guard.stop();
+        return;
+    }
+    crate::client::runtime::spawn_client_task(async move {
+        let mut hb_guard = heartbeat.lock().await;
+        hb_guard.stop();
+    });
+}
+
+#[cfg(test)]
+mod heartbeat_bridge_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn manager() -> Arc<tokio::sync::Mutex<HeartbeatManager>> {
+        Arc::new(tokio::sync::Mutex::new(HeartbeatManager::new(
+            Duration::from_secs(30),
+            Duration::from_secs(90),
+        )))
+    }
+
+    /// `#[tokio::test]` 默认就是 current-thread —— 正是原实现必 panic 的那个形态。
+    /// PONG 每个心跳周期都要走，一旦打死任务，心跳记账不再更新，连接会被自己判成超时。
+    #[tokio::test]
+    async fn record_pong_works_on_current_thread_runtime() {
+        let heartbeat = manager();
+        {
+            let guard = heartbeat.lock().await;
+            guard.mark_ping_for_test();
+            assert!(
+                guard.is_timeout_after_for_test(Duration::from_secs(0)),
+                "先制造一个未응答的 ping，否则断言不出 PONG 有没有记上"
+            );
+        }
+
+        record_pong_on(Arc::clone(&heartbeat));
+
+        let guard = heartbeat.lock().await;
+        assert!(
+            !guard.is_timeout_after_for_test(Duration::from_secs(0)),
+            "PONG 必须被记上：单线程 runtime 下也不能丢"
+        );
+    }
+
+    /// 撞锁时不能阻塞、更不能 panic —— 退化成后台补记即可。
+    #[tokio::test]
+    async fn record_pong_falls_back_to_background_when_lock_is_held() {
+        let heartbeat = manager();
+        {
+            let guard = heartbeat.lock().await;
+            guard.mark_ping_for_test();
+        }
+        let held = heartbeat.clone().lock_owned().await;
+
+        record_pong_on(Arc::clone(&heartbeat));
+        drop(held);
+
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if !heartbeat
+                .lock()
+                .await
+                .is_timeout_after_for_test(Duration::from_secs(0))
+            {
+                return;
+            }
+        }
+        panic!("撞锁后的 PONG 必须由后台任务补记上");
+    }
+
+    #[tokio::test]
+    async fn stop_heartbeat_works_on_current_thread_runtime() {
+        let heartbeat = manager();
+        stop_heartbeat_on(Arc::clone(&heartbeat));
+        assert!(
+            !heartbeat.lock().await.has_stop_channel_for_test(),
+            "停止后 stop 通道必须已被取走"
+        );
     }
 }

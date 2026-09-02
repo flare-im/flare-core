@@ -180,6 +180,29 @@ impl HeartbeatManager {
         }
     }
 
+    /// 仅测试用：制造一次"已发 ping、尚未收到 pong"的状态。
+    #[cfg(test)]
+    pub(crate) fn mark_ping_for_test(&self) {
+        if let Ok(mut last) = self.last_ping.lock() {
+            *last = Some(monotonic_now());
+        }
+        if let Ok(mut last) = self.last_pong.lock() {
+            *last = None;
+        }
+    }
+
+    /// 仅测试用：按给定超时判定，免得测试去睡真实时间。
+    #[cfg(test)]
+    pub(crate) fn is_timeout_after_for_test(&self, timeout: Duration) -> bool {
+        unanswered_ping_timed_out(&self.last_ping, &self.last_pong, timeout)
+    }
+
+    /// 仅测试用：stop 通道是否还在（`stop()` 会取走它）。
+    #[cfg(test)]
+    pub(crate) fn has_stop_channel_for_test(&self) -> bool {
+        self.stop_tx.is_some()
+    }
+
     /// 检查心跳是否超时
     pub fn is_timeout(&self) -> bool {
         unanswered_ping_timed_out(
