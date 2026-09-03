@@ -32,6 +32,10 @@ const NEGOTIATION_TIMEOUT_HINT: &str =
 #[cfg(target_arch = "wasm32")]
 const MAX_WASM_INBOUND_QUEUE: usize = 512;
 
+/// 协商阶段被服务端断开时写入 `negotiation_failure_reason` 的前缀；
+/// `negotiation_failure_error` 据此把它升级成 AUTHENTICATION_FAILED 而不是泛泛的协议错误。
+pub const TOKEN_REJECTED_PREFIX: &str = "TOKEN_REJECTED: ";
+
 fn negotiation_timeout_error(timeout: std::time::Duration) -> FlareError {
     FlareError::connection_timeout(format!(
         "Negotiation timeout after {:?} (CONNECT_ACK not received). {}",
@@ -694,9 +698,13 @@ impl ClientCore {
             .lock()
             .ok()
             .and_then(|reason| {
-                reason
-                    .as_ref()
-                    .map(|msg| FlareError::protocol_error(msg.clone()))
+                reason.as_ref().map(|msg| {
+                    if msg.starts_with(TOKEN_REJECTED_PREFIX) {
+                        FlareError::authentication_failed(msg.clone())
+                    } else {
+                        FlareError::protocol_error(msg.clone())
+                    }
+                })
             })
     }
 
@@ -724,9 +732,30 @@ impl ClientCore {
                 self.state_manager.set_connected();
                 self.reset_negotiation_state();
             }
-            ConnectionEvent::Disconnected(_) => {
+            ConnectionEvent::Disconnected(reason) => {
+                // 服务端在 CONNECT_ACK 之前就关掉了连接：几乎只有一种情况——CONNECT 里的
+                // token 被拒（密钥/签发者对不上或已过期），网关校验失败后直接 remove_connection，
+                // 不回任何帧。以前这里只是复位状态，等协商的一方要干等到 10s 超时，
+                // 然后报「CONNECT_ACK not received，确认服务端跑的是 flare_chat_server」——
+                // 把一次密钥填错伪装成服务端没起。现在立刻唤醒等待者并给出鉴权失败。
+                let rejected_during_negotiation = matches!(
+                    self.state_manager.get_state(),
+                    crate::client::connection::state::ConnectionState::Connected
+                ) && !self.is_negotiation_completed()
+                    && !self.disconnect_requested.load(Ordering::SeqCst);
                 self.state_manager.set_disconnected();
                 self.reset_negotiation_state();
+                if rejected_during_negotiation {
+                    let msg = format!(
+                        "{TOKEN_REJECTED_PREFIX}server closed the connection before CONNECT_ACK ({reason}); \
+                         the access token was rejected — check the signing secret, issuer and expiry"
+                    );
+                    tracing::warn!("[ClientCore] {}", msg);
+                    if let Ok(mut stored) = self.negotiation_failure_reason.lock() {
+                        *stored = Some(msg);
+                    }
+                    self.negotiation_notify.notify_waiters();
+                }
                 let pending = Arc::clone(&self.pending_map);
                 crate::client::runtime::spawn_client_task(async move {
                     let mut map = pending.lock().await;
@@ -1175,5 +1204,51 @@ mod heartbeat_bridge_tests {
             !heartbeat.lock().await.has_stop_channel_for_test(),
             "停止后 stop 通道必须已被取走"
         );
+    }
+}
+
+#[cfg(test)]
+mod negotiation_rejection_tests {
+    use super::*;
+
+    fn core() -> ClientCore {
+        ClientCore::new(&ClientConfig::default())
+    }
+
+    /// 网关拒掉 CONNECT 里的 token 时不回任何帧，直接关连接。等协商的一方必须立刻拿到
+    /// AUTHENTICATION_FAILED，而不是干等 10s 再报「CONNECT_ACK not received」。
+    #[test]
+    fn server_close_before_connect_ack_fails_negotiation_as_auth_failure() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        assert!(core.negotiation_failure_error().is_none());
+
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
+
+        let err = core
+            .negotiation_failure_error()
+            .expect("协商阶段被断开必须立刻记为协商失败");
+        assert_eq!(err.code(), Some(crate::common::error::ErrorCode::AuthenticationFailed));
+        assert!(err.to_string().contains("before CONNECT_ACK"), "{err}");
+    }
+
+    /// 我方主动断开（切账号/登出）不是被拒，不能伪造鉴权失败。
+    #[test]
+    fn client_requested_disconnect_is_not_a_rejection() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.set_disconnect_requested(true);
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Closed by client".into()));
+        assert!(core.negotiation_failure_error().is_none());
+    }
+
+    /// 协商已经完成后的断线是普通掉线，走重连，不是 token 被拒。
+    #[test]
+    fn disconnect_after_negotiation_completed_is_not_a_rejection() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.negotiation_completed.store(true, Ordering::SeqCst);
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
+        assert!(core.negotiation_failure_error().is_none());
     }
 }
