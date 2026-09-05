@@ -206,6 +206,25 @@ pub async fn handle_device_conflict(
                     conflict_conn_id
                 );
             }
+
+            // 同步从连接管理器移除旧连接，不再仅依赖断开事件的延迟清理。
+            // 否则旧连接仍留在 get_user_connections / 下行投递路由集合里，
+            // 下行帧（含 SendAck）会被写到已关闭的 socket 而丢失
+            // （signaling-gateway "Sending after closing"）。
+            match manager.remove_connection(conflict_conn_id).await {
+                Ok(_) => {
+                    info!(
+                        "[DeviceHandler] ✅ 旧连接已从连接管理器同步移除: {} (新连接: {})",
+                        conflict_conn_id, connection_id
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "[DeviceHandler] 旧连接 {} 已不在连接管理器或移除失败: {}",
+                        conflict_conn_id, e
+                    );
+                }
+            }
         }
 
         info!(
@@ -230,4 +249,111 @@ pub async fn handle_device_conflict(
     Ok(DeviceConflictResult {
         conflict_connections,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::device::{DeviceConflictStrategy, DeviceInfo, DevicePlatform};
+    use crate::server::connection::ConnectionManager;
+    use crate::transport::connection::Connection;
+    use crate::transport::events::ArcObserver;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct MockConn {
+        last_active: Mutex<Instant>,
+    }
+
+    impl MockConn {
+        fn new() -> Self {
+            Self {
+                last_active: Mutex::new(Instant::now()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Connection for MockConn {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> Instant {
+            *self.last_active.lock().unwrap()
+        }
+        fn update_active_time(&mut self) {
+            *self.last_active.lock().unwrap() = Instant::now();
+        }
+    }
+
+    /// 回归：设备冲突（重连）时旧连接必须**同步从连接管理器**移除，
+    /// 否则旧连接仍留在 `get_user_connections`/下行投递路由集合里，
+    /// 下行帧（含 SendAck）会被写到已关闭的 socket 而丢失
+    /// （signaling-gateway 日志 "Sending after closing"）。
+    #[tokio::test]
+    async fn device_conflict_evicts_old_connection_from_connection_manager() {
+        let manager = Arc::new(ConnectionManager::new());
+        let device_mgr = Arc::new(DeviceManager::new(DeviceConflictStrategy::PlatformExclusive));
+
+        // 旧连接：同用户、Web 平台，注册进连接管理器 + 设备管理器
+        manager
+            .add_connection(
+                "old-conn".to_string(),
+                Box::new(MockConn::new()),
+                Some("user1".to_string()),
+                true,
+            )
+            .unwrap();
+        device_mgr
+            .add_device(
+                "user1",
+                "old-conn".to_string(),
+                DeviceInfo::new("dev-a".to_string(), DevicePlatform::Web),
+            )
+            .await
+            .unwrap();
+
+        // 新连接：同用户、同 Web 平台（重连），注册进连接管理器
+        manager
+            .add_connection(
+                "new-conn".to_string(),
+                Box::new(MockConn::new()),
+                Some("user1".to_string()),
+                true,
+            )
+            .unwrap();
+
+        let mgr_dyn: Arc<dyn ConnectionManagerTrait> = manager.clone();
+        let result = handle_device_conflict(
+            Some(device_mgr.clone()),
+            "user1",
+            "new-conn",
+            &DevicePlatform::Web,
+            &DeviceInfo::new("dev-b".to_string(), DevicePlatform::Web),
+            mgr_dyn,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.conflict_connections, vec!["old-conn".to_string()]);
+
+        // 关键断言：旧连接必须已从连接管理器移除
+        let user_conns = manager.get_user_connections("user1");
+        assert!(
+            !user_conns.contains(&"old-conn".to_string()),
+            "设备冲突处理后旧连接应已从连接管理器移除，实际仍在: {:?}",
+            user_conns
+        );
+        assert_eq!(user_conns, vec!["new-conn".to_string()]);
+        assert!(
+            manager.get_connection("old-conn").is_none(),
+            "旧连接快照应已从连接管理器移除"
+        );
+    }
 }
