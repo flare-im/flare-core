@@ -7,7 +7,14 @@ use crate::common::{HeartbeatAppState, HeartbeatConfig, MessageParser};
 use crate::transport::connection::Connection;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
+
+/// 前台/网络恢复时一次性验活的等待窗口上界。
+///
+/// 正常 ping 往返 < 100ms；心跳默认 `timeout` 高达 90s（稳态容忍抖动），
+/// 但回到前台后要立刻判定连接死活，不能等 90s。取 `min(timeout, PROBE_TIMEOUT)`
+/// 作为探测窗口，让半开死连在几秒内被戳穿并触发重连。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// 心跳管理器
 pub struct HeartbeatManager {
@@ -97,6 +104,7 @@ impl HeartbeatManager {
         &mut self,
         connection: Arc<Mutex<Box<dyn Connection>>>,
         parser: Arc<tokio::sync::Mutex<MessageParser>>,
+        probe_wake: Arc<Notify>,
     ) {
         let (tx, mut rx) = mpsc::channel(1);
         self.stop_tx = Some(tx);
@@ -150,6 +158,65 @@ impl HeartbeatManager {
                             let mut conn = connection.lock().await;
                             let _ = conn.close().await;
                             break;
+                        }
+                    }
+                    _ = probe_wake.notified() => {
+                        // 应用回到前台 / 网络恢复：立即验活，不等一个完整心跳周期（后台最长 120s）。
+                        // 半开连接（服务端已回收、浏览器仍报 readyState=OPEN、onclose 从未触发）在此
+                        // 被一枚即时 ping + 有界等待戳穿：窗口内无 PONG 即主动 close，
+                        // 触发上层 Disconnected → 重连（带 token 刷新）自愈。
+                        // 已有一枚超时未答的 ping：直接判死。
+                        if unanswered_ping_timed_out(
+                            &last_ping,
+                            &last_pong,
+                            read_config(&config).timeout,
+                        ) {
+                            let mut conn = connection.lock().await;
+                            let _ = conn.close().await;
+                            break;
+                        }
+
+                        let ping_frame = crate::common::protocol::frame_with_system_command(
+                            crate::common::protocol::ping(),
+                            crate::common::protocol::Reliability::AtLeastOnce,
+                        );
+                        let data = {
+                            let parser_guard = parser.lock().await;
+                            match parser_guard.serialize(&ping_frame) {
+                                Ok(d) => Some(d),
+                                Err(e) => {
+                                    tracing::error!("[HeartbeatManager] 序列化探测心跳失败: {}", e);
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(data) = data {
+                            // 强制一枚新 ping 时间戳：回前台必须重新验活，不看是否 idle。
+                            let ping_at = monotonic_now();
+                            if let Ok(mut lp) = last_ping.lock() {
+                                *lp = Some(ping_at);
+                            }
+                            let send_result = {
+                                let mut conn = connection.lock().await;
+                                conn.send(&data).await
+                            };
+                            if let Err(error) = send_result {
+                                tracing::warn!("[HeartbeatManager] 探测心跳发送失败: {}", error);
+                                let mut conn = connection.lock().await;
+                                let _ = conn.close().await;
+                                break;
+                            }
+                            // 有界等待窗口（远短于 90s 心跳 timeout）：ping 往返正常 < 100ms。
+                            let probe_window = read_config(&config).timeout.min(PROBE_TIMEOUT);
+                            sleep(probe_window).await;
+                            if !pong_covers_ping(&last_pong, ping_at) {
+                                tracing::warn!(
+                                    "[HeartbeatManager] 前台验活未收到 PONG，判定半开死连，主动断开以触发重连"
+                                );
+                                let mut conn = connection.lock().await;
+                                let _ = conn.close().await;
+                                break;
+                            }
                         }
                     }
                     _ = rx.recv() => {
@@ -312,7 +379,7 @@ mod tests {
 
         let mut heartbeat =
             HeartbeatManager::new(Duration::from_millis(10), Duration::from_secs(5));
-        heartbeat.start(connection, parser);
+        heartbeat.start(connection, parser, Arc::new(Notify::new()));
 
         let deadline = monotonic_now() + Duration::from_millis(100);
         while sends.load(Ordering::SeqCst) == 0 && monotonic_now() < deadline {
@@ -349,7 +416,7 @@ mod tests {
 
         let mut heartbeat =
             HeartbeatManager::new(Duration::from_millis(5), Duration::from_millis(15));
-        heartbeat.start(connection, parser);
+        heartbeat.start(connection, parser, Arc::new(Notify::new()));
 
         let deadline = monotonic_now() + Duration::from_millis(200);
         while closes.load(Ordering::SeqCst) == 0 && monotonic_now() < deadline {
@@ -380,5 +447,82 @@ mod tests {
 
         heartbeat.set_nat_timeout(Some(Duration::from_secs(40)));
         assert_eq!(heartbeat.effective_interval(), Duration::from_secs(28));
+    }
+
+    /// 回到前台的即时验活：连接已死（永不回 PONG）时，一次 probe_wake 必须在
+    /// 远短于心跳间隔的时间内主动 close，从而触发上层重连——而不是干等一个完整周期。
+    #[tokio::test]
+    async fn probe_wake_closes_dead_connection_without_waiting_full_interval() {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let connection: Arc<Mutex<Box<dyn Connection>>> =
+            Arc::new(Mutex::new(Box::new(CountingConnection {
+                sends: Arc::clone(&sends),
+                closes: Arc::clone(&closes),
+                last_active: monotonic_now(),
+            })));
+        let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
+
+        // 心跳间隔很大（不靠周期心跳），验活窗口很小（timeout=30ms → probe_window=30ms）。
+        let mut heartbeat =
+            HeartbeatManager::new(Duration::from_secs(3600), Duration::from_millis(30));
+        let probe_wake = Arc::new(Notify::new());
+        heartbeat.start(connection, parser, Arc::clone(&probe_wake));
+
+        // 模拟应用回到前台：请求一次即时验活。连接从不回 PONG → 应被判死并 close。
+        probe_wake.notify_one();
+
+        let deadline = monotonic_now() + Duration::from_millis(800);
+        while closes.load(Ordering::SeqCst) == 0 && monotonic_now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        heartbeat.stop();
+
+        assert!(
+            sends.load(Ordering::SeqCst) > 0,
+            "probe 必须实际发出一枚验活 ping"
+        );
+        assert!(
+            closes.load(Ordering::SeqCst) > 0,
+            "未收到 PONG 的验活必须主动断开连接（远早于 3600s 心跳间隔）"
+        );
+    }
+
+    /// 回到前台的即时验活：连接仍健康（窗口内收到 PONG）时，probe_wake 不得断开连接。
+    #[tokio::test]
+    async fn probe_wake_keeps_live_connection() {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let connection: Arc<Mutex<Box<dyn Connection>>> =
+            Arc::new(Mutex::new(Box::new(CountingConnection {
+                sends: Arc::clone(&sends),
+                closes: Arc::clone(&closes),
+                last_active: monotonic_now(),
+            })));
+        let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
+
+        // 验活窗口 500ms，留足时间在窗口内补记一枚 PONG。
+        let mut heartbeat =
+            HeartbeatManager::new(Duration::from_secs(3600), Duration::from_millis(500));
+        let probe_wake = Arc::new(Notify::new());
+        heartbeat.start(connection, parser, Arc::clone(&probe_wake));
+
+        probe_wake.notify_one();
+        // 等 probe 先打上 ping 时间戳，再在窗口内记一枚 PONG（模拟服务端回包）。
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        heartbeat.record_pong();
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        heartbeat.stop();
+
+        assert!(
+            sends.load(Ordering::SeqCst) > 0,
+            "probe 仍会发出验活 ping"
+        );
+        assert_eq!(
+            closes.load(Ordering::SeqCst),
+            0,
+            "窗口内收到 PONG 的健康连接不得被断开"
+        );
     }
 }

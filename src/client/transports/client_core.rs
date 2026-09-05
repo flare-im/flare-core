@@ -82,6 +82,9 @@ pub struct ClientCore {
     heartbeat_manager: Arc<StdMutex<Option<Arc<tokio::sync::Mutex<HeartbeatManager>>>>>,
     /// 运行期心跳策略，供前后台/NAT 探测动态更新。
     heartbeat_config: Arc<StdRwLock<HeartbeatConfig>>,
+    /// 前台/网络恢复时唤醒心跳循环做一次即时验活（不等一个完整周期），
+    /// 用于戳穿半开死连（onclose 从未触发的场景）并触发重连自愈。
+    heartbeat_probe_wake: Arc<Notify>,
     /// 消息路由器（可选，通过配置开启）
     message_router: Option<MessageRouter>,
     /// 观察者列表
@@ -127,6 +130,7 @@ impl ClientCore {
             parser: Arc::new(tokio::sync::Mutex::new(parser)),
             heartbeat_manager: Arc::new(StdMutex::new(None)),
             heartbeat_config: Arc::new(StdRwLock::new(config.heartbeat.clone())),
+            heartbeat_probe_wake: Arc::new(Notify::new()),
             message_router,
             observers: Arc::new(StdMutex::new(Vec::new())),
             config: config.clone(),
@@ -188,6 +192,7 @@ impl ClientCore {
         self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
         self.negotiation_failure_reason = Arc::clone(&shared.negotiation_failure_reason);
         self.heartbeat_config = Arc::clone(&shared.heartbeat_config);
+        self.heartbeat_probe_wake = Arc::clone(&shared.heartbeat_probe_wake);
     }
 
     /// 确定初始序列化格式和压缩算法
@@ -297,7 +302,7 @@ impl ClientCore {
         let mut heartbeat =
             HeartbeatManager::with_shared_config(Arc::clone(&self.heartbeat_config));
         let parser_ref = Arc::clone(&self.parser);
-        heartbeat.start(connection, parser_ref);
+        heartbeat.start(connection, parser_ref, Arc::clone(&self.heartbeat_probe_wake));
         *slot = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
         tracing::debug!("[ClientCore] heartbeat started after negotiation");
     }
@@ -905,11 +910,17 @@ impl ClientCore {
         }
     }
 
-    /// 更新应用前后台状态。
+    /// 更新应用前后台状态。回到前台时额外唤醒心跳做一次即时验活：
+    /// 后台期间心跳被浏览器节流甚至冻结，连接可能已被服务端回收成半开死连
+    /// （readyState 仍报 OPEN、onclose 从未触发）；不主动戳一下就会一直停在
+    /// 「自认为在线、实则发送必失败」的状态，直到用户手动刷新。
     pub fn set_heartbeat_app_state(&self, state: HeartbeatAppState) {
         self.update_heartbeat_config(|config| {
             config.app_state = state;
         });
+        if state == HeartbeatAppState::Foreground {
+            self.heartbeat_probe_wake.notify_one();
+        }
     }
 
     /// 更新 NAT 空闲超时探测结果。
@@ -973,6 +984,7 @@ impl Clone for ClientCore {
             parser: Arc::clone(&self.parser),
             heartbeat_manager: Arc::clone(&self.heartbeat_manager),
             heartbeat_config: Arc::clone(&self.heartbeat_config),
+            heartbeat_probe_wake: Arc::clone(&self.heartbeat_probe_wake),
             message_router: self.message_router.as_ref().map(|_| MessageRouter::new()), // 路由不克隆，创建新的
             observers: Arc::clone(&self.observers),
             config: self.config.clone(),
