@@ -423,14 +423,15 @@ impl ConnectionHandler for ServerMessageWrapper {
                     let frame_clone = frame.clone();
                     // 使用 Arc<str> 避免 String clone，减少内存分配
                     let conn_id: Arc<str> = Arc::from(connection_id);
-                    tokio::spawn(async move {
-                        if let Err(e) = wrapper
-                            .handle_message_command(&frame_clone, &msg_cmd_clone, &conn_id)
-                            .await
-                        {
-                            tracing::error!("[ServerMessageWrapper] 处理消息命令失败: {}", e);
-                        }
-                    });
+                    // 不能 spawn：同一连接的帧必须按序处理。上游（观察者）已经是
+                    // 「每连接一个消费任务」，这里直接 await 既保序，也不会阻塞其它连接。
+                    // 以前每帧一个任务，等于把排好的顺序又打散——连发的消息会乱序拿到 seq。
+                    if let Err(e) = wrapper
+                        .handle_message_command(&frame_clone, &msg_cmd_clone, &conn_id)
+                        .await
+                    {
+                        tracing::error!("[ServerMessageWrapper] 处理消息命令失败: {}", e);
+                    }
                 }
                 Some(
                     crate::common::protocol::flare::core::commands::command::Type::Notification(
@@ -443,14 +444,15 @@ impl ConnectionHandler for ServerMessageWrapper {
                     let frame_clone = frame.clone();
                     // 使用 Arc<str> 避免 String clone，减少内存分配
                     let conn_id: Arc<str> = Arc::from(connection_id);
-                    tokio::spawn(async move {
-                        if let Err(e) = wrapper
-                            .handle_notification_command(&frame_clone, &notif_cmd_clone, &conn_id)
-                            .await
-                        {
-                            tracing::error!("[ServerMessageWrapper] 处理通知命令失败: {}", e);
-                        }
-                    });
+                    // 不能 spawn：同一连接的帧必须按序处理。上游（观察者）已经是
+                    // 「每连接一个消费任务」，这里直接 await 既保序，也不会阻塞其它连接。
+                    // 以前每帧一个任务，等于把排好的顺序又打散——连发的消息会乱序拿到 seq。
+                    if let Err(e) = wrapper
+                        .handle_notification_command(&frame_clone, &notif_cmd_clone, &conn_id)
+                        .await
+                    {
+                        tracing::error!("[ServerMessageWrapper] 处理通知命令失败: {}", e);
+                    }
                 }
                 Some(crate::common::protocol::flare::core::commands::command::Type::Custom(
                     custom_cmd,

@@ -269,6 +269,8 @@ impl QUICClient {
         if let Some(max) = self.config.max_reconnect_attempts
             && self.reconnect_attempts >= max
         {
+            // 回落到可重连状态,避免停在 Connecting 使 can_connect() 恒 false。
+            self.core.state_manager.set_failed();
             return Err(FlareError::connection_failed(format!(
                 "Max reconnect attempts ({}) exceeded",
                 max
@@ -287,8 +289,14 @@ impl QUICClient {
             let _ = c.close().await;
         }
 
-        // 执行连接
-        self.internal_connect().await
+        // 执行连接：失败必须回落 Failed，否则卡在 Connecting 无法自愈。
+        match self.internal_connect().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.core.state_manager.set_failed();
+                Err(e)
+            }
+        }
     }
 
     /// 获取 ClientCore（用于外部访问）

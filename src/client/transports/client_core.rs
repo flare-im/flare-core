@@ -32,6 +32,10 @@ const NEGOTIATION_TIMEOUT_HINT: &str =
 #[cfg(target_arch = "wasm32")]
 const MAX_WASM_INBOUND_QUEUE: usize = 512;
 
+/// 协商阶段被服务端断开时写入 `negotiation_failure_reason` 的前缀；
+/// `negotiation_failure_error` 据此把它升级成 AUTHENTICATION_FAILED 而不是泛泛的协议错误。
+pub const TOKEN_REJECTED_PREFIX: &str = "TOKEN_REJECTED: ";
+
 fn negotiation_timeout_error(timeout: std::time::Duration) -> FlareError {
     FlareError::connection_timeout(format!(
         "Negotiation timeout after {:?} (CONNECT_ACK not received). {}",
@@ -78,6 +82,9 @@ pub struct ClientCore {
     heartbeat_manager: Arc<StdMutex<Option<Arc<tokio::sync::Mutex<HeartbeatManager>>>>>,
     /// 运行期心跳策略，供前后台/NAT 探测动态更新。
     heartbeat_config: Arc<StdRwLock<HeartbeatConfig>>,
+    /// 前台/网络恢复时唤醒心跳循环做一次即时验活（不等一个完整周期），
+    /// 用于戳穿半开死连（onclose 从未触发的场景）并触发重连自愈。
+    heartbeat_probe_wake: Arc<Notify>,
     /// 消息路由器（可选，通过配置开启）
     message_router: Option<MessageRouter>,
     /// 观察者列表
@@ -123,6 +130,7 @@ impl ClientCore {
             parser: Arc::new(tokio::sync::Mutex::new(parser)),
             heartbeat_manager: Arc::new(StdMutex::new(None)),
             heartbeat_config: Arc::new(StdRwLock::new(config.heartbeat.clone())),
+            heartbeat_probe_wake: Arc::new(Notify::new()),
             message_router,
             observers: Arc::new(StdMutex::new(Vec::new())),
             config: config.clone(),
@@ -184,6 +192,7 @@ impl ClientCore {
         self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
         self.negotiation_failure_reason = Arc::clone(&shared.negotiation_failure_reason);
         self.heartbeat_config = Arc::clone(&shared.heartbeat_config);
+        self.heartbeat_probe_wake = Arc::clone(&shared.heartbeat_probe_wake);
     }
 
     /// 确定初始序列化格式和压缩算法
@@ -293,7 +302,11 @@ impl ClientCore {
         let mut heartbeat =
             HeartbeatManager::with_shared_config(Arc::clone(&self.heartbeat_config));
         let parser_ref = Arc::clone(&self.parser);
-        heartbeat.start(connection, parser_ref);
+        heartbeat.start(
+            connection,
+            parser_ref,
+            Arc::clone(&self.heartbeat_probe_wake),
+        );
         *slot = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
         tracing::debug!("[ClientCore] heartbeat started after negotiation");
     }
@@ -312,20 +325,7 @@ impl ClientCore {
 
     /// 异步停止心跳（内部辅助函数）
     fn stop_heartbeat_async(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::client::runtime::run_client_async(async {
-                let mut hb_guard = heartbeat.lock().await;
-                hb_guard.stop();
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::client::runtime::spawn_client_task(async move {
-                let mut hb_guard = heartbeat.lock().await;
-                hb_guard.stop();
-            });
-        }
+        stop_heartbeat_on(heartbeat);
     }
 
     /// 处理接收到的消息
@@ -707,9 +707,13 @@ impl ClientCore {
             .lock()
             .ok()
             .and_then(|reason| {
-                reason
-                    .as_ref()
-                    .map(|msg| FlareError::protocol_error(msg.clone()))
+                reason.as_ref().map(|msg| {
+                    if msg.starts_with(TOKEN_REJECTED_PREFIX) {
+                        FlareError::authentication_failed(msg.clone())
+                    } else {
+                        FlareError::protocol_error(msg.clone())
+                    }
+                })
             })
     }
 
@@ -737,9 +741,30 @@ impl ClientCore {
                 self.state_manager.set_connected();
                 self.reset_negotiation_state();
             }
-            ConnectionEvent::Disconnected(_) => {
+            ConnectionEvent::Disconnected(reason) => {
+                // 服务端在 CONNECT_ACK 之前就关掉了连接：几乎只有一种情况——CONNECT 里的
+                // token 被拒（密钥/签发者对不上或已过期），网关校验失败后直接 remove_connection，
+                // 不回任何帧。以前这里只是复位状态，等协商的一方要干等到 10s 超时，
+                // 然后报「CONNECT_ACK not received，确认服务端跑的是 flare_chat_server」——
+                // 把一次密钥填错伪装成服务端没起。现在立刻唤醒等待者并给出鉴权失败。
+                let rejected_during_negotiation = matches!(
+                    self.state_manager.get_state(),
+                    crate::client::connection::state::ConnectionState::Connected
+                ) && !self.is_negotiation_completed()
+                    && !self.disconnect_requested.load(Ordering::SeqCst);
                 self.state_manager.set_disconnected();
                 self.reset_negotiation_state();
+                if rejected_during_negotiation {
+                    let msg = format!(
+                        "{TOKEN_REJECTED_PREFIX}server closed the connection before CONNECT_ACK ({reason}); \
+                         the access token was rejected — check the signing secret, issuer and expiry"
+                    );
+                    tracing::warn!("[ClientCore] {}", msg);
+                    if let Ok(mut stored) = self.negotiation_failure_reason.lock() {
+                        *stored = Some(msg);
+                    }
+                    self.negotiation_notify.notify_waiters();
+                }
                 let pending = Arc::clone(&self.pending_map);
                 crate::client::runtime::spawn_client_task(async move {
                     let mut map = pending.lock().await;
@@ -889,11 +914,17 @@ impl ClientCore {
         }
     }
 
-    /// 更新应用前后台状态。
+    /// 更新应用前后台状态。回到前台时额外唤醒心跳做一次即时验活：
+    /// 后台期间心跳被浏览器节流甚至冻结，连接可能已被服务端回收成半开死连
+    /// （readyState 仍报 OPEN、onclose 从未触发）；不主动戳一下就会一直停在
+    /// 「自认为在线、实则发送必失败」的状态，直到用户手动刷新。
     pub fn set_heartbeat_app_state(&self, state: HeartbeatAppState) {
         self.update_heartbeat_config(|config| {
             config.app_state = state;
         });
+        if state == HeartbeatAppState::Foreground {
+            self.heartbeat_probe_wake.notify_one();
+        }
     }
 
     /// 更新 NAT 空闲超时探测结果。
@@ -916,23 +947,7 @@ impl ClientCore {
         let Some(heartbeat) = heartbeat else {
             return;
         };
-        // HeartbeatManager::record_pong 是 `&self` 方法
-        // 但由于我们使用了 Arc<Mutex<>>，需要先获取锁
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::client::runtime::run_client_async(async {
-                let hb_guard = heartbeat.lock().await;
-                hb_guard.record_pong();
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let heartbeat = Arc::clone(&heartbeat);
-            crate::client::runtime::spawn_client_task(async move {
-                let hb_guard = heartbeat.lock().await;
-                hb_guard.record_pong();
-            });
-        }
+        record_pong_on(heartbeat);
     }
 }
 
@@ -973,6 +988,7 @@ impl Clone for ClientCore {
             parser: Arc::clone(&self.parser),
             heartbeat_manager: Arc::clone(&self.heartbeat_manager),
             heartbeat_config: Arc::clone(&self.heartbeat_config),
+            heartbeat_probe_wake: Arc::clone(&self.heartbeat_probe_wake),
             message_router: self.message_router.as_ref().map(|_| MessageRouter::new()), // 路由不克隆，创建新的
             observers: Arc::clone(&self.observers),
             config: self.config.clone(),
@@ -1095,5 +1111,163 @@ mod client_core_tests {
             crate::common::platform::monotonic_now()
         }
         fn update_active_time(&mut self) {}
+    }
+}
+
+/// 拿到心跳管理器并记一次 PONG，**不阻塞、不 panic**。
+///
+/// 这里曾经用 `run_client_async`（`block_in_place` + `block_on`）去取那把 async 锁，
+/// 两个代价：
+/// ① current-thread runtime 上 `block_in_place` 直接 panic，而 PONG 是每个心跳周期
+///    都要走的路径 —— 任务被打死后心跳记账不再更新，连接会被自己判成超时；
+/// ② 多线程 runtime 上不 panic，但每收一个 PONG 就要把本 worker 的任务队列交接给
+///    另一个线程，只为了写一个时间戳。
+///
+/// 而 `HeartbeatManager::record_pong` 只要 `&self`，内部已经是 `std::sync::Mutex`
+/// 自带互斥 —— 那把外层 async 锁只是取引用的手段。所以常态走 `try_lock` 内联完成，
+/// 只有真撞上锁时才丢给后台任务（顺序无所谓：记的是"最近一次 PONG 的时刻"）。
+fn record_pong_on(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
+    if let Ok(hb_guard) = heartbeat.try_lock() {
+        hb_guard.record_pong();
+        return;
+    }
+    crate::client::runtime::spawn_client_task(async move {
+        let hb_guard = heartbeat.lock().await;
+        hb_guard.record_pong();
+    });
+}
+
+/// 停止心跳，同上：常态同步完成，撞锁才异步。
+///
+/// 停止只是把 stop_tx 发一次信号，重复/延后执行都是幂等的。
+fn stop_heartbeat_on(heartbeat: Arc<tokio::sync::Mutex<HeartbeatManager>>) {
+    if let Ok(mut hb_guard) = heartbeat.try_lock() {
+        hb_guard.stop();
+        return;
+    }
+    crate::client::runtime::spawn_client_task(async move {
+        let mut hb_guard = heartbeat.lock().await;
+        hb_guard.stop();
+    });
+}
+
+#[cfg(test)]
+mod heartbeat_bridge_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn manager() -> Arc<tokio::sync::Mutex<HeartbeatManager>> {
+        Arc::new(tokio::sync::Mutex::new(HeartbeatManager::new(
+            Duration::from_secs(30),
+            Duration::from_secs(90),
+        )))
+    }
+
+    /// `#[tokio::test]` 默认就是 current-thread —— 正是原实现必 panic 的那个形态。
+    /// PONG 每个心跳周期都要走，一旦打死任务，心跳记账不再更新，连接会被自己判成超时。
+    #[tokio::test]
+    async fn record_pong_works_on_current_thread_runtime() {
+        let heartbeat = manager();
+        {
+            let guard = heartbeat.lock().await;
+            guard.mark_ping_for_test();
+            assert!(
+                guard.is_timeout_after_for_test(Duration::from_secs(0)),
+                "先制造一个未응答的 ping，否则断言不出 PONG 有没有记上"
+            );
+        }
+
+        record_pong_on(Arc::clone(&heartbeat));
+
+        let guard = heartbeat.lock().await;
+        assert!(
+            !guard.is_timeout_after_for_test(Duration::from_secs(0)),
+            "PONG 必须被记上：单线程 runtime 下也不能丢"
+        );
+    }
+
+    /// 撞锁时不能阻塞、更不能 panic —— 退化成后台补记即可。
+    #[tokio::test]
+    async fn record_pong_falls_back_to_background_when_lock_is_held() {
+        let heartbeat = manager();
+        {
+            let guard = heartbeat.lock().await;
+            guard.mark_ping_for_test();
+        }
+        let held = heartbeat.clone().lock_owned().await;
+
+        record_pong_on(Arc::clone(&heartbeat));
+        drop(held);
+
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if !heartbeat
+                .lock()
+                .await
+                .is_timeout_after_for_test(Duration::from_secs(0))
+            {
+                return;
+            }
+        }
+        panic!("撞锁后的 PONG 必须由后台任务补记上");
+    }
+
+    #[tokio::test]
+    async fn stop_heartbeat_works_on_current_thread_runtime() {
+        let heartbeat = manager();
+        stop_heartbeat_on(Arc::clone(&heartbeat));
+        assert!(
+            !heartbeat.lock().await.has_stop_channel_for_test(),
+            "停止后 stop 通道必须已被取走"
+        );
+    }
+}
+
+#[cfg(test)]
+mod negotiation_rejection_tests {
+    use super::*;
+
+    fn core() -> ClientCore {
+        ClientCore::new(&ClientConfig::default())
+    }
+
+    /// 网关拒掉 CONNECT 里的 token 时不回任何帧，直接关连接。等协商的一方必须立刻拿到
+    /// AUTHENTICATION_FAILED，而不是干等 10s 再报「CONNECT_ACK not received」。
+    #[test]
+    fn server_close_before_connect_ack_fails_negotiation_as_auth_failure() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        assert!(core.negotiation_failure_error().is_none());
+
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
+
+        let err = core
+            .negotiation_failure_error()
+            .expect("协商阶段被断开必须立刻记为协商失败");
+        assert_eq!(
+            err.code(),
+            Some(crate::common::error::ErrorCode::AuthenticationFailed)
+        );
+        assert!(err.to_string().contains("before CONNECT_ACK"), "{err}");
+    }
+
+    /// 我方主动断开（切账号/登出）不是被拒，不能伪造鉴权失败。
+    #[test]
+    fn client_requested_disconnect_is_not_a_rejection() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.set_disconnect_requested(true);
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Closed by client".into()));
+        assert!(core.negotiation_failure_error().is_none());
+    }
+
+    /// 协商已经完成后的断线是普通掉线，走重连，不是 token 被拒。
+    #[test]
+    fn disconnect_after_negotiation_completed_is_not_a_rejection() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.negotiation_completed.store(true, Ordering::SeqCst);
+        core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
+        assert!(core.negotiation_failure_error().is_none());
     }
 }

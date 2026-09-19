@@ -2,7 +2,7 @@
 
 [English](README.md) · 中文
 
-> ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
+> ## ℹ 这是通信基础设施，不是开箱即用的 IM 产品
 >
 > 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**
 > （没有注册登录、好友关系、群角色/审批/禁言、朋友圈）。
@@ -22,12 +22,12 @@
 > Twilio Conversations 的「自带身份」模型一致，区别是 Flare 可自托管、
 > 协议与核心可审计。
 >
-> 边界详情见 [GOVERNANCE.md](GOVERNANCE.md)。
+> 边界详情见 [GOVERNANCE.md](.github/GOVERNANCE.md)。
 
 
 [![Crates.io](https://img.shields.io/crates/v/flare-core.svg)](https://crates.io/crates/flare-core)
 [![Documentation](https://docs.rs/flare-core/badge.svg)](https://docs.rs/flare-core)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 [![GitHub](https://img.shields.io/github/stars/flare-im/flare-core?style=social&label=GitHub)](https://github.com/flare-im/flare-core)
 
@@ -61,13 +61,13 @@ API 文档：[docs.rs/flare-core](https://docs.rs/flare-core)
 
 ```toml
 [dependencies]
-flare-core = "1.0.1"
+flare-core = "1.1"
 ```
 
 仅服务端网关：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "server",
     "websocket",
     "quic",
@@ -79,7 +79,7 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 原生客户端：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = [
+flare-core = { version = "1.1", default-features = false, features = [
     "client",
     "websocket",
     "quic",
@@ -91,14 +91,14 @@ flare-core = { version = "1.0.1", default-features = false, features = [
 TCP 与完整特性集：
 
 ```toml
-flare-core = { version = "1.0.1", features = ["tcp"] }
-flare-core = { version = "1.0.1", features = ["full"] }
+flare-core = { version = "1.1", features = ["tcp"] }
+flare-core = { version = "1.1", features = ["full"] }
 ```
 
 WASM WebSocket 客户端：
 
 ```toml
-flare-core = { version = "1.0.1", default-features = false, features = ["wasm"] }
+flare-core = { version = "1.1", default-features = false, features = ["wasm"] }
 ```
 
 ```bash
@@ -150,7 +150,14 @@ Transport     HybridServer | HybridClient | WebSocket | QUIC | TCP
 
 ## 快速开始
 
-最小的 Flare 模式服务端：
+最小的 Flare 模式服务端。样例需要的全部依赖：
+
+```toml
+[dependencies]
+flare-core = "1.1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+```
 
 ```rust
 use async_trait::async_trait;
@@ -176,7 +183,11 @@ impl ServerEventHandler for Handler {
 #[tokio::main]
 async fn main() -> Result<()> {
     let server = FlareServerBuilder::new("0.0.0.0:8080", Arc::new(Handler)).build()?;
-    server.run().await
+
+    // start() 启动监听后即返回，不阻塞；进程需要自己保持存活。
+    server.start().await?;
+    tokio::signal::ctrl_c().await.expect("等待 Ctrl-C");
+    server.stop().await
 }
 ```
 
@@ -274,7 +285,7 @@ crate 级文档为 crates.io 和 docs.rs 保持英文。
 
 ## 许可证
 
-依据 [MIT License](LICENSE) 授权。
+依据 [Apache License 2.0](LICENSE) 授权。
 
 ---
 
@@ -286,7 +297,7 @@ crate 级文档为 crates.io 和 docs.rs 保持英文。
 | 接入自己的用户系统 | 实现 `TokenValidator`（`CoreJwtTokenValidator` 本地验签 / `HttpHookTokenValidator` 调你的接口） |
 | 加自己的业务规则 | `flare-im-hooks` 的 9 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember / GetConversationParticipants |
 | 做界面 | [`@flare-im/vue-ui`](https://www.npmjs.com/package/@flare-im/vue-ui) —— 107 个组件，四端一致的契约 |
-| 报安全问题 | [SECURITY.md](SECURITY.md)，**请勿开公开 issue** |
+| 报安全问题 | [SECURITY.md](.github/SECURITY.md)，**请勿开公开 issue** |
 
 ## 需要账号体系与社交能力时
 
@@ -297,5 +308,5 @@ crate 级文档为 crates.io 和 docs.rs 保持英文。
 
 咨询：`flare1522@163.com`
 
-> 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-im-core-server/blob/main/GOVERNANCE.md)。
+> 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-im-core-server/blob/main/.github/GOVERNANCE.md)。
 > 简言之：**已开源的不会被收回，鉴权与 hooks 契约永远开源、不会为逼迫付费而阉割。**

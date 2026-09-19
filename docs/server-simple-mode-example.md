@@ -4,11 +4,11 @@
 
 ## 特点
 
-- ✅ **零配置**：使用默认配置即可运行
-- ✅ **轻量级**：不包含中间件、管道等高级功能
-- ✅ **快速上手**：几行代码即可启动服务器
-- ✅ **灵活**：使用闭包定义处理逻辑，无需实现 trait
-- ✅ **仅支持 WebSocket**：默认使用 WebSocket 协议（ws://），不支持 TLS/SSL
+- ✓ **零配置**：使用默认配置即可运行
+- ✓ **轻量级**：不包含中间件、管道等高级功能
+- ✓ **快速上手**：几行代码即可启动服务器
+- ✓ **灵活**：使用闭包定义处理逻辑，无需实现 trait
+- ✓ **仅支持 WebSocket**：默认使用 WebSocket 协议（ws://），不支持 TLS/SSL
 
 ## 适用场景
 
@@ -117,7 +117,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let usernames = Arc::clone(&usernames_for_connect);
             Box::pin(async move {
                 let conn_id = conn_id.to_string();
-                info!("[聊天室] ✅ 用户 {} 加入聊天室", &conn_id[..8.min(conn_id.len())]);
+                info!("[聊天室] ✓ 用户 {} 加入聊天室", &conn_id[..8.min(conn_id.len())]);
 
                 // 初始化用户名（使用默认名称）
                 {
@@ -145,7 +145,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let display_name = username
                     .as_deref()
                     .unwrap_or(&conn_id[..8.min(conn_id.len())]);
-                info!("[聊天室] ❌ {} 离开了聊天室", display_name);
+                info!("[聊天室] ✗ {} 离开了聊天室", display_name);
                 Ok(())
             })
         })
@@ -153,7 +153,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // 启动服务器
     server.start().await?;
-    info!("✅ 聊天室服务器已启动：0.0.0.0:8080");
+    info!("✓ 聊天室服务器已启动：0.0.0.0:8080");
     info!("使用 ws:// 协议连接（非 wss://）");
     info!("\n服务器运行中，按 Ctrl+C 停止...");
 

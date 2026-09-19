@@ -2,7 +2,7 @@
 
 本文档介绍 Flare Core 提供的三种客户端构建器，帮助您根据需求选择合适的构建器。
 
-## 📋 目录
+## 目录
 
 - [三种构建器对比](#三种构建器对比)
 - [ClientBuilder（毛坯房）](#clientbuilder毛坯房)
@@ -72,10 +72,10 @@ Flare Core 提供三种不同抽象级别的客户端构建器，从简单到复
 
 ### 特点
 
-- ✅ **最小依赖**：只提供基本的消息处理（闭包）
-- ✅ **零配置**：使用默认配置即可运行
-- ✅ **轻量级**：不包含中间件、管道等高级功能
-- ✅ **快速上手**：几行代码即可启动客户端
+- ✓ **最小依赖**：只提供基本的消息处理（闭包）
+- ✓ **零配置**：使用默认配置即可运行
+- ✓ **轻量级**：不包含中间件、管道等高级功能
+- ✓ **快速上手**：几行代码即可启动客户端
 
 ### 适用场景
 
@@ -105,10 +105,10 @@ async fn main() -> Result<()> {
             println!("事件: {:?}", event);
         })
         .build()?;
-    
+
     // 连接到服务器
     client.connect().await?;
-    
+
     // 发送消息示例
     let frame = frame_with_message_command(
         generate_message_id(),
@@ -117,11 +117,11 @@ async fn main() -> Result<()> {
         None,
     );
     client.send_frame(&frame).await?;
-    
+
     // 等待停止信号
     tokio::signal::ctrl_c().await?;
     client.disconnect().await?;
-    
+
     Ok(())
 }
 ```
@@ -136,36 +136,36 @@ ClientBuilder::new("ws://127.0.0.1:8080")
     .with_protocol_race(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
     .with_protocol_url(TransportProtocol::WebSocket, "ws://127.0.0.1:8080".to_string())
     .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-    
+
     // 用户和认证
     .with_user_id("user123".to_string())
     .with_token("jwt_token".to_string())
-    
+
     // 序列化和压缩（用于协商）
     .with_format(SerializationFormat::Json)
     .with_compression(CompressionAlgorithm::None)
-    
+
     // 心跳配置
     .with_heartbeat(HeartbeatConfig::default())
-    
+
     // 连接配置
     .with_connect_timeout(Duration::from_secs(10))
     .with_reconnect_interval(Duration::from_secs(3))
     .with_max_reconnect_attempts(Some(5))
-    
+
     // TLS 配置（QUIC 需要）
     .with_tls(TlsConfig::default())
-    
+
     .build()?;
 ```
 
 ### 限制
 
-- ❌ 不支持中间件
-- ❌ 不支持消息管道
-- ❌ 不支持自定义观察器
-- ❌ 不支持事件处理器
-- ❌ 不支持消息路由
+- ✗ 不支持中间件
+- ✗ 不支持消息管道
+- ✗ 不支持自定义观察器
+- ✗ 不支持事件处理器
+- ✗ 不支持消息路由
 
 ---
 
@@ -177,10 +177,10 @@ ClientBuilder::new("ws://127.0.0.1:8080")
 
 ### 特点
 
-- ✅ **自定义观察器**：实现 `ConnectionObserver` trait 自定义消息处理
-- ✅ **事件处理**：支持自定义事件处理器
-- ✅ **消息路由**：支持消息路由功能
-- ✅ **灵活扩展**：可以添加自定义的观察器和处理器
+- ✓ **自定义观察器**：实现 `ConnectionObserver` trait 自定义消息处理
+- ✓ **事件处理**：支持自定义事件处理器
+- ✓ **消息路由**：支持消息路由功能
+- ✓ **灵活扩展**：可以添加自定义的观察器和处理器
 
 ### 适用场景
 
@@ -225,17 +225,17 @@ impl ConnectionObserver for MyObserver {
 async fn main() -> Result<()> {
     // 创建自定义观察器
     let observer = Arc::new(MyObserver {});
-    
+
     // 创建客户端
     let mut client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
         .with_observer(observer)
         .build()?;
-    
+
     client.connect().await?;
-    
+
     tokio::signal::ctrl_c().await?;
     client.disconnect().await?;
-    
+
     Ok(())
 }
 ```
@@ -256,12 +256,12 @@ impl ClientEventHandler for MyEventHandler {
         // 处理系统命令
         Ok(())
     }
-    
+
     async fn handle_message_command(&self, cmd_type: PayloadCommandType, frame: &Frame) -> Result<()> {
         // 处理消息命令
         Ok(())
     }
-    
+
     async fn handle_connection_event(&self, event: &ConnectionEvent) -> Result<()> {
         // 处理连接事件
         Ok(())
@@ -292,31 +292,31 @@ ObserverClientBuilder::new("ws://127.0.0.1:8080")
 ObserverClientBuilder::new("ws://127.0.0.1:8080")
     // 必须：设置观察器
     .with_observer(observer)
-    
+
     // 可选：事件处理器
     .with_event_handler(event_handler)
-    
+
     // 协议配置
     .with_protocol_race(vec![TransportProtocol::WebSocket, TransportProtocol::QUIC])
     .with_protocol_url(TransportProtocol::WebSocket, "ws://127.0.0.1:8080".to_string())
     .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-    
+
     // 用户和认证
     .with_user_id("user123".to_string())
     .with_token("jwt_token".to_string())
-    
+
     // 序列化和压缩（用于协商）
     .with_format(SerializationFormat::Protobuf)
     .with_compression(CompressionAlgorithm::Gzip)
-    
+
     // 设备信息
     .with_device_info(DeviceInfo::new("device_id", DevicePlatform::PC))
-    
+
     // 其他配置（同 ClientBuilder）
     .with_heartbeat(HeartbeatConfig::default())
     .with_connect_timeout(Duration::from_secs(10))
     .enable_router()
-    
+
     .build()?;
 ```
 
@@ -335,9 +335,9 @@ let mut client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
 
 ### 限制
 
-- ❌ 不支持消息管道
-- ❌ 不支持中间件
-- ❌ 不支持自动序列化/压缩协商（需要手动处理）
+- ✗ 不支持消息管道
+- ✗ 不支持中间件
+- ✗ 不支持自动序列化/压缩协商（需要手动处理）
 
 ---
 
@@ -349,17 +349,17 @@ let mut client = ObserverClientBuilder::new("ws://127.0.0.1:8080")
 
 ### 特点
 
-- ✅ **消息管道**：自动处理序列化、压缩、加密
-- ✅ **中间件支持**：日志、性能监控、验证等
-- ✅ **处理器链**：可组合多个处理器
-- ✅ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
-- ✅ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
-- ✅ **加密支持**：AES-256-GCM 加密
-- ✅ **心跳管理**：自动心跳和超时管理
-- ✅ **自动重连**：支持断线重连
-- ✅ **多协议支持**：WebSocket + QUIC 双协议竞速
-- ✅ **简单易用**：只需实现 `MessageListener` 即可
-- ✅ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
+- ✓ **消息管道**：自动处理序列化、压缩、加密
+- ✓ **中间件支持**：日志、性能监控、验证等
+- ✓ **处理器链**：可组合多个处理器
+- ✓ **序列化协商**：自动协商最佳序列化格式（JSON/Protobuf）
+- ✓ **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
+- ✓ **加密支持**：AES-256-GCM 加密
+- ✓ **心跳管理**：自动心跳和超时管理
+- ✓ **自动重连**：支持断线重连
+- ✓ **多协议支持**：WebSocket + QUIC 双协议竞速
+- ✓ **简单易用**：只需实现 `MessageListener` 即可
+- ✓ **高度可扩展**：可以自定义中间件、处理器覆盖默认实现
 
 ### 适用场景
 
@@ -386,17 +386,17 @@ impl MessageListener for MyListener {
         println!("收到消息: {:?}", frame);
         Ok(None)
     }
-    
+
     async fn on_connect(&self) -> Result<()> {
         println!("已连接");
         Ok(())
     }
-    
+
     async fn on_disconnect(&self, reason: Option<&str>) -> Result<()> {
         println!("连接断开: {:?}", reason);
         Ok(())
     }
-    
+
     async fn on_error(&self, error: &str) -> Result<()> {
         eprintln!("错误: {}", error);
         Ok(())
@@ -406,13 +406,13 @@ impl MessageListener for MyListener {
 #[tokio::main]
 async fn main() -> Result<()> {
     let listener = Arc::new(MyListener);
-    
+
     // 创建客户端（自动包含所有功能）
     let client = FlareClientBuilder::new("ws://127.0.0.1:8080")
         .with_listener(listener)
         .build_with_race()  // 使用协议竞速
         .await?;
-    
+
     // 发送消息
     let frame = frame_with_message_command(
         generate_message_id(),
@@ -421,10 +421,10 @@ async fn main() -> Result<()> {
         None,
     );
     client.send_frame(&frame).await?;
-    
+
     tokio::signal::ctrl_c().await?;
     client.disconnect().await?;
-    
+
     Ok(())
 }
 ```
@@ -438,7 +438,7 @@ use flare_core::common::message::{
 
 FlareClientBuilder::new("ws://127.0.0.1:8080")
     .with_listener(listener)
-    
+
     // 添加中间件（按添加顺序执行）
     .with_middleware(Arc::new(
         LoggingMiddleware::new("ClientLogging")
@@ -457,7 +457,7 @@ FlareClientBuilder::new("ws://127.0.0.1:8080")
             }
         })
     ))
-    
+
     .build_with_race()
     .await?;
 ```
@@ -497,47 +497,47 @@ let device_info = DeviceInfo::new("device-123", DevicePlatform::PC)
 let client = FlareClientBuilder::new("ws://127.0.0.1:8080")
     // 必须：设置消息监听器
     .with_listener(listener)
-    
+
     // 中间件
     .with_middleware(Arc::new(LoggingMiddleware::new("ClientLogging")))
     .with_middleware(Arc::new(MetricsMiddleware::new("ClientMetrics")))
-    
+
     // 协议配置（协议竞速）
     .with_protocol_race(vec![TransportProtocol::QUIC, TransportProtocol::WebSocket])
     .with_protocol_url(TransportProtocol::WebSocket, "ws://127.0.0.1:8080".to_string())
     .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
-    
+
     // 用户和认证
     .with_user_id("user123".to_string())
     .with_token("jwt_token".to_string())
-    
+
     // 设备信息
     .with_device_info(device_info)
-    
+
     // 序列化和压缩（用于协商）
     .with_format(SerializationFormat::Json)  // 初始使用 JSON，协商后可能切换到 Protobuf
     .with_compression(CompressionAlgorithm::Gzip)
-    
+
     // 或强制指定格式（不协商）
     // .force_format(SerializationFormat::Protobuf)
     // .force_compression(CompressionAlgorithm::Zstd)
-    
+
     // 心跳配置
     .with_heartbeat(HeartbeatConfig::default()
         .with_interval(Duration::from_secs(30))
         .with_timeout(Duration::from_secs(90)))
-    
+
     // 连接配置
     .with_connect_timeout(Duration::from_secs(10))
     .with_reconnect_interval(Duration::from_secs(3))
     .with_max_reconnect_attempts(Some(5))
-    
+
     // TLS 配置（QUIC 需要）
     .with_tls(TlsConfig::default())
-    
+
     // 消息路由（可选）
     .enable_router()
-    
+
     .build_with_race()
     .await?;
 ```
@@ -570,12 +570,12 @@ impl MessageMiddleware for MyCustomMiddleware {
         println!("[{}] 处理前: {:?}", self.name, ctx.frame);
         Ok(None)
     }
-    
+
     async fn after(&self, ctx: &MessageContext, response: Option<Frame>) -> Result<Option<Frame>> {
         println!("[{}] 处理后: {:?}", self.name, response);
         Ok(None)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -603,7 +603,7 @@ impl MessageProcessor for MyCustomProcessor {
         // 自定义处理逻辑
         Ok(None)
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -622,23 +622,23 @@ FlareClientBuilder::new("ws://127.0.0.1:8080")
 
 | 功能 | ClientBuilder | ObserverClientBuilder | FlareClientBuilder |
 |------|---------------|----------------------|-------------------|
-| **消息处理** | ✅ 闭包 | ✅ ConnectionObserver | ✅ MessageListener |
-| **中间件** | ❌ | ❌ | ✅ |
-| **消息管道** | ❌ | ❌ | ✅ |
-| **序列化协商** | ✅ 手动 | ✅ 手动 | ✅ 自动 |
-| **压缩协商** | ✅ 手动 | ✅ 手动 | ✅ 自动 |
-| **加密支持** | ❌ | ❌ | ✅ |
-| **事件处理器** | ❌ | ✅ | ✅ |
-| **消息路由** | ❌ | ✅ | ✅ |
-| **心跳管理** | ✅ | ✅ | ✅ |
-| **自动重连** | ✅ | ✅ | ✅ |
-| **多协议支持** | ✅ | ✅ | ✅ |
-| **协议竞速** | ✅ | ✅ | ✅ |
-| **自定义观察器** | ❌ | ✅ | ❌ |
-| **自定义中间件** | ❌ | ❌ | ✅ |
-| **自定义处理器** | ❌ | ❌ | ✅ |
-| **代码复杂度** | ⭐ 低 | ⭐⭐ 中 | ⭐⭐⭐ 高 |
-| **功能完整性** | ⭐ 基础 | ⭐⭐ 中等 | ⭐⭐⭐ 完整 |
+| **消息处理** | ✓ 闭包 | ✓ ConnectionObserver | ✓ MessageListener |
+| **中间件** | ✗ | ✗ | ✓ |
+| **消息管道** | ✗ | ✗ | ✓ |
+| **序列化协商** | ✓ 手动 | ✓ 手动 | ✓ 自动 |
+| **压缩协商** | ✓ 手动 | ✓ 手动 | ✓ 自动 |
+| **加密支持** | ✗ | ✗ | ✓ |
+| **事件处理器** | ✗ | ✓ | ✓ |
+| **消息路由** | ✗ | ✓ | ✓ |
+| **心跳管理** | ✓ | ✓ | ✓ |
+| **自动重连** | ✓ | ✓ | ✓ |
+| **多协议支持** | ✓ | ✓ | ✓ |
+| **协议竞速** | ✓ | ✓ | ✓ |
+| **自定义观察器** | ✗ | ✓ | ✗ |
+| **自定义中间件** | ✗ | ✗ | ✓ |
+| **自定义处理器** | ✗ | ✗ | ✓ |
+| **代码复杂度** |  低 |  中 |  高 |
+| **功能完整性** |  基础 |  中等 |  完整 |
 
 ---
 

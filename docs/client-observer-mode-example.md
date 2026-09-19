@@ -4,11 +4,11 @@
 
 ## 特点
 
-- ✅ **实现 `ConnectionObserver` trait**
-- ✅ **支持自定义事件处理**
-- ✅ **支持协议竞速**：自动选择最快的协议（WebSocket 或 QUIC）
-- ✅ **支持消息路由**
-- ✅ **灵活扩展**
+- ✓ **实现 `ConnectionObserver` trait**
+- ✓ **支持自定义事件处理**
+- ✓ **支持协议竞速**：自动选择最快的协议（WebSocket 或 QUIC）
+- ✓ **支持消息路由**
+- ✓ **灵活扩展**
 
 ## 适用场景
 
@@ -58,13 +58,13 @@ impl ConnectionObserver for ChatObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Connected => {
-                println!("✅ 已连接到聊天室服务器");
+                println!("✓ 已连接到聊天室服务器");
             }
             ConnectionEvent::Disconnected(reason) => {
-                println!("❌ 连接断开: {}", reason);
+                println!("✗ 连接断开: {}", reason);
             }
             ConnectionEvent::Error(error) => {
-                eprintln!("❌ 连接错误: {}", error);
+                eprintln!("✗ 连接错误: {}", error);
             }
             ConnectionEvent::Message(data) => {
                 // 解析接收到的消息（默认使用JSON，parse()会自动检测实际格式）
@@ -148,17 +148,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await
     {
         Ok(client) => {
-            println!("✅ 连接成功");
-            println!("📡 使用的协议: {:?}", client.active_protocol());
+            println!("✓ 连接成功");
+            println!(" 使用的协议: {:?}", client.active_protocol());
             client
         }
         Err(e) => {
-            eprintln!("❌ 连接失败: {}", e);
+            eprintln!("✗ 连接失败: {}", e);
             return Err(e.into());
         }
     };
 
-    println!("\n💬 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
+    println!("\n 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
 
     // ============================================================
     // 消息发送循环
@@ -203,7 +203,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // 发送消息
         if let Err(e) = client.send_frame(&frame).await {
-            eprintln!("❌ 发送消息失败: {}", e);
+            eprintln!("✗ 发送消息失败: {}", e);
             break;
         }
     }
@@ -212,8 +212,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // 断开连接
     // ============================================================
     client.disconnect().await?;
-    println!("\n✅ 已断开连接");
-    println!("📊 总共接收了 {} 条消息", observer_clone.get_message_count());
+    println!("\n✓ 已断开连接");
+    println!(" 总共接收了 {} 条消息", observer_clone.get_message_count());
 
     Ok(())
 }

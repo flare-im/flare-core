@@ -9,9 +9,9 @@
 
 架构方向与未完成项见：
 
-- [`docs/roadmap/open-items.md`](docs/roadmap/open-items.md) —— 未完成技术项的权威清单
-- [`docs/roadmap/competitive-roadmap.md`](docs/roadmap/competitive-roadmap.md) —— 能力对标与路线
-- [`docs/roadmap/oss-commercial-strategy.md`](docs/roadmap/oss-commercial-strategy.md) —— 项目形态与商业边界
+- [`docs/roadmap/open-items.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/open-items.md) —— 未完成技术项的权威清单
+- [`docs/roadmap/competitive-roadmap.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/competitive-roadmap.md) —— 能力对标与路线
+- [`docs/roadmap/oss-commercial-strategy.md`](https://github.com/flare-im/flare-workspace/blob/main/docs/roadmap/oss-commercial-strategy.md) —— 项目形态与商业边界
 
 ## 仓库结构
 
@@ -27,9 +27,12 @@ Flare IM 是多仓库项目，改动前先确认该去哪个仓库：
 | `flare-im-core-client-sdk` | 七端 SDK 与示例应用 |
 | `flare-im-design` | 跨端 UI Kit |
 | `flare-social` | 社交业务层 |
+| `flare-sdk-plugin` | 插件 SDK（能力插件的契约、schema 与模板） |
+| `flare-plugin` | 插件宿主指南 |
+| `official` | 官网与对外文档 |
 
 **分层纪律**：能力应当下沉到最底层的合适位置。同一逻辑不要在多端各写一遍——
-放进 Rust 核心，各端通过 FFI/WASM 消费。详见 `AGENTS.md`。
+放进 Rust 核心，各端通过 FFI/WASM 消费。
 
 ## 提交改动
 
@@ -82,7 +85,7 @@ npm run typecheck && npm test
 
 ## 许可
 
-提交贡献即表示你同意你的贡献按 [Apache-2.0](LICENSE) 授权，且你有权这么做。
+提交贡献即表示你同意你的贡献按 [Apache-2.0](../LICENSE) 授权，且你有权这么做。
 
 ## 安全问题
 

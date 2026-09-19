@@ -4,13 +4,13 @@
 
 ## 特点
 
-- ✅ **必须实现 `ServerEventHandler` trait**（核心接口）
-- ✅ **使用 `ServerMessageWrapper` 自动处理消息路由和 ACK**
-- ✅ **支持设备管理和多端控制**
-- ✅ **支持事件驱动的架构**
-- ✅ **支持共享连接状态**（多服务器实例）
-- ✅ **支持多协议**（WebSocket + QUIC）
-- ✅ **支持序列化协商**（JSON/Protobuf）
+- ✓ **必须实现 `ServerEventHandler` trait**（核心接口）
+- ✓ **使用 `ServerMessageWrapper` 自动处理消息路由和 ACK**
+- ✓ **支持设备管理和多端控制**
+- ✓ **支持事件驱动的架构**
+- ✓ **支持共享连接状态**（多服务器实例）
+- ✓ **支持多协议**（WebSocket + QUIC）
+- ✓ **支持序列化协商**（JSON/Protobuf）
 
 ## 适用场景
 
@@ -134,7 +134,7 @@ impl ServerEventHandler for ChatRoomHandler {
     // 连接建立完成
     // ============================================================
     async fn on_connect(&self, connection_id: &str) -> Result<()> {
-        info!("[聊天室] ✅ 用户 {} 加入聊天室", connection_id);
+        info!("[聊天室] ✓ 用户 {} 加入聊天室", connection_id);
 
         // 初始化用户名（使用默认名称）
         {
@@ -159,7 +159,7 @@ impl ServerEventHandler for ChatRoomHandler {
         let display_name = username
             .as_deref()
             .unwrap_or(&connection_id[..8.min(connection_id.len())]);
-        info!("[聊天室] ❌ {} 离开了聊天室", display_name);
+        info!("[聊天室] ✗ {} 离开了聊天室", display_name);
 
         if let Some(reason) = reason {
             debug!("断开原因: {}", reason);
@@ -230,7 +230,7 @@ async fn main() -> Result<()> {
     // ============================================================
     server.start().await?;
 
-    info!("✅ 聊天室服务器已启动");
+    info!("✓ 聊天室服务器已启动");
     info!("   - WebSocket: ws://0.0.0.0:8080");
     info!("   - QUIC: quic://0.0.0.0:8081");
 

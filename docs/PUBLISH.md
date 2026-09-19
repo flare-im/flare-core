@@ -34,18 +34,18 @@ cargo doc --no-deps 2>&1 | grep -i "broken\|warning"
 
 确保 `Cargo.toml` 包含以下必需字段：
 
-- ✅ `name` - 包名（必须是唯一的）
-- ✅ `version` - 版本号（遵循语义化版本）
-- ✅ `edition` - Rust 版本
-- ✅ `description` - 简短描述（用于 crates.io 搜索）
-- ✅ `license` - 许可证（或 `license-file`）
-- ✅ `authors` - 作者列表
-- ✅ `repository` - 仓库 URL（可选但推荐）
-- ✅ `homepage` - 主页 URL（可选）
-- ✅ `documentation` - 文档 URL（可选）
-- ✅ `readme` - README 文件路径
-- ✅ `keywords` - 关键词列表（用于搜索，最多 5 个，见 `Cargo.toml`）
-- ✅ `categories` - 分类列表（用于分类浏览）
+- ✓ `name` - 包名（必须是唯一的）
+- ✓ `version` - 版本号（遵循语义化版本）
+- ✓ `edition` - Rust 版本
+- ✓ `description` - 简短描述（用于 crates.io 搜索）
+- ✓ `license` - 许可证（或 `license-file`）
+- ✓ `authors` - 作者列表
+- ✓ `repository` - 仓库 URL（可选但推荐）
+- ✓ `homepage` - 主页 URL（可选）
+- ✓ `documentation` - 文档 URL（可选）
+- ✓ `readme` - README 文件路径
+- ✓ `keywords` - 关键词列表（用于搜索，最多 5 个，见 `Cargo.toml`）
+- ✓ `categories` - 分类列表（用于分类浏览）
 
 **GitHub Topics（维护者）**：在仓库 **Settings → Topics** 添加标签可提升站内搜索曝光，建议：`rust` `websocket` `quic` `tcp` `tokio` `instant-messaging` `realtime` `protobuf` `wasm` `chat` `push-notifications` `network-programming`。不必写入 README 正文。
 
@@ -53,9 +53,9 @@ cargo doc --no-deps 2>&1 | grep -i "broken\|warning"
 
 确保以下文件存在且正确：
 
-- ✅ `README.md` - 项目说明文档
-- ✅ `LICENSE` - 许可证文件（如果使用 `license-file`）
-- ✅ `src/lib.rs` - 库入口文件（必须存在）
+- ✓ `README.md` - 项目说明文档
+- ✓ `LICENSE` - 许可证文件（如果使用 `license-file`）
+- ✓ `src/lib.rs` - 库入口文件（必须存在）
 
 ### 5. 发布前测试
 

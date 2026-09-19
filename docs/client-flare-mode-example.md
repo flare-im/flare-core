@@ -4,14 +4,14 @@ Flare 模式提供完整功能，包含所有 `common` 和 `client` 模块的能
 
 ## 特点
 
-- ✅ **必须实现 `MessageListener` trait**（核心接口）
-- ✅ **消息管道**：自动处理序列化、压缩、加密
-- ✅ **中间件支持**：日志、性能监控、验证等
-- ✅ **自动重连**：支持断线重连
-- ✅ **协议竞速**：自动选择最快的协议
-- ✅ **序列化协商**：自动协商最佳序列化格式和压缩算法
-- ✅ **加密支持**：支持 AES-256-GCM 等加密算法
-- ✅ **设备管理**：支持多平台设备信息，自动处理设备冲突
+- ✓ **必须实现 `MessageListener` trait**（核心接口）
+- ✓ **消息管道**：自动处理序列化、压缩、加密
+- ✓ **中间件支持**：日志、性能监控、验证等
+- ✓ **自动重连**：支持断线重连
+- ✓ **协议竞速**：自动选择最快的协议
+- ✓ **序列化协商**：自动协商最佳序列化格式和压缩算法
+- ✓ **加密支持**：支持 AES-256-GCM 等加密算法
+- ✓ **设备管理**：支持多平台设备信息，自动处理设备冲突
 
 ## 适用场景
 
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("🚀 启动 Flare 聊天室客户端（完整功能演示）");
+    println!(" 启动 Flare 聊天室客户端（完整功能演示）");
 
     // ============================================================
     // 1. 注册加密器（可选，用于加密通信）
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     let encryption_key = b"01234567890123456789012345678901"; // 32 bytes for AES-256
     let encryptor = Aes256GcmEncryptor::new(encryption_key)?;
     EncryptionUtil::register_custom(Arc::new(encryptor));
-    println!("🔐 已注册 AES-256-GCM 加密器");
+    println!(" 已注册 AES-256-GCM 加密器");
 
     // ============================================================
     // 2. 获取用户ID（用于测试多设备互斥）
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
         .nth(1)
         .unwrap_or_else(|| format!("user-{}", std::process::id()));
 
-    println!("✅ 用户ID: {}", user_id);
+    println!("✓ 用户ID: {}", user_id);
 
     // ============================================================
     // 3. 创建设备信息（用于设备管理）
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
         system_version: Some("Linux 5.0".to_string()),
     };
 
-    println!("📱 设备信息: {:?}", device_info);
+    println!(" 设备信息: {:?}", device_info);
 
     // ============================================================
     // 4. 创建消息监听器
@@ -177,15 +177,15 @@ async fn main() -> Result<()> {
         .build_with_race()
         .await?;
 
-    println!("✅ 连接成功！");
-    println!("📡 使用的协议: {:?}", client.active_protocol());
-    println!("🔗 连接 ID: {:?}", client.connection_id());
+    println!("✓ 连接成功！");
+    println!(" 使用的协议: {:?}", client.active_protocol());
+    println!(" 连接 ID: {:?}", client.connection_id());
     println!();
 
     // ============================================================
     // 8. 发送消息
     // ============================================================
-    println!("💬 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
+    println!(" 开始聊天（输入消息并按回车发送，输入 'quit' 退出）");
 
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
 
         // 发送消息（消息管道会自动处理序列化、压缩、加密）
         if let Err(e) = client.send_frame(&frame).await {
-            eprintln!("❌ 发送消息失败: {}", e);
+            eprintln!("✗ 发送消息失败: {}", e);
             break;
         }
     }
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
     // 9. 断开连接
     // ============================================================
     client.disconnect().await?;
-    println!("\n✅ 已断开连接");
+    println!("\n✓ 已断开连接");
 
     Ok(())
 }
@@ -259,7 +259,7 @@ impl MessageListener for MyListener {
         // 处理消息
         // frame: 接收到的消息 Frame（已经过消息管道处理：解密、解压、反序列化）
         // context: 消息上下文，包含连接信息等
-        
+
         // 返回 None 表示不需要响应，或返回 Some(Frame) 发送响应
         Ok(None)
     }

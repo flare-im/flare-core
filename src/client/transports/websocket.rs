@@ -174,6 +174,8 @@ impl WebSocketClient {
         if let Some(max) = self.config.max_reconnect_attempts
             && self.reconnect_attempts >= max
         {
+            // 回落到可重连状态：否则若此前停在 Connecting，can_connect() 恒 false。
+            self.core.state_manager.set_failed();
             return Err(FlareError::connection_failed(format!(
                 "Max reconnect attempts ({}) exceeded",
                 max
@@ -192,8 +194,16 @@ impl WebSocketClient {
             let _ = c.close().await;
         }
 
-        // 执行连接
-        self.internal_connect().await
+        // 执行连接：失败必须把状态回落到 Failed，否则卡在 Connecting，
+        // can_connect() 恒 false，后续发送全部报 "Cannot connect: state is unavailable"
+        // 无法自愈（服务端恢复后也只能靠刷新页面）。
+        match self.internal_connect().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.core.state_manager.set_failed();
+                Err(e)
+            }
+        }
     }
 
     /// 获取 ClientCore（用于外部访问）

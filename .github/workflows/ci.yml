@@ -60,3 +60,167 @@ jobs:
 
       - name: cargo deny（许可 / 来源 / 重复依赖）
         run: cargo deny check
+
+  # MSRV 门禁：Cargo.toml 里一直写着 rust-version，但在此之前**没有任何地方验证过**。
+  # 声明一个最低版本却不验证，等于对外承诺了一个没人试过的编译环境:开发机常年跟着
+  # stable 走,哪天用上了更新的特性也不会有任何信号——直到外部用户按我们写的
+  # 最低版本去编,然后编不过。
+  #
+  # 工具链版本从 Cargo.toml 现读,不在这里再写一遍:同一个数字放两处必然漂移。
+  msrv:
+    name: 最低支持 Rust 版本
+    runs-on: ubuntu-latest
+    # 这道门禁问的是「编不编得过」,不是「lint 干不干净」。老工具链的 lint 集合
+    # 与 stable 不同,带 -D warnings 会因为无关的 lint 差异变红,把一个有意义的
+    # 判据变成噪音,最后没人看——这个项目已经吃过一次长期红的亏。
+    env:
+      RUSTFLAGS: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 Cargo.toml 声明的 MSRV
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check（按声明的 MSRV）
+        run: cargo check --all-targets
+
+  # 性能基线：benches/perf_baseline.rs 一直存在，但**在此之前没有任何 CI 跑过它**。
+  # `scripts/verify.sh` 里的 `cargo check --benches` 只证明它能编过,而且 verify.sh
+  # 本身只在有人手动执行时才跑。基线建了没人看,等于没建。
+  #
+  # 判据刻意不按绝对耗时设阈值:共享 runner 上同一段代码能差好几倍,按本机数字
+  # 设卡必然长期红——这个项目已经吃过一次「非阻塞 + 长期红 = 告警彻底失效」的亏。
+  # 实际判的是齐全性 + 同轮比值 + 留够量级余量的天花板,细节见脚本头部。
+  perf:
+    name: 性能基线
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `shell: bash` 是必须的,不能省:默认 shell 只带 -e 不带 pipefail,
+      # 管道给了 tee 之后退出码取的是 tee 的——门禁判红也会被吞成绿。
+      # 这个仓库要的正是「别再造装饰性门禁」,这里自己踩一次就说不过去了。
+      - name: 跑基线并判回归
+        shell: bash
+        run: python3 scripts/check_perf_baseline.py | tee perf-baseline.txt
+
+      # 数字要能被外部复现和引用——「公开性能基准」这半件事靠这个产物落地。
+      - name: 上传本轮数字
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline
+          path: perf-baseline.txt
+
+  # README 是 crates.io 页面渲染的内容。官网文档站在私有仓、没有部署路径，
+  # 所以**外部使用者实际拿得到的文档就是它**——它坏了没有任何别的信号。
+  #
+  # 两条判据，缺一不可（第一版只做了编译那条，把版本号改回 1.0.1 照样绿）：
+  #   1. 依赖块 + 代码块原样落成 crate、依赖走 registry 真编一遍 —— 抓 API 漂移
+  #   2. 依赖示例里的版本号还是不是当前发布版 —— 编译抓不到，因为 cargo 的 ^
+  #      语义会把旧 pin 解析到新版本，两边都编得过
+  readme:
+    name: README 样例能否编过
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验 README 样例与版本号
+        run: python3 scripts/check_readme_sample.py
+
+  # 许可证口径：README 是 crates.io 页面渲染的内容，它写的许可证与 Cargo.toml
+  # 声明的不一致是法务问题，不是排版问题——而且没有任何测试会碰到它。
+  #
+  # 已经真的发生过（2026-08-20 全仓核查）：flare-grpc-proto 的中英文 README 都写着
+  # 「MIT（见 Cargo.toml）」，而 Cargo.toml 写的是 Apache-2.0，自己打自己的脸；
+  # flare-proto 的中文 README 写 MIT、英文写 Apache-2.0，同仓中英文互相矛盾。
+  # flare-core 早前修过同类问题，但当时只修了自己那一个仓，没往外扫。
+  #
+  # 另一条：声明了 license 却没把 LICENSE 正文打进包里，等于发了一个不满足
+  # 自己所声明许可证（Apache-2.0 §4(a) 要求随件附带许可证副本）的包。
+  readme-claims:
+    name: 门面文档口径
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: README 许可证声明与 Cargo.toml 一致
+        shell: bash
+        run: |
+          declared=$(grep -m1 '^license' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$declared" ] || { echo "✗ Cargo.toml 没有 license 字段"; exit 1; }
+          key=$(echo "${declared%%-*}" | tr 'A-Z' 'a-z')
+          fail=0
+          for f in README.md README.zh-CN.md; do
+            [ -f "$f" ] || continue
+            # 只看 License / 许可 小节：正文里提到别的协议（依赖清单之类）不该误判
+            section=$(awk '/^#+ *(License|许可)/{f=1;next} /^#+ /{f=0} f' "$f")
+            [ -n "$section" ] || { echo "✗ $f 找不到 License / 许可 小节"; fail=1; continue; }
+            echo "$section" | grep -qi "$key" \
+              || { echo "✗ $f 许可证小节没提 $declared"; fail=1; }
+            for other in MIT GPL BSD MPL ISC; do
+              o=$(echo "$other" | tr 'A-Z' 'a-z'); [ "$o" = "$key" ] && continue
+              echo "$section" | grep -qiE "\b$other\b" \
+                && { echo "✗ $f 许可证小节写着 $other，而 Cargo.toml 声明 $declared"; fail=1; }
+            done
+          done
+          [ $fail -eq 0 ] && echo "  ✓ README 许可证声明与 Cargo.toml（$declared）一致"
+          exit $fail
+
+      # 这里只查文件在不在——「真的进了包」是更强的判据，由 publishable job 里的
+      # cargo package --list 负责（那个 job 才有同级仓与 protoc 这些前置条件）。
+      - name: crate 目录里有 LICENSE 正文
+        shell: bash
+        run: |
+          ls LICENSE* >/dev/null 2>&1 \
+            || { echo "✗ 没有 LICENSE 文件。声明了许可证却不随件附带正文，发出去的包不满足它自己声明的协议。"; exit 1; }
+          echo "  ✓ $(ls LICENSE*) 在 crate 目录里"
+
+      # README 里的版本号：编译判据对它是瞎的（cargo 的 ^ 语义会把旧 pin 解析到
+      # 新版本，新旧都编得过），但那个数字是给人读、给人照抄的。
+      # 已发生过：flare-proto 写 2.0.1（实际 2.1.0）、flare-core 写 1.0.1（实际 1.1.1）。
+      #
+      # 「一个 pin 都没有」同样判红：已发布的 crate，它的 crates.io 页面上总得写清楚
+      # 怎么装。flare-im-core-sdk 与 flare-plugin-host 此前就是一行安装说明都没有。
+      - name: README 里的版本号还是当前发布版
+        shell: bash
+        run: |
+          name=$(grep -m1 '^name' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          latest=$(curl -sf --max-time 25 -H "User-Agent: flare-readme-gate" \
+            "https://crates.io/api/v1/crates/$name" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["crate"]["max_version"])' 2>/dev/null) || latest=""
+          # registry 抖动不该阻断一个无关的 PR：查不到就跳过并说明，不静默通过。
+          if [ -z "$latest" ]; then echo "  · 跳过版本新鲜度（查不到 registry）"; exit 0; fi
+          fail=0
+          for f in README.md README.zh-CN.md; do
+            [ -f "$f" ] || continue
+            # 两种写法都要认，只认字符串式会在依赖块改成表式那天悄悄失效：
+            #   flare-x = "1.2"                              ← 字符串式
+            #   flare-x = { version = "1.2", features = [] }  ← 表式
+            # 这不是假设：flare-im-core-sdk 的安装块为了标注 feature 就是表式的，
+            # 第一版正则当场把 pins 读成空，于是「一个 pin 都没有」那条误判成红。
+            # 取依赖那一行里第一个以数字开头的带引号串，两种写法都覆盖得到。
+            pins=$(grep -E "^[[:space:]]*$name[[:space:]]*=" "$f" \
+                     | grep -oE '"[0-9][^"]*"' | tr -d '"' | sort -u)
+            if [ -z "$pins" ]; then
+              echo "✗ $f 里没有任何 $name 的依赖示例"
+              echo "  这是个已发布的 crate，README 就是它的 crates.io 页面——上面得写清楚怎么装。"
+              fail=1; continue
+            fi
+            for p in $pins; do
+              case "$latest" in "$p"|"$p".*) ;; *) echo "✗ $f 写着 $name $p，当前发布版是 $latest"; fail=1;; esac
+            done
+          done
+          [ $fail -eq 0 ] && echo "  ✓ README 里的 $name 版本号与 registry（$latest）一致"
+          exit $fail
