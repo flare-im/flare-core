@@ -515,10 +515,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(600)).await;
         heartbeat.stop();
 
-        assert!(
-            sends.load(Ordering::SeqCst) > 0,
-            "probe 仍会发出验活 ping"
-        );
+        assert!(sends.load(Ordering::SeqCst) > 0, "probe 仍会发出验活 ping");
         assert_eq!(
             closes.load(Ordering::SeqCst),
             0,

@@ -302,7 +302,11 @@ impl ClientCore {
         let mut heartbeat =
             HeartbeatManager::with_shared_config(Arc::clone(&self.heartbeat_config));
         let parser_ref = Arc::clone(&self.parser);
-        heartbeat.start(connection, parser_ref, Arc::clone(&self.heartbeat_probe_wake));
+        heartbeat.start(
+            connection,
+            parser_ref,
+            Arc::clone(&self.heartbeat_probe_wake),
+        );
         *slot = Some(Arc::new(tokio::sync::Mutex::new(heartbeat)));
         tracing::debug!("[ClientCore] heartbeat started after negotiation");
     }
@@ -1240,7 +1244,10 @@ mod negotiation_rejection_tests {
         let err = core
             .negotiation_failure_error()
             .expect("协商阶段被断开必须立刻记为协商失败");
-        assert_eq!(err.code(), Some(crate::common::error::ErrorCode::AuthenticationFailed));
+        assert_eq!(
+            err.code(),
+            Some(crate::common::error::ErrorCode::AuthenticationFailed)
+        );
         assert!(err.to_string().contains("before CONNECT_ACK"), "{err}");
     }
 

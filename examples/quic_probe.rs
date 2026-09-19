@@ -10,7 +10,9 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let url = args.next().unwrap_or_else(|| "quic://127.0.0.1:60052".to_string());
+    let url = args
+        .next()
+        .unwrap_or_else(|| "quic://127.0.0.1:60052".to_string());
     let ca = args.next();
     let mut config = ClientConfig::new(url.clone()).quic();
     if let Some(ca) = ca {

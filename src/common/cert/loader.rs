@@ -11,8 +11,9 @@ use std::path::Path;
 pub fn load_cert_der_from_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
     // 文件既可以是 DER，也可以是 PEM（自动识别 `-----BEGIN`）：运维手里的证书几乎都是 PEM，
     // 此前只认 DER，挂上 PEM 会在握手时报一个看不出原因的证书错误。
-    let bytes = fs::read(path.as_ref())
-        .map_err(|e| FlareError::protocol_error(format!("Failed to read certificate file: {}", e)))?;
+    let bytes = fs::read(path.as_ref()).map_err(|e| {
+        FlareError::protocol_error(format!("Failed to read certificate file: {}", e))
+    })?;
     cert_bytes_to_der(bytes)
 }
 
@@ -26,13 +27,16 @@ pub fn cert_bytes_to_der(bytes: Vec<u8>) -> Result<Vec<u8>> {
 
 fn looks_like_pem(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(64)];
-    String::from_utf8_lossy(head).trim_start().starts_with("-----BEGIN")
+    String::from_utf8_lossy(head)
+        .trim_start()
+        .starts_with("-----BEGIN")
 }
 
 /// 从文件加载 DER 格式的私钥
 pub fn load_key_der_from_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
-    let bytes = fs::read(path.as_ref())
-        .map_err(|e| FlareError::protocol_error(format!("Failed to read private key file: {}", e)))?;
+    let bytes = fs::read(path.as_ref()).map_err(|e| {
+        FlareError::protocol_error(format!("Failed to read private key file: {}", e))
+    })?;
     if looks_like_pem(&bytes) {
         return crate::common::cert::converter::pem_key_to_der(&bytes);
     }
@@ -109,11 +113,22 @@ mod pem_autodetect_tests {
         let der_path = dir.join("cert.der");
         fs::write(&pem_path, cert.cert.pem().as_bytes()).unwrap();
         fs::write(&der_path, &der).unwrap();
-        assert_eq!(load_cert_der_from_file(&pem_path).unwrap(), der, "PEM 文件必须解成同一份 DER");
-        assert_eq!(load_cert_der_from_file(&der_path).unwrap(), der, "DER 文件原样返回");
+        assert_eq!(
+            load_cert_der_from_file(&pem_path).unwrap(),
+            der,
+            "PEM 文件必须解成同一份 DER"
+        );
+        assert_eq!(
+            load_cert_der_from_file(&der_path).unwrap(),
+            der,
+            "DER 文件原样返回"
+        );
         let key_path = dir.join("key.pem");
         fs::write(&key_path, cert.signing_key.serialize_pem().as_bytes()).unwrap();
-        assert_eq!(load_key_der_from_file(&key_path).unwrap(), cert.signing_key.serialize_der());
+        assert_eq!(
+            load_key_der_from_file(&key_path).unwrap(),
+            cert.signing_key.serialize_der()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -801,7 +801,8 @@ impl Client for HybridClient {
         match self.inner.try_lock() {
             Ok(client) => {
                 let connected = client.is_connected();
-                self.last_known_connected.store(connected, Ordering::Relaxed);
+                self.last_known_connected
+                    .store(connected, Ordering::Relaxed);
                 connected
             }
             // 撞锁不阻塞，退回上一次观察到的状态。

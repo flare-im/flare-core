@@ -299,7 +299,9 @@ mod tests {
     #[tokio::test]
     async fn device_conflict_evicts_old_connection_from_connection_manager() {
         let manager = Arc::new(ConnectionManager::new());
-        let device_mgr = Arc::new(DeviceManager::new(DeviceConflictStrategy::PlatformExclusive));
+        let device_mgr = Arc::new(DeviceManager::new(
+            DeviceConflictStrategy::PlatformExclusive,
+        ));
 
         // 旧连接：同用户、Web 平台，注册进连接管理器 + 设备管理器
         manager

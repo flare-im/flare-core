@@ -6,10 +6,10 @@
 //!   CONNECT_CONC=2000 cargo run --release --example loadconns
 //!
 //! tokens.txt 每行:  <userId> <token>
+use flare_core::HybridClient;
 use flare_core::client::ClientConfig;
 use flare_core::common::config_types::HeartbeatConfig;
 use flare_core::common::device::{DeviceInfo, DevicePlatform};
-use flare_core::HybridClient;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -27,11 +27,23 @@ async fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(60051);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60051);
     let ws_url = format!("ws://{}:{} (轮转 {} 个目标)", hosts[0], port, hosts.len());
-    let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(60000);
-    let duration: u64 = std::env::var("DURATION").ok().and_then(|v| v.parse().ok()).unwrap_or(7200);
-    let concurrency: usize = std::env::var("CONNECT_CONC").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60000);
+    let duration: u64 = std::env::var("DURATION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7200);
+    let concurrency: usize = std::env::var("CONNECT_CONC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
 
     let content = std::fs::read_to_string(&tokens_path).expect("读 tokens 文件失败");
     let toks: Vec<(String, String)> = content
@@ -45,7 +57,12 @@ async fn main() {
         })
         .take(n)
         .collect();
-    eprintln!("[loadconns] 载入 {} 个 token, 目标 N={}, url={}", toks.len(), n, ws_url);
+    eprintln!(
+        "[loadconns] 载入 {} 个 token, 目标 N={}, url={}",
+        toks.len(),
+        n,
+        ws_url
+    );
 
     let connected = Arc::new(AtomicU64::new(0));
     let failed = Arc::new(AtomicU64::new(0));
@@ -94,7 +111,10 @@ async fn main() {
                 let cfg = ClientConfig::new(conn_url.clone())
                     .websocket()
                     .with_token(tok.clone())
-                    .with_device_info(DeviceInfo::new(format!("load-{}", uid), DevicePlatform::Web))
+                    .with_device_info(DeviceInfo::new(
+                        format!("load-{}", uid),
+                        DevicePlatform::Web,
+                    ))
                     .with_heartbeat(
                         HeartbeatConfig::default()
                             .with_interval(std::time::Duration::from_secs(20))
@@ -135,5 +155,8 @@ async fn main() {
         duration
     );
     tokio::time::sleep(Duration::from_secs(duration)).await;
-    eprintln!("[loadconns] 结束,峰值连接={}", connected.load(Ordering::Relaxed));
+    eprintln!(
+        "[loadconns] 结束,峰值连接={}",
+        connected.load(Ordering::Relaxed)
+    );
 }
