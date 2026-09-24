@@ -40,7 +40,6 @@ use crate::common::protocol::flare::core::commands::command::Type as CommandType
 use crate::transport::events::{ConnectionEvent, ConnectionObserver};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 /// 消息监听器
@@ -311,25 +310,24 @@ impl FlareClientBuilder {
         #[cfg(target_arch = "wasm32")]
         let client = WebSocketClient::connect_with_config(self.base.config.clone()).await?;
 
-        let pipeline = Arc::new(Mutex::new(MessagePipeline::new(
-            PRE_NEGOTIATION_PARSER.clone(),
-        )));
+        // `MessagePipeline` is internally synchronized and cloneable. Keeping an
+        // additional mutex around the whole pipeline serialized every inbound
+        // frame across the complete async listener call. A slow data/sync handler
+        // could therefore block a later send ACK indefinitely, leaving a message
+        // stuck in the pending state even though the ACK had reached the socket.
+        let pipeline = Arc::new(MessagePipeline::new(PRE_NEGOTIATION_PARSER.clone()));
 
         for middleware in self.middlewares {
-            pipeline.lock().await.add_middleware(middleware).await;
+            pipeline.add_middleware(middleware).await;
         }
 
         let listener_processor = Arc::new(ListenerProcessor {
             listener: listener.clone(),
         });
-        pipeline
-            .lock()
-            .await
-            .add_processor(listener_processor)
-            .await;
+        pipeline.add_processor(listener_processor).await;
 
         for processor in self.processors {
-            pipeline.lock().await.add_processor(processor).await;
+            pipeline.add_processor(processor).await;
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -357,7 +355,7 @@ impl FlareClientBuilder {
             .wait_for_negotiation(std::time::Duration::from_secs(10))
             .await?;
         let parser = wrapper.parser_snapshot().await;
-        pipeline.lock().await.update_parser(parser).await;
+        pipeline.update_parser(parser).await;
 
         Ok(FlareClient {
             wrapper,
@@ -372,7 +370,7 @@ impl FlareClientBuilder {
 pub struct FlareClient {
     wrapper: ClientWrapper,
     #[allow(dead_code)] // 保留用于未来扩展（如动态更新管道配置）
-    pipeline: Arc<Mutex<MessagePipeline>>,
+    pipeline: Arc<MessagePipeline>,
     #[allow(dead_code)] // 保留用于未来扩展（如动态更新监听器）
     listener: Arc<dyn MessageListener>,
 }
@@ -451,8 +449,7 @@ impl FlareClient {
 
     /// 更新消息管道解析器（协商完成后调用）
     pub async fn update_parser(&self, parser: MessageParser) {
-        let mut pipeline = self.pipeline.lock().await;
-        *pipeline = MessagePipeline::new(parser);
+        self.pipeline.update_parser(parser).await;
     }
 
     /// 添加连接观察者
@@ -465,7 +462,7 @@ impl FlareClient {
 
 /// Flare 客户端观察者
 struct FlareObserver {
-    pipeline: Arc<Mutex<MessagePipeline>>,
+    pipeline: Arc<MessagePipeline>,
     listener: Arc<dyn MessageListener>,
 }
 
@@ -575,10 +572,9 @@ impl ConnectionObserver for FlareObserver {
                         {
                             let compression_clone = compression.clone();
                             let encryption_clone = encryption.clone();
-                            let pipeline_guard = pipeline.lock().await;
                             let new_parser =
                                 crate::common::MessageParser::new(format, compression, encryption);
-                            pipeline_guard.update_parser(new_parser).await;
+                            pipeline.update_parser(new_parser).await;
                             debug!(
                                 "[FlareObserver] ✅ 已更新 MessagePipeline 的 parser: format={:?}, compression={:?}, encryption={:?}",
                                 format, compression_clone, encryption_clone
@@ -586,8 +582,7 @@ impl ConnectionObserver for FlareObserver {
                         }
 
                         // 使用 PRE_NEGOTIATION_PARSER 解析的 frame 继续处理
-                        let pipeline_guard = pipeline.lock().await;
-                        match pipeline_guard.process_frame(&frame, None).await {
+                        match pipeline.process_frame(&frame, None).await {
                             Ok(Some(_response_data)) => {
                                 debug!(
                                     "[FlareClient] 消息管道返回响应，但客户端无法自动发送，需要用户手动处理"
@@ -604,7 +599,6 @@ impl ConnectionObserver for FlareObserver {
                     }
 
                     // 2. 如果不是 CONNECT_ACK，使用 MessagePipeline 的 parser 解析
-                    let pipeline = pipeline.lock().await;
                     match pipeline.process_raw(&data, None).await {
                         Ok(Some(_response_data)) => {
                             debug!(
@@ -639,5 +633,87 @@ impl MessageProcessor for ListenerProcessor {
 
     fn name(&self) -> &str {
         "ListenerProcessor"
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::common::protocol::{FrameBuilder, Reliability};
+    use tokio::sync::{Mutex, oneshot};
+
+    struct SelectivelyBlockingListener {
+        first_entered: Mutex<Option<oneshot::Sender<()>>>,
+        first_release: Mutex<Option<oneshot::Receiver<()>>>,
+        second_seen: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    #[async_trait]
+    impl MessageListener for SelectivelyBlockingListener {
+        async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
+            match frame.message_id.as_str() {
+                "slow-data-response" => {
+                    if let Some(tx) = self.first_entered.lock().await.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = self.first_release.lock().await.take() {
+                        let _ = rx.await;
+                    }
+                }
+                "send-ack" => {
+                    if let Some(tx) = self.second_seen.lock().await.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                _ => {}
+            }
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_inbound_frame_does_not_block_later_send_ack() {
+        let parser = MessageParser::json();
+        let pipeline = Arc::new(MessagePipeline::new(parser.clone()));
+        let (first_entered_tx, first_entered_rx) = oneshot::channel();
+        let (first_release_tx, first_release_rx) = oneshot::channel();
+        let (second_seen_tx, second_seen_rx) = oneshot::channel();
+        let listener = Arc::new(SelectivelyBlockingListener {
+            first_entered: Mutex::new(Some(first_entered_tx)),
+            first_release: Mutex::new(Some(first_release_rx)),
+            second_seen: Mutex::new(Some(second_seen_tx)),
+        });
+        pipeline
+            .add_processor(Arc::new(ListenerProcessor {
+                listener: listener.clone(),
+            }))
+            .await;
+        let observer = FlareObserver { pipeline, listener };
+
+        let slow = FrameBuilder::new()
+            .with_message_id("slow-data-response".to_string())
+            .with_reliability(Reliability::BestEffort)
+            .build();
+        let ack = FrameBuilder::new()
+            .with_message_id("send-ack".to_string())
+            .with_reliability(Reliability::BestEffort)
+            .build();
+
+        observer.on_event(&ConnectionEvent::Message(
+            parser.serialize(&slow).expect("serialize slow frame"),
+        ));
+        first_entered_rx
+            .await
+            .expect("slow frame should enter listener");
+
+        observer.on_event(&ConnectionEvent::Message(
+            parser.serialize(&ack).expect("serialize ACK frame"),
+        ));
+        tokio::time::timeout(std::time::Duration::from_millis(250), second_seen_rx)
+            .await
+            .expect("ACK must not wait behind an unrelated slow frame")
+            .expect("ACK listener should remain alive");
+
+        let _ = first_release_tx.send(());
     }
 }
