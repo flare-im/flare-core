@@ -125,6 +125,17 @@ RUST_LOG=info cargo run --example flare_chat_client -- user123
 RUST_LOG=info cargo run --example quic_server
 ```
 
+#### `quic_probe.rs` - QUIC 连通性探测
+
+非交互探测：只做建连（TLS 握手 + 协商），用来区分三种失败——UDP 不通（超时）、
+证书不被信任（invalid peer certificate）、服务端拒绝。
+
+```bash
+cargo run --example quic_probe -- quic://127.0.0.1:60052
+# 自签证书时带上 CA 文件
+cargo run --example quic_probe -- quic://127.0.0.1:60052 ./certs/ca.pem
+```
+
 #### `quic_client.rs` - QUIC 客户端
 
 **特点：**
@@ -212,7 +223,24 @@ RUST_LOG=info cargo run --example custom_extensions_example -- client
 
 ---
 
-### 7. WASM WebSocket 客户端（浏览器）
+### 7. 认证连接负载压测
+
+#### `loadconns.rs` - 认证连接负载客户端
+
+读预签 token 文件，用 SDK 建立 N 个**已认证**的 WebSocket 连接并保持（SDK 自带心跳保活），
+用于「N 万真在线」压测。裸 TCP / 未认证 WS 会被网关回收，所以必须走真认证。
+
+`tokens.txt` 每行：`<userId> <token>`。
+
+```bash
+# 压测请用 release 构建
+TOKENS=/root/tokens.txt WS_URL=ws://127.0.0.1:60051 N=60000 DURATION=7200 \
+  CONNECT_CONC=2000 cargo run --release --example loadconns
+# 小规模自检
+TOKENS=./tokens.txt WS_URL=ws://127.0.0.1:60051 N=100 DURATION=60 cargo run --example loadconns
+```
+
+### 8. WASM WebSocket 客户端（浏览器）
 
 在浏览器中运行 `flare-core` WebSocket 客户端栈（`wasm32-unknown-unknown`）。
 
