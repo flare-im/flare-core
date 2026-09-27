@@ -76,6 +76,13 @@ impl ClientWrapper {
         {
             let mut client = self.client.lock().await;
             if !client.is_connected() {
+                // 主动断开过的客户端不自动复活：否则登出/换号后，旧会话里还在路上的一次发送
+                // 会带着旧 token 重连出一条上层状态机不知道的连接（服务端还会判成设备冲突）。
+                if client.core().is_disconnect_requested() {
+                    return Err(crate::common::error::FlareError::connection_failed(
+                        "client was disconnected on request; not reconnecting".to_string(),
+                    ));
+                }
                 client.connect().await?;
             }
         }
@@ -181,5 +188,31 @@ impl ClientWrapper {
             client.core().clone()
         };
         core.wait_for_negotiation(timeout).await
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::client::config::ClientConfig;
+
+    /// 包装层的「发送前确保已连接」同样不能拉起一个被主动断开的客户端。
+    #[tokio::test]
+    async fn ensure_ready_refuses_to_revive_a_disconnected_client() {
+        let config = ClientConfig::new("ws://127.0.0.1:9/ws".to_string()).websocket();
+        let wrapper = ClientWrapper::new(HybridClient::new(config).expect("hybrid client"));
+        wrapper
+            .disconnect()
+            .await
+            .expect("disconnect without a connection");
+
+        let ping = crate::common::protocol::frame_with_system_command(
+            crate::common::protocol::ping(),
+            crate::common::protocol::Reliability::AtLeastOnce,
+        );
+        let started = std::time::Instant::now();
+        let err = wrapper.send_frame(&ping).await.expect_err("must not send");
+        assert!(err.to_string().contains("not reconnecting"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }

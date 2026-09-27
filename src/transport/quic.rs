@@ -239,6 +239,10 @@ impl Connection for QUICTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.close_with_reason("Closed by client").await
+    }
+
+    async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
         // 标记为已关闭
         if let Ok(mut closed) = self.is_closed.lock() {
             *closed = true;
@@ -250,9 +254,7 @@ impl Connection for QUICTransport {
             send.finish().map_err(|e| FlareError::io(e.to_string()))
         };
 
-        self.notify_self_observers_and_clear(&ConnectionEvent::Disconnected(
-            "Closed by client".to_string(),
-        ));
+        self.notify_self_observers_and_clear(&ConnectionEvent::Disconnected(reason.to_string()));
         close_result
     }
 

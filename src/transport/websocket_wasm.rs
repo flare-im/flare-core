@@ -216,6 +216,10 @@ impl Connection for WebSocketTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.close_with_reason("Closed by client").await
+    }
+
+    async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
         self.ws.set_onopen(None);
         self.ws.set_onmessage(None);
         self.ws.set_onclose(None);
@@ -223,7 +227,7 @@ impl Connection for WebSocketTransport {
         self.ws.close();
         Self::dispatch_observers_and_clear(
             &self.observers,
-            &ConnectionEvent::Disconnected("Closed by client".to_string()),
+            &ConnectionEvent::Disconnected(reason.to_string()),
         );
         Ok(())
     }

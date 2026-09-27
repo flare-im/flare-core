@@ -55,6 +55,13 @@ pub trait Connection: Send + Sync {
     /// Closes the connection.
     async fn close(&mut self) -> Result<()>;
 
+    /// Closes the connection and reports `reason` to observers instead of the generic
+    /// "Closed by client". Upper layers treat "Closed by client" as a deliberate disconnect and do
+    /// not reconnect, so a close that is a verdict (the heartbeat found the peer dead) must say so.
+    async fn close_with_reason(&mut self, _reason: &str) -> Result<()> {
+        self.close().await
+    }
+
     /// Returns last activity time (send/receive). Used for heartbeat and idle detection.
     fn last_active_time(&self) -> MonotonicInstant;
 

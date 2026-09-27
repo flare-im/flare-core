@@ -149,6 +149,10 @@ impl Connection for TCPTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.close_with_reason("Closed by local endpoint").await
+    }
+
+    async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
         if let Ok(mut closed) = self.is_closed.lock() {
             *closed = true;
         }
@@ -163,7 +167,7 @@ impl Connection for TCPTransport {
 
         Self::notify_observers_and_clear(
             &self.observers,
-            &ConnectionEvent::Disconnected("Closed by local endpoint".to_string()),
+            &ConnectionEvent::Disconnected(reason.to_string()),
         );
         close_result
     }

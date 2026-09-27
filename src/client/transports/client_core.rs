@@ -179,6 +179,12 @@ impl ClientCore {
         self.disconnect_requested.store(value, Ordering::SeqCst);
     }
 
+    /// 我方是否已主动断开这个客户端。主动断开后它不能再被「发送前自动重连」拉起来：
+    /// 上层（SDK）已经换了新客户端或登出，旧客户端复活会带着旧 token 建出一条上层不知道的连接。
+    pub fn is_disconnect_requested(&self) -> bool {
+        self.disconnect_requested.load(Ordering::SeqCst)
+    }
+
     /// 协议竞速：与主 core 共享 disconnect / 协商 / pending 状态，避免 loser KICK 误报。
     #[cfg(all(
         not(target_arch = "wasm32"),

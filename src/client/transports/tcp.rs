@@ -201,6 +201,7 @@ impl Client for TCPClient {
 
     async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         if !self.is_connected()
+            && !self.core.is_disconnect_requested()
             && ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts)
         {
             self.try_reconnect().await?;

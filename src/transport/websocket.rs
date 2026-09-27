@@ -357,6 +357,10 @@ impl Connection for WebSocketTransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.close_with_reason("Closed by client").await
+    }
+
+    async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
         let close_result = match &mut self.sink {
             WebSocketSink::Tls(sink) => {
                 let mut s = sink.lock().await;
@@ -371,9 +375,7 @@ impl Connection for WebSocketTransport {
                     .map_err(|e| FlareError::connection_failed(e.to_string()))
             }
         };
-        self.notify_observers_and_clear(&ConnectionEvent::Disconnected(
-            "Closed by client".to_string(),
-        ));
+        self.notify_observers_and_clear(&ConnectionEvent::Disconnected(reason.to_string()));
         close_result
     }
 

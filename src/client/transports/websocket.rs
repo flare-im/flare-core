@@ -274,6 +274,26 @@ mod tests {
     use crate::common::config_types::TlsConfig;
     use std::path::PathBuf;
 
+    /// 主动断开后，发送不能把客户端自动重连起来（登出/换号后旧会话的在途发送不得复活旧连接）。
+    #[tokio::test]
+    async fn send_after_requested_disconnect_does_not_reconnect() {
+        let config = ClientConfig::new("ws://127.0.0.1:9/ws".to_string()).websocket();
+        let mut client = WebSocketClient::new(config);
+        client
+            .disconnect()
+            .await
+            .expect("disconnect without a connection");
+
+        let ping = crate::common::protocol::frame_with_system_command(
+            crate::common::protocol::ping(),
+            crate::common::protocol::Reliability::AtLeastOnce,
+        );
+        let started = std::time::Instant::now();
+        assert!(client.send_frame(&ping).await.is_err());
+        assert_eq!(client.reconnect_attempts, 0, "must not try to reconnect");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     #[test]
     fn plain_ws_ignores_custom_client_tls() {
         let mut config = ClientConfig::new("ws://127.0.0.1:60051/ws".to_string()).websocket();
@@ -338,6 +358,7 @@ impl Client for WebSocketClient {
     async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         // 如果未连接，尝试重连
         if !self.is_connected()
+            && !self.core.is_disconnect_requested()
             && ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts)
         {
             self.try_reconnect().await?;

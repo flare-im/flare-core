@@ -16,6 +16,12 @@ use tokio::sync::{Mutex, Notify, mpsc};
 /// 作为探测窗口，让半开死连在几秒内被戳穿并触发重连。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// 心跳判死后主动断开时报给上层的原因。不能是泛泛的 "Closed by client"：上层（SDK）把那句当成
+/// 「我方主动断开」，不会重连——连接就停在断开，界面一直显示「连接已断开」。
+pub const HEARTBEAT_TIMEOUT_REASON: &str = "heartbeat timeout: no PONG";
+/// 心跳发不出去（连接已坏）时主动断开的原因，同上。
+pub const HEARTBEAT_SEND_FAILED_REASON: &str = "heartbeat send failed";
+
 /// 心跳管理器
 pub struct HeartbeatManager {
     config: Arc<RwLock<HeartbeatConfig>>,
@@ -123,8 +129,15 @@ impl HeartbeatManager {
                             &last_pong,
                             read_config(&config).timeout,
                         ) {
+                            tracing::warn!(
+                                reason = "heartbeat_timeout",
+                                ping_age = ?ping_age(&last_ping),
+                                pong_age = ?pong_age(&last_pong),
+                                timeout = ?read_config(&config).timeout,
+                                "[HeartbeatManager] 心跳超时未收到 PONG，主动断开以触发重连"
+                            );
                             let mut conn = connection.lock().await;
-                            let _ = conn.close().await;
+                            let _ = conn.close_with_reason(HEARTBEAT_TIMEOUT_REASON).await;
                             break;
                         }
 
@@ -156,7 +169,7 @@ impl HeartbeatManager {
                         if let Err(error) = send_result {
                             tracing::warn!("[HeartbeatManager] 发送心跳失败: {}", error);
                             let mut conn = connection.lock().await;
-                            let _ = conn.close().await;
+                            let _ = conn.close_with_reason(HEARTBEAT_SEND_FAILED_REASON).await;
                             break;
                         }
                     }
@@ -171,8 +184,14 @@ impl HeartbeatManager {
                             &last_pong,
                             read_config(&config).timeout,
                         ) {
+                            tracing::warn!(
+                                reason = "probe_unanswered_ping",
+                                ping_age = ?ping_age(&last_ping),
+                                pong_age = ?pong_age(&last_pong),
+                                "[HeartbeatManager] 前台验活：已有超时未答的 ping，主动断开以触发重连"
+                            );
                             let mut conn = connection.lock().await;
-                            let _ = conn.close().await;
+                            let _ = conn.close_with_reason(HEARTBEAT_TIMEOUT_REASON).await;
                             break;
                         }
 
@@ -203,7 +222,7 @@ impl HeartbeatManager {
                             if let Err(error) = send_result {
                                 tracing::warn!("[HeartbeatManager] 探测心跳发送失败: {}", error);
                                 let mut conn = connection.lock().await;
-                                let _ = conn.close().await;
+                                let _ = conn.close_with_reason(HEARTBEAT_SEND_FAILED_REASON).await;
                                 break;
                             }
                             // 有界等待窗口（远短于 90s 心跳 timeout）：ping 往返正常 < 100ms。
@@ -214,7 +233,7 @@ impl HeartbeatManager {
                                     "[HeartbeatManager] 前台验活未收到 PONG，判定半开死连，主动断开以触发重连"
                                 );
                                 let mut conn = connection.lock().await;
-                                let _ = conn.close().await;
+                                let _ = conn.close_with_reason(HEARTBEAT_TIMEOUT_REASON).await;
                                 break;
                             }
                         }
@@ -312,6 +331,16 @@ fn record_ping_start_if_idle(
     *last_ping = Some(monotonic_now());
 }
 
+/// 最近一枚 ping 距今多久（日志用；主动断开时要能说清是哪枚心跳没答）。
+fn ping_age(last_ping: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>) -> Option<Duration> {
+    last_ping.lock().ok().and_then(|p| *p).map(|p| p.elapsed())
+}
+
+/// 最近一次 PONG 距今多久（日志用）。
+fn pong_age(last_pong: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>) -> Option<Duration> {
+    last_pong.lock().ok().and_then(|p| *p).map(|p| p.elapsed())
+}
+
 fn pong_covers_ping(
     last_pong: &Arc<std::sync::Mutex<Option<MonotonicInstant>>>,
     ping_time: MonotonicInstant,
@@ -337,6 +366,7 @@ mod tests {
         sends: Arc<AtomicUsize>,
         closes: Arc<AtomicUsize>,
         last_active: MonotonicInstant,
+        close_reasons: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -352,6 +382,13 @@ mod tests {
         }
 
         async fn close(&mut self) -> Result<()> {
+            self.close_with_reason("Closed by client").await
+        }
+
+        async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
+            if let Ok(mut reasons) = self.close_reasons.lock() {
+                reasons.push(reason.to_string());
+            }
             self.closes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -374,6 +411,7 @@ mod tests {
                 sends: Arc::clone(&sends),
                 closes,
                 last_active: monotonic_now(),
+                close_reasons: Arc::default(),
             })));
         let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
 
@@ -411,6 +449,7 @@ mod tests {
                 sends: Arc::clone(&sends),
                 closes: Arc::clone(&closes),
                 last_active: monotonic_now(),
+                close_reasons: Arc::default(),
             })));
         let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
 
@@ -455,11 +494,13 @@ mod tests {
     async fn probe_wake_closes_dead_connection_without_waiting_full_interval() {
         let sends = Arc::new(AtomicUsize::new(0));
         let closes = Arc::new(AtomicUsize::new(0));
+        let close_reasons: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
         let connection: Arc<Mutex<Box<dyn Connection>>> =
             Arc::new(Mutex::new(Box::new(CountingConnection {
                 sends: Arc::clone(&sends),
                 closes: Arc::clone(&closes),
                 last_active: monotonic_now(),
+                close_reasons: Arc::clone(&close_reasons),
             })));
         let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
 
@@ -486,6 +527,11 @@ mod tests {
             closes.load(Ordering::SeqCst) > 0,
             "未收到 PONG 的验活必须主动断开连接（远早于 3600s 心跳间隔）"
         );
+        // 判死断开要报真实原因：泛泛的 "Closed by client" 会被上层当成主动断开而不重连。
+        assert_eq!(
+            close_reasons.lock().unwrap().as_slice(),
+            [HEARTBEAT_TIMEOUT_REASON.to_string()]
+        );
     }
 
     /// 回到前台的即时验活：连接仍健康（窗口内收到 PONG）时，probe_wake 不得断开连接。
@@ -498,6 +544,7 @@ mod tests {
                 sends: Arc::clone(&sends),
                 closes: Arc::clone(&closes),
                 last_active: monotonic_now(),
+                close_reasons: Arc::default(),
             })));
         let parser = Arc::new(tokio::sync::Mutex::new(MessageParser::json()));
 
