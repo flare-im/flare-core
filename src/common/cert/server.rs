@@ -4,7 +4,9 @@
 //! 证书必须通过 scripts/generate_cert.rs 生成
 
 use crate::common::cert::pinning::{PinnedServerCertVerifier, TlsPinningPolicy};
-use crate::common::cert::{load_cert_der_from_file, load_key_der_from_file};
+use crate::common::cert::{
+    load_cert_der_from_file, load_key_der_from_file, pem_cert_to_der, pem_key_to_der,
+};
 use crate::common::config_types::TlsConfig;
 use crate::common::error::FlareError;
 use crate::common::error::Result;
@@ -18,6 +20,74 @@ lazy_static! {
     // 全局静态证书和私钥 DER 缓存，避免每次连接都重新加载
     static ref CERT_DER_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
     static ref KEY_DER_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+}
+
+/// Deployment-provided server certificate and private key (PEM, or base64 of
+/// PEM like the other injected keys). When both are set they replace the files
+/// under `certs/`: a QUIC listener behind UDP passthrough must present the
+/// installation's certificate, not the auto-generated localhost one.
+pub const SERVER_CERT_ENV: &str = "FLARE_QUIC_TLS_CERT";
+pub const SERVER_KEY_ENV: &str = "FLARE_QUIC_TLS_KEY";
+
+fn injected_pem(name: &str, value: Option<&str>) -> Result<Option<Vec<u8>>> {
+    use base64::Engine;
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.starts_with("-----BEGIN ") {
+        return Ok(Some(value.as_bytes().to_vec()));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map(Some)
+        .map_err(|_| FlareError::protocol_error(format!("{name} is neither PEM nor base64 PEM")))
+}
+
+/// DER certificate and key from the injected values; `None` when neither is set.
+fn injected_server_identity(
+    cert: Option<&str>,
+    key: Option<&str>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    match (
+        injected_pem(SERVER_CERT_ENV, cert)?,
+        injected_pem(SERVER_KEY_ENV, key)?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some((pem_cert_to_der(&cert)?, pem_key_to_der(&key)?))),
+        _ => Err(FlareError::protocol_error(format!(
+            "{SERVER_CERT_ENV} and {SERVER_KEY_ENV} must be set together"
+        ))),
+    }
+}
+
+/// Load the server identity once: injected values first, then `certs/` files
+/// (generated for local development when absent).
+fn load_server_identity() -> Result<()> {
+    let mut cert_cache = CERT_DER_CACHE.lock().unwrap();
+    let mut key_cache = KEY_DER_CACHE.lock().unwrap();
+    if cert_cache.is_some() && key_cache.is_some() {
+        return Ok(());
+    }
+    let injected = injected_server_identity(
+        std::env::var(SERVER_CERT_ENV).ok().as_deref(),
+        std::env::var(SERVER_KEY_ENV).ok().as_deref(),
+    )?;
+    let (cert_der, key_der) = match injected {
+        Some(identity) => {
+            tracing::info!("server certificate loaded from {SERVER_CERT_ENV}/{SERVER_KEY_ENV}");
+            identity
+        }
+        None => {
+            ensure_certificates_exist()?;
+            (
+                load_cert_der_from_file(default_cert_path())?,
+                load_key_der_from_file(default_key_path())?,
+            )
+        }
+    };
+    *cert_cache = Some(cert_der);
+    *key_cache = Some(key_der);
+    Ok(())
 }
 
 /// 默认证书文件路径
@@ -80,42 +150,16 @@ fn ensure_certificates_exist() -> Result<()> {
 /// 从默认路径 certs/server.crt 加载证书（带缓存）
 /// 如果证书不存在，会自动生成
 pub fn get_server_cert_der() -> Result<Vec<u8>> {
-    // 确保证书存在
-    ensure_certificates_exist()?;
-
-    let mut cache = CERT_DER_CACHE.lock().unwrap();
-
-    if let Some(ref cert_der) = *cache {
-        Ok(cert_der.clone())
-    } else {
-        // 从文件加载证书
-        let cert_der = load_cert_der_from_file(default_cert_path())?;
-
-        // 缓存证书 DER
-        *cache = Some(cert_der.clone());
-        Ok(cert_der)
-    }
+    load_server_identity()?;
+    Ok(CERT_DER_CACHE.lock().unwrap().clone().unwrap_or_default())
 }
 
 /// 获取服务器私钥的 DER 格式字节数组
 /// 从默认路径 certs/server.key 加载私钥（带缓存）
 /// 如果私钥不存在，会自动生成
 pub fn get_server_key_der() -> Result<Vec<u8>> {
-    // 确保证书存在
-    ensure_certificates_exist()?;
-
-    let mut cache = KEY_DER_CACHE.lock().unwrap();
-
-    if let Some(ref key_der) = *cache {
-        Ok(key_der.clone())
-    } else {
-        // 从文件加载私钥
-        let key_der = load_key_der_from_file(default_key_path())?;
-
-        // 缓存私钥 DER
-        *cache = Some(key_der.clone());
-        Ok(key_der)
-    }
+    load_server_identity()?;
+    Ok(KEY_DER_CACHE.lock().unwrap().clone().unwrap_or_default())
 }
 
 /// 初始化 rustls CryptoProvider（如果尚未初始化）
@@ -212,4 +256,38 @@ fn add_root_certificate(root_store: &mut rustls::RootCertStore, cert_der: Vec<u8
         FlareError::protocol_error(format!("Failed to add certificate to root store: {}", e))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod injected_identity_tests {
+    use super::*;
+    use base64::Engine;
+
+    const CERT_PEM: &str = include_str!("testdata/cert.pem");
+    const KEY_PEM: &str = include_str!("testdata/k8.pem");
+
+    #[test]
+    fn injected_pem_or_base64_pem_replaces_the_files() {
+        let from_pem = injected_server_identity(Some(CERT_PEM), Some(KEY_PEM))
+            .unwrap()
+            .expect("identity");
+        assert_eq!(from_pem.0, pem_cert_to_der(CERT_PEM.as_bytes()).unwrap());
+        assert_eq!(from_pem.1, pem_key_to_der(KEY_PEM.as_bytes()).unwrap());
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let from_b64 =
+            injected_server_identity(Some(&b64.encode(CERT_PEM)), Some(&b64.encode(KEY_PEM)))
+                .unwrap()
+                .expect("identity");
+        assert_eq!(from_b64, from_pem);
+    }
+
+    #[test]
+    fn absent_values_fall_back_and_half_or_bad_values_fail() {
+        assert!(injected_server_identity(None, Some(" ")).unwrap().is_none());
+        assert!(injected_server_identity(Some(CERT_PEM), None).is_err());
+        assert!(injected_server_identity(None, Some(KEY_PEM)).is_err());
+        assert!(injected_server_identity(Some("not base64!"), Some(KEY_PEM)).is_err());
+        assert!(injected_server_identity(Some(KEY_PEM), Some(KEY_PEM)).is_err());
+    }
 }
