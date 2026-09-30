@@ -511,7 +511,18 @@ impl ServerCore {
     ) -> Result<()> {
         // 1. 处理协商（但不立即标记协商完成，等 CONNECT_ACK 发送完成后再标记）
         let (ack_frame, negotiation_parser) =
-            self.handle_connect_message(frame, connection_id).await?;
+            match self.handle_connect_message(frame, connection_id).await {
+                Ok(negotiated) => negotiated,
+                Err(e) => {
+                    if matches!(
+                        e.code(),
+                        Some(crate::common::error::ErrorCode::AuthenticationFailed)
+                    ) {
+                        Self::send_connect_rejection(&connection, connection_id, e.reason()).await;
+                    }
+                    return Err(e);
+                }
+            };
 
         // 记录最终协商结果
         let final_format = negotiation_parser.default_format();
@@ -562,6 +573,51 @@ impl ServerCore {
         }
 
         Ok(())
+    }
+
+    /// 拒绝 CONNECT 前先告诉客户端原因：一个 ERROR 帧，编码与 CONNECT_ACK 相同（协商前 JSON）。
+    /// 调用方随后关闭连接。没有这一帧，客户端只能看到连接被关掉，分不清是令牌失效还是租户被停用。
+    ///
+    /// `message` 只在认证器给的是类型化错误码（如 `TENANT_UNAVAILABLE`）时原样下发，其余一律
+    /// `AUTHENTICATION_FAILED`，免得把服务端内部错误文本带给客户端。直接写连接而不走写队列：
+    /// 移除连接会立刻关闭写队列，排在队列里的帧会被丢掉。
+    async fn send_connect_rejection(
+        connection: &Arc<tokio::sync::Mutex<Box<dyn crate::transport::connection::Connection>>>,
+        connection_id: &str,
+        reason: &str,
+    ) {
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        let code = crate::common::error::ErrorCode::AuthenticationFailed.as_str();
+        let message = if is_typed_reason(reason) {
+            reason
+        } else {
+            code
+        };
+        let metadata = HashMap::from([("code".to_string(), code.as_bytes().to_vec())]);
+        let frame = frame_with_system_command(
+            crate::common::protocol::builder::error(message.to_string(), Some(metadata)),
+            Reliability::BestEffort,
+        );
+        let data = match PRE_NEGOTIATION_PARSER.serialize(&frame) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    "[ServerCore] CONNECT 拒绝帧序列化失败: connection_id={}, error={}",
+                    connection_id, e
+                );
+                return;
+            }
+        };
+        let sent = tokio::time::timeout(CONNECT_REJECTION_SEND_TIMEOUT, async {
+            connection.lock().await.send(&data).await
+        })
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            debug!(
+                "[ServerCore] CONNECT 拒绝帧未送达: connection_id={}",
+                connection_id
+            );
+        }
     }
 
     /// 在 CONNECT_ACK 发送完成后，最终完成协商（标记协商完成并更新连接信息）
@@ -1088,6 +1144,17 @@ impl ServerHandle for ServerCore {
     }
 }
 
+/// 拒绝帧最多等这么久；对端不读也不能拖住关连接。
+const CONNECT_REJECTION_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 认证器给出的失败原因是否为可下发的类型化错误码：大写字母开头，只含大写字母、数字、下划线。
+fn is_typed_reason(reason: &str) -> bool {
+    let mut chars = reason.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && reason.len() <= 64
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1195,5 +1262,118 @@ mod tests {
             Arc::ptr_eq(&first_pipeline, &second_pipeline),
             "connections with the same negotiated parser profile should share one pipeline"
         );
+    }
+
+    /// 记下写到连接上的每一帧。
+    struct RecordingConnection {
+        sent: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        last_active: MonotonicInstant,
+    }
+
+    #[async_trait]
+    impl Connection for RecordingConnection {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+
+        async fn send(&mut self, data: &[u8]) -> Result<()> {
+            self.sent.lock().unwrap().push(data.to_vec());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn last_active_time(&self) -> MonotonicInstant {
+            self.last_active
+        }
+
+        fn update_active_time(&mut self) {
+            self.last_active = monotonic_now();
+        }
+    }
+
+    struct Reject(&'static str);
+
+    #[async_trait]
+    impl Authenticator for Reject {
+        async fn authenticate(
+            &self,
+            _token: &str,
+            _connection_id: &str,
+            _device_info: Option<&crate::common::device::DeviceInfo>,
+            _metadata: Option<&HashMap<String, Vec<u8>>>,
+        ) -> Result<crate::server::auth::AuthResult> {
+            Ok(crate::server::auth::AuthResult::failure(self.0.to_string()))
+        }
+    }
+
+    /// 被拒的 CONNECT 在关连接前收到一个 ERROR 帧（协商前 JSON）：类型化原因原样下发，
+    /// 其余文本一律换成 AUTHENTICATION_FAILED。
+    #[tokio::test]
+    async fn rejected_connect_tells_the_client_why_before_the_close() {
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        use crate::common::protocol::flare::core::commands::{command, system_command};
+        for (auth_message, expected) in [
+            ("TENANT_UNAVAILABLE", "TENANT_UNAVAILABLE"),
+            ("Token 无效或已过期", "AUTHENTICATION_FAILED"),
+        ] {
+            let config = ServerConfig::default().enable_auth();
+            let core = ServerCore::new(&config, None)
+                .with_authenticator(Some(Arc::new(Reject(auth_message))));
+            let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let connection: Arc<tokio::sync::Mutex<Box<dyn Connection>>> =
+                Arc::new(tokio::sync::Mutex::new(Box::new(RecordingConnection {
+                    sent: sent.clone(),
+                    last_active: monotonic_now(),
+                })));
+            let connect = frame_with_system_command(
+                crate::common::protocol::builder::connect(
+                    SerializationFormat::Json,
+                    HashMap::from([("token".to_string(), b"t".to_vec())]),
+                ),
+                Reliability::AtLeastOnce,
+            );
+
+            let error = core
+                .handle_connect_complete(&connect, "c1", connection)
+                .await
+                .expect_err("CONNECT must be rejected");
+
+            assert_eq!(
+                error.code(),
+                Some(crate::common::error::ErrorCode::AuthenticationFailed)
+            );
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly the rejection frame, no CONNECT_ACK");
+            let frame = PRE_NEGOTIATION_PARSER.parse(&sent[0]).expect("JSON frame");
+            let Some(command::Type::System(system)) = frame.command.and_then(|c| c.r#type) else {
+                panic!("system command expected");
+            };
+            assert_eq!(system.r#type, system_command::Type::Error as i32);
+            assert_eq!(system.message, expected);
+            assert_eq!(
+                system.metadata.get("code").map(Vec::as_slice),
+                Some(b"AUTHENTICATION_FAILED".as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn only_typed_reasons_reach_the_client() {
+        assert!(is_typed_reason("TENANT_UNAVAILABLE"));
+        assert!(is_typed_reason("TOKEN_REVOKED2"));
+        for reason in [
+            "",
+            "tenant",
+            "Token 无效或已过期",
+            "验证过程出错: db",
+            "_X",
+            "A B",
+        ] {
+            assert!(!is_typed_reason(reason), "{reason}");
+        }
+        assert!(!is_typed_reason(&"A".repeat(65)));
     }
 }

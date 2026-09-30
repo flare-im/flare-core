@@ -20,6 +20,10 @@
 
 - 缺少事件处理器时返回配置错误，不再 panic。服务端在启动配置不完整时
   应当给出可读的错误，而不是崩掉。
+- 服务端拒绝 CONNECT（认证失败）时，关连接前先发一个 ERROR 系统帧，编码与
+  CONNECT_ACK 相同（协商前 JSON）。认证器给出类型化错误码（如 `TENANT_UNAVAILABLE`）
+  时原样作为 message，其余一律为 `AUTHENTICATION_FAILED`；metadata `code` 为
+  `AUTHENTICATION_FAILED`。此前连接被直接关掉，客户端分不清令牌失效和租户被停用。
 
 ### 其他
 
