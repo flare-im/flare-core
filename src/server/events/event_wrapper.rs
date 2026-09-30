@@ -494,30 +494,22 @@ impl ConnectionHandler for ServerMessageWrapper {
         let _ = self.event_handler.on_disconnect(connection_id, None).await;
 
         // 清理设备（如果有设备管理器）
-        if let (Some(device_mgr), Some(manager)) = (&self.device_manager, &self.connection_manager)
-        {
-            let manager_trait = Arc::clone(manager) as Arc<dyn ConnectionManagerTrait>;
+        //
+        // 按连接 ID 反查设备归属（租户，用户）后精确移除，不依赖连接信息此刻是否还在连接管理器里，
+        // 也不会误删其他租户同名用户的设备。
+        if let Some(device_mgr) = &self.device_manager {
             let device_mgr_clone = device_mgr.clone();
             // 使用 Arc<str> 避免 String clone，减少内存分配
             let conn_id: Arc<str> = Arc::from(connection_id);
 
             tokio::spawn(async move {
-                // 获取连接信息（包括 user_id）
-                if let Some((_, conn_info)) = manager_trait.get_connection(&conn_id).await
-                    && let Some(user_id) = conn_info.user_id
-                {
-                    if let Err(e) = device_mgr_clone.remove_device(&user_id, &conn_id).await {
-                        tracing::debug!(
-                            "[ServerMessageWrapper] Failed to remove device from DeviceManager: {}",
-                            e
-                        );
-                    } else {
-                        tracing::info!(
-                            "[ServerMessageWrapper] Successfully removed device from DeviceManager: user_id={}, connection_id={}",
-                            user_id,
-                            conn_id
-                        );
-                    }
+                if let Some(owner) = device_mgr_clone.remove_connection(&conn_id).await {
+                    tracing::info!(
+                        "[ServerMessageWrapper] Successfully removed device from DeviceManager: tenant_id={}, user_id={}, connection_id={}",
+                        owner.tenant_id(),
+                        owner.user_id(),
+                        conn_id
+                    );
                 }
             });
         }

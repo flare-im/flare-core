@@ -5,5 +5,5 @@
 pub mod authenticator;
 pub mod default;
 
-pub use authenticator::{AuthResult, Authenticator};
+pub use authenticator::{AuthResult, Authenticator, TENANT_ID_METADATA_KEY};
 pub use default::DefaultAuthenticator;

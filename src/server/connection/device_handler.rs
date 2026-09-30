@@ -7,7 +7,7 @@ use crate::common::device::{DeviceInfo, DevicePlatform};
 use crate::common::error::Result;
 use crate::common::protocol::{Reliability, builder::kicked, frame_with_system_command};
 use crate::server::connection::ConnectionManagerTrait;
-use crate::server::device::DeviceManager;
+use crate::server::device::{DeviceManager, DeviceOwner};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -20,11 +20,12 @@ pub struct DeviceConflictResult {
 
 /// 处理设备冲突
 ///
-/// 通过 user_id 和 DevicePlatform 来确定冲突规则，不再依赖完整的 DeviceInfo
+/// 通过设备归属（租户，用户）和 DevicePlatform 来确定冲突规则，不再依赖完整的 DeviceInfo。
+/// 冲突只在同一归属内判定，其他租户里 user_id 相同的用户不受影响。
 ///
 /// # 参数
 /// - `device_manager`: 设备管理器（可选）
-/// - `user_id`: 用户 ID（用于确定冲突规则）
+/// - `owner`: 设备归属（租户，用户），应取自认证结果
 /// - `connection_id`: 新连接的连接 ID
 /// - `platform`: 设备平台（用于确定冲突规则）
 /// - `device_info`: 设备信息（完整信息，用于记录）
@@ -34,31 +35,36 @@ pub struct DeviceConflictResult {
 /// 设备冲突处理结果，包含需要被踢掉的连接 ID 列表
 pub async fn handle_device_conflict(
     device_manager: Option<Arc<DeviceManager>>,
-    user_id: &str,
+    owner: &DeviceOwner,
     connection_id: &str,
     platform: &DevicePlatform,
     device_info: &DeviceInfo,
     manager: Arc<dyn ConnectionManagerTrait>,
 ) -> Result<DeviceConflictResult> {
     let mut conflict_connections = Vec::new();
+    let user_id = owner.user_id();
 
     info!(
-        "[DeviceHandler] 开始处理设备冲突: user_id={}, connection_id={}, platform={:?}",
-        user_id, connection_id, platform
+        "[DeviceHandler] 开始处理设备冲突: tenant_id={}, user_id={}, connection_id={}, platform={:?}",
+        owner.tenant_id(),
+        user_id,
+        connection_id,
+        platform
     );
 
     let device_manager_clone = device_manager.clone();
     if let Some(device_mgr) = &device_manager {
-        // 使用 user_id 和 platform 来确定冲突规则，然后添加设备
+        // 使用（租户，用户）和 platform 来确定冲突规则，然后添加设备
         match device_mgr
-            .add_device(user_id, connection_id.to_string(), device_info.clone())
+            .add_device(owner, connection_id.to_string(), device_info.clone())
             .await
         {
             Ok(conflicts) => {
                 conflict_connections = conflicts;
                 if !conflict_connections.is_empty() {
                     info!(
-                        "[DeviceHandler] ✅ 设备冲突检测: 用户 {} 的新平台 {:?} 将踢掉 {} 个旧连接: {:?}",
+                        "[DeviceHandler] ✅ 设备冲突检测: 租户 {} 用户 {} 的新平台 {:?} 将踢掉 {} 个旧连接: {:?}",
+                        owner.tenant_id(),
                         user_id,
                         platform,
                         conflict_connections.len(),
@@ -66,8 +72,10 @@ pub async fn handle_device_conflict(
                     );
                 } else {
                     debug!(
-                        "[DeviceHandler] 无设备冲突: 用户 {} 的新平台 {:?} 可以正常添加",
-                        user_id, platform
+                        "[DeviceHandler] 无设备冲突: 租户 {} 用户 {} 的新平台 {:?} 可以正常添加",
+                        owner.tenant_id(),
+                        user_id,
+                        platform
                     );
                 }
             }
@@ -186,7 +194,7 @@ pub async fn handle_device_conflict(
                     continue;
                 }
 
-                match device_mgr.remove_device(user_id, conflict_conn_id).await {
+                match device_mgr.remove_device(owner, conflict_conn_id).await {
                     Ok(_) => {
                         info!(
                             "[DeviceHandler] ✅ 旧连接的设备已从设备管理器移除: {} (新连接: {})",
@@ -312,9 +320,10 @@ mod tests {
                 true,
             )
             .unwrap();
+        let owner = DeviceOwner::new(Some("tenant-a"), "user1");
         device_mgr
             .add_device(
-                "user1",
+                &owner,
                 "old-conn".to_string(),
                 DeviceInfo::new("dev-a".to_string(), DevicePlatform::Web),
             )
@@ -334,7 +343,7 @@ mod tests {
         let mgr_dyn: Arc<dyn ConnectionManagerTrait> = manager.clone();
         let result = handle_device_conflict(
             Some(device_mgr.clone()),
-            "user1",
+            &owner,
             "new-conn",
             &DevicePlatform::Web,
             &DeviceInfo::new("dev-b".to_string(), DevicePlatform::Web),
@@ -356,6 +365,120 @@ mod tests {
         assert!(
             manager.get_connection("old-conn").is_none(),
             "旧连接快照应已从连接管理器移除"
+        );
+    }
+
+    /// 记下写到连接上的帧，用来确认没有向其他租户的连接下发 KICKED。
+    struct RecordingConn {
+        sent: Arc<Mutex<Vec<Vec<u8>>>>,
+        last_active: Mutex<Instant>,
+    }
+
+    #[async_trait]
+    impl Connection for RecordingConn {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+        async fn send(&mut self, data: &[u8]) -> Result<()> {
+            self.sent.lock().unwrap().push(data.to_vec());
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> Instant {
+            *self.last_active.lock().unwrap()
+        }
+        fn update_active_time(&mut self) {
+            *self.last_active.lock().unwrap() = Instant::now();
+        }
+    }
+
+    /// SEC-04/SEC-07：另一个租户里 user_id 相同、平台相同的连接，既不能收到 KICKED，
+    /// 也不能被从连接管理器里摘掉；同租户的旧连接照常被顶掉。
+    #[tokio::test]
+    async fn device_conflict_never_kicks_the_same_user_id_in_another_tenant() {
+        let manager = Arc::new(ConnectionManager::new());
+        let device_mgr = Arc::new(DeviceManager::new(
+            DeviceConflictStrategy::PlatformExclusive,
+        ));
+        let tenant_a = DeviceOwner::new(Some("tenant-a"), "shared-user");
+        let tenant_b = DeviceOwner::new(Some("tenant-b"), "shared-user");
+
+        let b_sent = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "b-android".to_string(),
+                Box::new(RecordingConn {
+                    sent: b_sent.clone(),
+                    last_active: Mutex::new(Instant::now()),
+                }),
+                Some("shared-user".to_string()),
+                true,
+            )
+            .unwrap();
+        device_mgr
+            .add_device(
+                &tenant_b,
+                "b-android".to_string(),
+                DeviceInfo::new("b-d1".to_string(), DevicePlatform::Android),
+            )
+            .await
+            .unwrap();
+
+        for connection_id in ["a-android-1", "a-android-2"] {
+            manager
+                .add_connection(
+                    connection_id.to_string(),
+                    Box::new(MockConn::new()),
+                    Some("shared-user".to_string()),
+                    true,
+                )
+                .unwrap();
+        }
+
+        let mgr_dyn: Arc<dyn ConnectionManagerTrait> = manager.clone();
+        let first = handle_device_conflict(
+            Some(device_mgr.clone()),
+            &tenant_a,
+            "a-android-1",
+            &DevicePlatform::Android,
+            &DeviceInfo::new("a-d1".to_string(), DevicePlatform::Android),
+            mgr_dyn.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            first.conflict_connections.is_empty(),
+            "其他租户的同平台设备不应计入冲突: {:?}",
+            first.conflict_connections
+        );
+
+        let second = handle_device_conflict(
+            Some(device_mgr.clone()),
+            &tenant_a,
+            "a-android-2",
+            &DevicePlatform::Android,
+            &DeviceInfo::new("a-d2".to_string(), DevicePlatform::Android),
+            mgr_dyn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            second.conflict_connections,
+            vec!["a-android-1".to_string()],
+            "同租户同平台仍按策略冲突"
+        );
+
+        assert!(b_sent.lock().unwrap().is_empty(), "B 的连接不应收到 KICKED");
+        assert!(manager.get_connection("b-android").is_some());
+        assert!(manager.get_connection("a-android-1").is_none());
+        assert_eq!(
+            device_mgr.get_user_connections(&tenant_b).await,
+            vec!["b-android".to_string()]
+        );
+        assert_eq!(
+            device_mgr.get_user_connections(&tenant_a).await,
+            vec!["a-android-2".to_string()]
         );
     }
 }

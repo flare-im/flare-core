@@ -5,5 +5,5 @@
 pub mod manager;
 pub mod strategy;
 
-pub use manager::DeviceManager;
+pub use manager::{DEFAULT_TENANT_ID, DeviceManager, DeviceOwner};
 pub use strategy::{DeviceConflictStrategy, DeviceConflictStrategyBuilder};

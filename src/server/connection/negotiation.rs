@@ -21,6 +21,7 @@ const METADATA_MODEL: &str = "model";
 const METADATA_APP_VERSION: &str = "app_version";
 const METADATA_SYSTEM_VERSION: &str = "system_version";
 const METADATA_USER_ID: &str = "user_id";
+const METADATA_TENANT_ID: &str = crate::server::auth::TENANT_ID_METADATA_KEY;
 const METADATA_FORCE_FORMAT: &str = "force_format";
 
 const DEVICE_RESERVED_METADATA_KEYS: &[&str] = &[
@@ -33,6 +34,7 @@ const DEVICE_RESERVED_METADATA_KEYS: &[&str] = &[
     METADATA_APP_VERSION,
     METADATA_SYSTEM_VERSION,
     METADATA_USER_ID,
+    METADATA_TENANT_ID,
     METADATA_FORCE_FORMAT,
 ];
 
@@ -53,6 +55,11 @@ pub struct NegotiationResult {
     pub device_info: Option<DeviceInfo>,
     /// 用户 ID（如果客户端在 CONNECT 中提供）
     pub user_id: Option<String>,
+    /// 租户 ID（如果客户端在 CONNECT 中提供）
+    ///
+    /// 这是客户端的自报值，只在未启用认证时作为连接租户；启用认证时一律以认证结果中的租户为准，
+    /// 不会采信这里的值。
+    pub tenant_id: Option<String>,
 }
 
 impl Default for NegotiationResult {
@@ -65,6 +72,7 @@ impl Default for NegotiationResult {
             is_forced: false,
             device_info: None,
             user_id: None,
+            tenant_id: None,
         }
     }
 }
@@ -96,6 +104,7 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
         is_forced: metadata_string(metadata, METADATA_FORCE_FORMAT).is_some_and(|v| v == "true"),
         device_info: parse_device_info(metadata),
         user_id: metadata_string(metadata, METADATA_USER_ID),
+        tenant_id: metadata_string(metadata, METADATA_TENANT_ID),
     };
 
     Ok(result)
@@ -267,6 +276,7 @@ mod tests {
             (METADATA_APP_VERSION.to_string(), b"1.2.3".to_vec()),
             (METADATA_SYSTEM_VERSION.to_string(), b"18.0".to_vec()),
             (METADATA_USER_ID.to_string(), b"user-1".to_vec()),
+            (METADATA_TENANT_ID.to_string(), b"tenant-1".to_vec()),
             (METADATA_FORCE_FORMAT.to_string(), b"true".to_vec()),
             ("trace_id".to_string(), b"trace-1".to_vec()),
         ]);
@@ -283,6 +293,7 @@ mod tests {
         assert_eq!(result.encryption, EncryptionAlgorithm::Aes256Gcm);
         assert!(result.is_forced);
         assert_eq!(result.user_id.as_deref(), Some("user-1"));
+        assert_eq!(result.tenant_id.as_deref(), Some("tenant-1"));
 
         let device = result.device_info.expect("device info");
         assert_eq!(device.device_id, "device-1");
@@ -293,6 +304,10 @@ mod tests {
         assert_eq!(
             device.metadata.get("trace_id").map(String::as_str),
             Some("trace-1")
+        );
+        assert!(
+            !device.metadata.contains_key(METADATA_TENANT_ID),
+            "租户是连接身份的一部分，不应混进设备元数据"
         );
     }
 
@@ -309,6 +324,7 @@ mod tests {
         assert!(!result.is_forced);
         assert!(result.device_info.is_none());
         assert!(result.user_id.is_none());
+        assert!(result.tenant_id.is_none());
     }
 
     #[test]

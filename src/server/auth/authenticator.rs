@@ -6,6 +6,13 @@ use crate::common::device::DeviceInfo;
 use crate::common::error::Result;
 use async_trait::async_trait;
 
+/// 认证元数据与连接元数据中表示租户的键
+///
+/// 认证器把已验证令牌里的租户写在 [`AuthResult::user_metadata`] 的这个键下
+/// （见 [`AuthResult::with_tenant_id`]），服务端据此按（租户，用户）隔离设备冲突，
+/// 并把同一个值写进连接元数据，业务层读到的连接租户与设备分桶用的租户始终一致。
+pub const TENANT_ID_METADATA_KEY: &str = "tenant_id";
+
 /// 认证结果
 #[derive(Debug, Clone)]
 pub struct AuthResult {
@@ -52,6 +59,23 @@ impl AuthResult {
             user_metadata: None,
         }
     }
+
+    /// 写入已验证的租户（记在 [`TENANT_ID_METADATA_KEY`] 下）
+    #[must_use]
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.user_metadata
+            .get_or_insert_with(Default::default)
+            .insert(TENANT_ID_METADATA_KEY.to_string(), tenant_id.into());
+        self
+    }
+
+    /// 已验证的租户；认证器没有给出时为 `None`
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.user_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(TENANT_ID_METADATA_KEY))
+            .map(String::as_str)
+    }
 }
 
 /// 认证器 Trait
@@ -95,5 +119,42 @@ pub trait Authenticator: Send + Sync {
     async fn revoke_authentication(&self, connection_id: &str) -> Result<()> {
         let _ = connection_id;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_is_carried_in_the_auth_metadata() {
+        let result = AuthResult::success(Some("u".to_string()));
+        assert_eq!(result.tenant_id(), None);
+
+        let result = result.with_tenant_id("t-1");
+        assert_eq!(result.tenant_id(), Some("t-1"));
+        assert_eq!(
+            result
+                .user_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(TENANT_ID_METADATA_KEY))
+                .map(String::as_str),
+            Some("t-1")
+        );
+
+        let with_metadata = AuthResult::success_with_metadata(
+            Some("u".to_string()),
+            std::collections::HashMap::from([("device_id".to_string(), "d".to_string())]),
+        )
+        .with_tenant_id("t-2");
+        assert_eq!(with_metadata.tenant_id(), Some("t-2"));
+        assert_eq!(
+            with_metadata
+                .user_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("device_id"))
+                .map(String::as_str),
+            Some("d")
+        );
     }
 }

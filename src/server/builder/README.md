@@ -274,6 +274,10 @@ ObserverServerBuilder::new("0.0.0.0:8080")
     .build()?;
 ```
 
+设备冲突按（租户，用户）判定：两个租户里 user_id 相同的用户互不影响。租户取自认证结果，
+认证器用 `AuthResult::with_tenant_id` 给出；启用认证时不采信客户端在 CONNECT 里自报的
+user_id 与租户。没有租户的连接归入默认租户 `"0"`。
+
 #### 事件处理器
 
 ```rust

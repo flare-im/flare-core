@@ -38,7 +38,9 @@ pub use builder::{
 };
 pub use config::ServerConfig;
 pub use connection::{ConnectionInfo, ConnectionManager, ConnectionManagerTrait, ConnectionStats};
-pub use device::{DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceManager};
+pub use device::{
+    DeviceConflictStrategy, DeviceConflictStrategyBuilder, DeviceManager, DeviceOwner,
+};
 pub use events::ServerEventHandler;
 pub use handle::{DefaultServerHandle, ServerHandle};
 pub use heartbeat::HeartbeatDetector;

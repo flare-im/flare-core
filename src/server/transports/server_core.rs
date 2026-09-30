@@ -10,12 +10,12 @@ use crate::common::message::pipeline::{
     ArcMessageMiddleware, ArcMessageProcessor, MessagePipeline,
 };
 use crate::common::protocol::{Frame, Reliability, SerializationFormat, frame_with_system_command};
-use crate::server::auth::Authenticator;
+use crate::server::auth::{Authenticator, TENANT_ID_METADATA_KEY};
 use crate::server::config::ServerConfig;
 use crate::server::connection::{
     ConnectionManager, ConnectionManagerTrait, device_handler, negotiation,
 };
-use crate::server::device::DeviceManager;
+use crate::server::device::{DeviceManager, DeviceOwner};
 use crate::server::events::factory::ServerMessageObserverFactory;
 use crate::server::events::handler::ServerEventHandler;
 use crate::server::handle::ServerHandle;
@@ -77,6 +77,37 @@ struct NegotiatedConnectionUpdate {
     encryption: EncryptionAlgorithm,
     user_id: Option<String>,
     metadata: Option<HashMap<String, String>>,
+}
+
+/// 认证后的连接身份
+///
+/// 启用认证时全部来自认证结果；未启用认证（或没有配置认证器）时沿用客户端在 CONNECT 里的自报值。
+struct ConnectionIdentity {
+    user_id: Option<String>,
+    tenant_id: Option<String>,
+    /// 写入连接元数据的认证元数据
+    metadata: Option<HashMap<String, String>>,
+}
+
+impl ConnectionIdentity {
+    /// 未经认证器校验时的身份：客户端自报的用户与租户
+    fn declared(negotiation: &negotiation::NegotiationResult) -> Self {
+        Self {
+            user_id: negotiation.user_id.clone(),
+            tenant_id: negotiation.tenant_id.clone(),
+            metadata: Some(HashMap::new()),
+        }
+    }
+
+    /// 连接元数据：认证元数据加上租户，业务层读到的租户与设备分桶用的租户是同一个值
+    fn connection_metadata(&self) -> Option<HashMap<String, String>> {
+        let Some(tenant_id) = &self.tenant_id else {
+            return self.metadata.clone();
+        };
+        let mut metadata = self.metadata.clone().unwrap_or_default();
+        metadata.insert(TENANT_ID_METADATA_KEY.to_string(), tenant_id.clone());
+        Some(metadata)
+    }
 }
 
 impl ServerCore {
@@ -441,13 +472,20 @@ impl ServerCore {
         );
 
         // 3. Token 验证（如果启用认证）- 先完成认证
-        let (auth_user_id, meta_data) = self
+        let identity = self
             .authenticate_connection(frame, connection_id, &negotiation)
             .await?;
 
         // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
         // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
-        let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
+        let user_id = identity
+            .user_id
+            .clone()
+            .or_else(|| negotiation.user_id.clone());
+        // 设备按（租户，用户）分桶；租户只取认证身份，启用认证时不采信客户端自报的租户
+        let device_owner = user_id
+            .as_deref()
+            .map(|user_id| DeviceOwner::new(identity.tenant_id.as_deref(), user_id));
 
         // 4. 更新连接信息（在认证后）
         self.update_connection_info(
@@ -458,7 +496,7 @@ impl ServerCore {
                 compression: final_compression.clone(),
                 encryption: final_encryption.clone(),
                 user_id: user_id.clone(),
-                metadata: meta_data,
+                metadata: identity.connection_metadata(),
             },
         )
         .await;
@@ -471,7 +509,7 @@ impl ServerCore {
         // 使用小延迟确保第一个连接先完成认证，再处理第二个连接的冲突
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let conflict_connections = self
-            .handle_device_conflict(connection_id, &negotiation)
+            .handle_device_conflict(connection_id, &negotiation, device_owner.as_ref())
             .await;
 
         // 7. 创建 CONNECT_ACK
@@ -785,10 +823,15 @@ impl ServerCore {
     }
 
     /// 处理设备冲突（内部辅助方法）
+    ///
+    /// `owner` 取自认证后的连接身份（与连接绑定的用户、写进连接元数据的租户一致），冲突只在同一归属内判定。
+    /// 认证给出了用户就不再看客户端在 CONNECT 里自报的 user_id，否则持有效令牌的客户端报上别人的 user_id
+    /// 就能踢掉别人的设备。
     async fn handle_device_conflict(
         &self,
         connection_id: &str,
         negotiation: &negotiation::NegotiationResult,
+        owner: Option<&DeviceOwner>,
     ) -> Vec<String> {
         let mut conflict_connections = Vec::new();
 
@@ -796,16 +839,20 @@ impl ServerCore {
             "[ServerCore] 设备冲突检测条件: device_manager={}, device_info={}, user_id={}",
             self.device_manager.is_some(),
             negotiation.device_info.is_some(),
-            negotiation.user_id.is_some()
+            owner.is_some()
         );
 
         if let (Some(device_mgr), Some(device_info)) =
             (&self.device_manager, &negotiation.device_info)
         {
-            if let Some(user_id) = &negotiation.user_id {
+            if let Some(owner) = owner {
+                let user_id = owner.user_id();
                 info!(
-                    "[ServerCore] 🔍 开始设备冲突检测: user_id={}, connection_id={}, platform={:?}",
-                    user_id, connection_id, device_info.platform
+                    "[ServerCore] 🔍 开始设备冲突检测: tenant_id={}, user_id={}, connection_id={}, platform={:?}",
+                    owner.tenant_id(),
+                    user_id,
+                    connection_id,
+                    device_info.platform
                 );
 
                 let manager_trait = self.connection_manager_trait();
@@ -813,7 +860,7 @@ impl ServerCore {
 
                 match device_handler::handle_device_conflict(
                     Some(Arc::clone(device_mgr)),
-                    user_id,
+                    owner,
                     connection_id,
                     &platform,
                     device_info,
@@ -876,17 +923,16 @@ impl ServerCore {
         frame: &Frame,
         connection_id: &str,
         negotiation: &negotiation::NegotiationResult,
-    ) -> Result<(Option<String>, Option<HashMap<String, String>>)> {
-        let auth_user_id = negotiation.user_id.clone();
+    ) -> Result<ConnectionIdentity> {
         let auth_enabled = self.auth_enabled();
 
         if !auth_enabled {
             debug!("[ServerCore] 跳过 token 验证: 认证未启用");
-            return Ok((auth_user_id, Some(HashMap::new())));
+            return Ok(ConnectionIdentity::declared(negotiation));
         }
 
         let Some(authenticator) = &self.authenticator else {
-            return Ok((auth_user_id, Some(HashMap::new())));
+            return Ok(ConnectionIdentity::declared(negotiation));
         };
 
         // 从 CONNECT 消息的 metadata 中提取 token
@@ -921,10 +967,16 @@ impl ServerCore {
             Ok(auth_result) => {
                 if auth_result.authenticated {
                     debug!(
-                        "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}",
-                        connection_id, auth_result.user_id
+                        "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}, tenant_id={:?}",
+                        connection_id,
+                        auth_result.user_id,
+                        auth_result.tenant_id()
                     );
-                    Ok((auth_result.user_id, auth_result.user_metadata))
+                    Ok(ConnectionIdentity {
+                        tenant_id: auth_result.tenant_id().map(str::to_owned),
+                        user_id: auth_result.user_id,
+                        metadata: auth_result.user_metadata,
+                    })
                 } else {
                     let error_msg = auth_result
                         .error_message
@@ -1375,5 +1427,225 @@ mod tests {
             assert!(!is_typed_reason(reason), "{reason}");
         }
         assert!(!is_typed_reason(&"A".repeat(65)));
+    }
+
+    /// 令牌形如 `user@tenant`，认证结果只看令牌，客户端自报的 user_id / tenant_id 一概不看。
+    struct TenantTokens;
+
+    #[async_trait]
+    impl Authenticator for TenantTokens {
+        async fn authenticate(
+            &self,
+            token: &str,
+            _connection_id: &str,
+            _device_info: Option<&crate::common::device::DeviceInfo>,
+            _metadata: Option<&HashMap<String, Vec<u8>>>,
+        ) -> Result<crate::server::auth::AuthResult> {
+            let (user_id, tenant_id) = token.split_once('@').expect("user@tenant token");
+            Ok(
+                crate::server::auth::AuthResult::success(Some(user_id.to_string()))
+                    .with_tenant_id(tenant_id),
+            )
+        }
+    }
+
+    fn device_core(config: &ServerConfig) -> (ServerCore, Arc<DeviceManager>) {
+        let devices = Arc::new(DeviceManager::new(
+            crate::common::device::DeviceConflictStrategy::PlatformExclusive,
+        ));
+        let core = ServerCore::new(config, None)
+            .with_device_manager(Some(devices.clone()))
+            .with_authenticator(Some(Arc::new(TenantTokens)));
+        (core, devices)
+    }
+
+    /// 走一遍 CONNECT 协商，返回 CONNECT_ACK 里带回的被踢连接。
+    async fn connect(
+        core: &ServerCore,
+        connection_id: &str,
+        metadata: &[(&str, &str)],
+    ) -> Vec<String> {
+        use crate::common::protocol::flare::core::commands::command;
+        core.connection_manager
+            .add_connection(
+                connection_id.to_string(),
+                Box::new(TestConnection {
+                    last_active: monotonic_now(),
+                }),
+                None,
+                true,
+            )
+            .unwrap();
+        let frame = frame_with_system_command(
+            crate::common::protocol::builder::connect(
+                SerializationFormat::Json,
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.as_bytes().to_vec()))
+                    .collect(),
+            ),
+            Reliability::AtLeastOnce,
+        );
+        let (ack, _) = core
+            .handle_connect_message(&frame, connection_id)
+            .await
+            .expect("CONNECT accepted");
+        let Some(command::Type::System(system)) = ack.command.and_then(|c| c.r#type) else {
+            panic!("CONNECT_ACK expected");
+        };
+        system
+            .metadata
+            .get("conflict_connections")
+            .map(|raw| serde_json::from_slice(raw).expect("conflict list"))
+            .unwrap_or_default()
+    }
+
+    fn connection_tenant(core: &ServerCore, connection_id: &str) -> Option<String> {
+        core.connection_manager
+            .get_connection(connection_id)
+            .and_then(|(_, info)| info.metadata.get(TENANT_ID_METADATA_KEY).cloned())
+    }
+
+    /// SEC-04/SEC-07（W3-01 §3.3）：两个租户里 user_id 相同、平台相同的设备互不顶掉；
+    /// 同一租户内仍按平台互斥策略冲突。
+    #[tokio::test]
+    async fn connect_scopes_device_conflicts_to_the_authenticated_tenant() {
+        let (core, devices) = device_core(&ServerConfig::default().enable_auth());
+        let android = |token: &'static str, device: &'static str| {
+            [
+                ("token", token),
+                ("device_id", device),
+                ("platform", "android"),
+            ]
+        };
+
+        assert!(
+            connect(&core, "b-1", &android("shared@tenant-b", "b1"))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            connect(&core, "a-1", &android("shared@tenant-a", "a1")).await,
+            Vec::<String>::new(),
+            "其他租户的同平台设备不能被顶掉"
+        );
+        assert_eq!(
+            connect(&core, "a-2", &android("shared@tenant-a", "a2")).await,
+            vec!["a-1".to_string()],
+            "同租户同平台仍然冲突"
+        );
+
+        assert!(core.connection_manager.get_connection("b-1").is_some());
+        assert!(core.connection_manager.get_connection("a-1").is_none());
+        assert_eq!(
+            devices
+                .get_user_connections(&DeviceOwner::new(Some("tenant-b"), "shared"))
+                .await,
+            vec!["b-1".to_string()]
+        );
+        assert_eq!(
+            devices
+                .get_user_connections(&DeviceOwner::new(Some("tenant-a"), "shared"))
+                .await,
+            vec!["a-2".to_string()]
+        );
+        assert_eq!(connection_tenant(&core, "a-2").as_deref(), Some("tenant-a"));
+        assert_eq!(connection_tenant(&core, "b-1").as_deref(), Some("tenant-b"));
+    }
+
+    /// 启用认证时设备分桶只认令牌里的身份：客户端在 CONNECT 里报别人的 user_id / tenant_id
+    /// 不能把自己塞进别人的桶，也就踢不掉别人的设备。
+    #[tokio::test]
+    async fn connect_ignores_client_declared_identity_when_auth_is_enabled() {
+        let (core, devices) = device_core(&ServerConfig::default().enable_auth());
+        let attacker = DeviceOwner::new(Some("tenant-a"), "attacker");
+
+        // 受害者在两个租户里各有一台 iOS
+        for (connection_id, token) in [
+            ("victim-a", "victim@tenant-a"),
+            ("victim-b", "victim@tenant-b"),
+        ] {
+            connect(
+                &core,
+                connection_id,
+                &[("token", token), ("device_id", "v1"), ("platform", "ios")],
+            )
+            .await;
+        }
+        // 攻击者持自己的令牌，却在 CONNECT 里自报受害者的 user_id 和租户
+        let kicked = connect(
+            &core,
+            "attacker-1",
+            &[
+                ("token", "attacker@tenant-a"),
+                ("device_id", "x1"),
+                ("platform", "ios"),
+                ("user_id", "victim"),
+                (TENANT_ID_METADATA_KEY, "tenant-b"),
+            ],
+        )
+        .await;
+
+        assert!(kicked.is_empty(), "{kicked:?}");
+        for (connection_id, tenant) in [("victim-a", "tenant-a"), ("victim-b", "tenant-b")] {
+            assert!(
+                core.connection_manager
+                    .get_connection(connection_id)
+                    .is_some(),
+                "{connection_id} must stay connected"
+            );
+            assert_eq!(
+                devices
+                    .get_user_connections(&DeviceOwner::new(Some(tenant), "victim"))
+                    .await,
+                vec![connection_id.to_string()]
+            );
+        }
+        assert_eq!(
+            devices.get_user_connections(&attacker).await,
+            vec!["attacker-1".to_string()]
+        );
+        assert_eq!(
+            connection_tenant(&core, "attacker-1").as_deref(),
+            Some("tenant-a")
+        );
+    }
+
+    /// 未启用认证时沿用客户端自报的租户；没报租户的连接落到默认租户，只和默认租户共桶。
+    #[tokio::test]
+    async fn connect_without_auth_uses_the_declared_tenant() {
+        let (core, devices) = device_core(&ServerConfig::default());
+        let web = |tenant: Option<&'static str>, device: &'static str| {
+            let mut metadata = vec![("user_id", "u"), ("device_id", device), ("platform", "web")];
+            if let Some(tenant) = tenant {
+                metadata.push((TENANT_ID_METADATA_KEY, tenant));
+            }
+            metadata
+        };
+
+        assert!(
+            connect(&core, "x-1", &web(Some("x"), "x1"))
+                .await
+                .is_empty()
+        );
+        assert!(
+            connect(&core, "y-1", &web(Some("y"), "y1"))
+                .await
+                .is_empty()
+        );
+        assert!(connect(&core, "d-1", &web(None, "d1")).await.is_empty());
+        assert_eq!(
+            connect(&core, "d-2", &web(None, "d2")).await,
+            vec!["d-1".to_string()]
+        );
+
+        assert_eq!(connection_tenant(&core, "x-1").as_deref(), Some("x"));
+        assert_eq!(connection_tenant(&core, "d-2"), None);
+        assert_eq!(
+            devices
+                .get_user_connections(&DeviceOwner::new(None, "u"))
+                .await,
+            vec!["d-2".to_string()]
+        );
     }
 }
