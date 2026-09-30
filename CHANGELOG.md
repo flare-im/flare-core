@@ -55,6 +55,11 @@
   CONNECT_ACK 相同（协商前 JSON）。认证器给出类型化错误码（如 `TENANT_UNAVAILABLE`）
   时原样作为 message，其余一律为 `AUTHENTICATION_FAILED`；metadata `code` 为
   `AUTHENTICATION_FAILED`。此前连接被直接关掉，客户端分不清令牌失效和租户被停用。
+- CONNECT_ACK 发出后 `ServerEventHandler::on_connect` 失败时（例如认证时租户缓存还是
+  active，业务层登记会话时租户已被停用），关连接前先发一个 KICKED 系统帧，按本次协商的
+  格式编码。错误原因是类型化错误码时原样作为 message 和 metadata `reason`，否则用错误码
+  本身（如 `SERVICE_UNAVAILABLE`）；metadata `code` 为错误码。此前客户端刚收到 ACK 就被
+  无原因断开，无法与网络故障区分。`PermissionDenied` 的 CONNECT 失败改记 warn。
 
 ### 其他
 

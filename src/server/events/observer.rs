@@ -413,12 +413,15 @@ impl ConnectionHandlerObserverAdapter {
             .handle_connect_complete(frame, conn_id, connection)
             .await
         {
-            // 鉴权失败是客户端侧的常态（token 过期后带旧 token 重连），
-            // 用 warn；其余 CONNECT 失败仍是服务端问题，保持 error。
+            // 鉴权失败、租户不可用这类拒绝是客户端侧的常态（token 过期后带旧 token 重连、
+            // 租户停用后重连），用 warn；其余 CONNECT 失败仍是服务端问题，保持 error。
             // 不做区分的话，一个客户端过期就能刷屏并淹掉真故障。
             if matches!(
                 e.code(),
-                Some(crate::common::error::ErrorCode::AuthenticationFailed)
+                Some(
+                    crate::common::error::ErrorCode::AuthenticationFailed
+                        | crate::common::error::ErrorCode::PermissionDenied
+                )
             ) {
                 warn!(
                     "[ConnectionHandlerObserverAdapter] CONNECT 鉴权失败: connection_id={}, error={}",

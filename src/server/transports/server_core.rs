@@ -603,14 +603,80 @@ impl ServerCore {
             )
         })?;
         if let Err(e) = event_handler.on_connect(connection_id).await {
-            error!(
-                "[ServerCore] ServerEventHandler.on_connect 失败: connection_id={}, error={}",
-                connection_id, e
-            );
+            // 租户不可用这类拒绝是客户端侧的常态（停用后缓存翻转前的重连），不算服务端故障。
+            if matches!(
+                e.code(),
+                Some(crate::common::error::ErrorCode::PermissionDenied)
+            ) {
+                warn!(
+                    "[ServerCore] ServerEventHandler.on_connect 拒绝: connection_id={}, error={}",
+                    connection_id, e
+                );
+            } else {
+                error!(
+                    "[ServerCore] ServerEventHandler.on_connect 失败: connection_id={}, error={}",
+                    connection_id, e
+                );
+            }
+            Self::send_post_ack_rejection(&connection, connection_id, &negotiation_parser, &e)
+                .await;
             return Err(e);
         }
 
         Ok(())
+    }
+
+    /// CONNECT_ACK 已经发出、`on_connect` 却失败时（典型：认证时租户缓存还是 active，业务层登记
+    /// 会话时租户已被停用），关连接前先下发一帧 KICKED 说明原因。没有这一帧，客户端刚看到连接成功
+    /// 就被无原因断开，分不清是网络故障还是被拒，只能立即重连。
+    ///
+    /// 编码用本次协商出的 parser：客户端收到 CONNECT_ACK 后已切换到协商格式，KICKED 紧随其后。
+    /// 原因是类型化错误码（如 `TENANT_UNAVAILABLE`）时原样下发，否则只下发错误码本身（如
+    /// `SERVICE_UNAVAILABLE`），不把服务端内部错误文本带给客户端。与 CONNECT 前的拒绝一样直接写连接、
+    /// 不走写队列，并且有超时。
+    async fn send_post_ack_rejection(
+        connection: &Arc<tokio::sync::Mutex<Box<dyn crate::transport::connection::Connection>>>,
+        connection_id: &str,
+        parser: &MessageParser,
+        error: &crate::common::error::FlareError,
+    ) {
+        let code = error
+            .code()
+            .unwrap_or(crate::common::error::ErrorCode::ConnectionFailed)
+            .as_str();
+        let reason = if is_typed_reason(error.reason()) {
+            error.reason()
+        } else {
+            code
+        };
+        let metadata = HashMap::from([
+            ("reason".to_string(), reason.as_bytes().to_vec()),
+            ("code".to_string(), code.as_bytes().to_vec()),
+        ]);
+        let frame = frame_with_system_command(
+            crate::common::protocol::builder::kicked(reason.to_string(), Some(metadata)),
+            Reliability::BestEffort,
+        );
+        let data = match parser.serialize(&frame) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    "[ServerCore] CONNECT_ACK 后的拒绝帧序列化失败: connection_id={}, error={}",
+                    connection_id, e
+                );
+                return;
+            }
+        };
+        let sent = tokio::time::timeout(CONNECT_REJECTION_SEND_TIMEOUT, async {
+            connection.lock().await.send(&data).await
+        })
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            debug!(
+                "[ServerCore] CONNECT_ACK 后的拒绝帧未送达: connection_id={}",
+                connection_id
+            );
+        }
     }
 
     /// 拒绝 CONNECT 前先告诉客户端原因：一个 ERROR 帧，编码与 CONNECT_ACK 相同（协商前 JSON）。
@@ -1427,6 +1493,122 @@ mod tests {
             assert!(!is_typed_reason(reason), "{reason}");
         }
         assert!(!is_typed_reason(&"A".repeat(65)));
+    }
+
+    /// `on_connect` 总是按给定错误失败，模拟业务层登记会话时被拒（如租户刚停用）。
+    struct FailingConnect(crate::common::error::FlareError);
+
+    #[async_trait]
+    impl ServerEventHandler for FailingConnect {
+        async fn on_connect(&self, _connection_id: &str) -> Result<()> {
+            Err(self.0.clone())
+        }
+    }
+
+    /// CONNECT_ACK 之后 `on_connect` 才失败（认证时租户缓存还是 active，登记会话时租户已停用）：
+    /// 客户端先收到 ACK，再收到按协商格式编码、带原因的 KICKED，然后才关连接。原因只在是类型化
+    /// 错误码时原样下发，否则只给错误码本身，内部错误文本不下发。
+    #[tokio::test]
+    async fn connect_failing_after_the_ack_tells_the_client_why_before_the_close() {
+        use crate::common::error::{ErrorCode, FlareError};
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        use crate::common::protocol::flare::core::commands::{command, system_command};
+        for (error, reason, code) in [
+            (
+                FlareError::localized(ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE"),
+                "TENANT_UNAVAILABLE",
+                "PERMISSION_DENIED",
+            ),
+            (
+                FlareError::localized(
+                    ErrorCode::ServiceUnavailable,
+                    "Signaling login failed: online unreachable",
+                ),
+                "SERVICE_UNAVAILABLE",
+                "SERVICE_UNAVAILABLE",
+            ),
+            (
+                FlareError::System("internal state".to_string()),
+                "CONNECTION_FAILED",
+                "CONNECTION_FAILED",
+            ),
+        ] {
+            let core = ServerCore::new(&ServerConfig::default().enable_auth(), None)
+                .with_authenticator(Some(Arc::new(TenantTokens)))
+                .with_event_handler(Some(Arc::new(FailingConnect(error.clone()))));
+            let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+            core.connection_manager
+                .add_connection(
+                    "c1".to_string(),
+                    Box::new(RecordingConnection {
+                        sent: sent.clone(),
+                        last_active: monotonic_now(),
+                    }),
+                    None,
+                    true,
+                )
+                .unwrap();
+            let (connection, _) = core.connection_manager.get_connection("c1").unwrap();
+            // 协商成 Protobuf：KICKED 必须按协商格式编码，而不是协商前的 JSON
+            let connect = frame_with_system_command(
+                crate::common::protocol::builder::connect(
+                    SerializationFormat::Protobuf,
+                    HashMap::from([
+                        ("token".to_string(), b"u1@tenant-a".to_vec()),
+                        ("device_id".to_string(), b"d1".to_vec()),
+                        ("platform".to_string(), b"web".to_vec()),
+                    ]),
+                ),
+                Reliability::AtLeastOnce,
+            );
+            let (format, compression, encryption) = core.determine_negotiation_result(
+                &negotiation::parse_connect_message(&connect).unwrap(),
+            );
+            assert_eq!(format, SerializationFormat::Protobuf);
+
+            let failed = core
+                .handle_connect_complete(&connect, "c1", connection)
+                .await
+                .expect_err("on_connect failure must fail the CONNECT");
+
+            assert_eq!(failed.code(), error.code());
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 2, "{reason}: CONNECT_ACK, then the rejection");
+            let system_of = |frame: Frame| {
+                let Some(command::Type::System(system)) = frame.command.and_then(|c| c.r#type)
+                else {
+                    panic!("system command expected");
+                };
+                system
+            };
+            // parser 解析时会自动识别格式，编码只能看字节：ACK 是协商前 JSON，KICKED 是协商出的
+            // Protobuf（默认配置不压缩、不加密）
+            assert!(
+                sent[0].starts_with(b"{"),
+                "CONNECT_ACK is pre-negotiation JSON"
+            );
+            assert!(
+                !sent[1].starts_with(b"{"),
+                "{reason}: KICKED must use the negotiated encoding, not pre-negotiation JSON"
+            );
+            let ack = system_of(PRE_NEGOTIATION_PARSER.parse(&sent[0]).expect("JSON ACK"));
+            assert_eq!(ack.r#type, system_command::Type::ConnectAck as i32);
+            let kicked = system_of(
+                MessageParser::new(format, compression, encryption)
+                    .parse(&sent[1])
+                    .expect("KICKED in the negotiated format"),
+            );
+            assert_eq!(kicked.r#type, system_command::Type::Kicked as i32);
+            assert_eq!(kicked.message, reason);
+            assert_eq!(
+                kicked.metadata.get("reason").map(Vec::as_slice),
+                Some(reason.as_bytes())
+            );
+            assert_eq!(
+                kicked.metadata.get("code").map(Vec::as_slice),
+                Some(code.as_bytes())
+            );
+        }
     }
 
     /// 令牌形如 `user@tenant`，认证结果只看令牌，客户端自报的 user_id / tenant_id 一概不看。
