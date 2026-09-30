@@ -32,9 +32,48 @@ const NEGOTIATION_TIMEOUT_HINT: &str =
 #[cfg(target_arch = "wasm32")]
 const MAX_WASM_INBOUND_QUEUE: usize = 512;
 
-/// 协商阶段被服务端断开时写入 `negotiation_failure_reason` 的前缀；
-/// `negotiation_failure_error` 据此把它升级成 AUTHENTICATION_FAILED 而不是泛泛的协议错误。
-pub const TOKEN_REJECTED_PREFIX: &str = "TOKEN_REJECTED: ";
+/// 服务端因租户不可用（停用、删除中）拒绝 CONNECT 或踢线时给出的类型化原因。
+///
+/// CONNECT 被拒时它映射成 `PERMISSION_DENIED`，与 HTTP 入口、消息摄入对同一原因的错误码一致；
+/// 它不是鉴权失败，上层不应为它刷新令牌或自动重连。
+pub const TENANT_UNAVAILABLE_REASON: &str = "TENANT_UNAVAILABLE";
+
+/// 把服务端拒绝 CONNECT 时下发的 ERROR 帧（`message` 为类型化原因，`metadata.code` 为错误码）
+/// 映射成客户端错误。
+///
+/// - `TENANT_UNAVAILABLE` → `PERMISSION_DENIED`；
+/// - 其余能识别的错误码（如 `AUTHENTICATION_FAILED`、`TOKEN_EXPIRED`）原样使用；
+/// - 原因认不出时退回 `metadata.code`，再认不出就是 `CONNECTION_REFUSED`。
+///
+/// 错误文本以类型化原因开头，上层可以据此分辨。
+pub fn connect_rejection_error(reason: &str, code: Option<&str>) -> FlareError {
+    let reason = reason.trim();
+    let code = code.map(str::trim).filter(|code| !code.is_empty());
+    let error_code = if reason == TENANT_UNAVAILABLE_REASON {
+        crate::common::error::ErrorCode::PermissionDenied
+    } else {
+        parse_error_code(reason)
+            .or_else(|| code.and_then(parse_error_code))
+            .unwrap_or(crate::common::error::ErrorCode::ConnectionRefused)
+    };
+    let label = if reason.is_empty() {
+        code.unwrap_or(error_code.as_str())
+    } else {
+        reason
+    };
+    FlareError::localized(error_code, format!("{label}: server rejected CONNECT"))
+}
+
+fn parse_error_code(value: &str) -> Option<crate::common::error::ErrorCode> {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
+}
+
+/// 连接在 CONNECT_ACK 之前被关掉、服务端又没给原因时的错误：这是连接失败，不能猜成令牌被拒。
+fn closed_before_connect_ack_error(detail: &str) -> FlareError {
+    FlareError::connection_failed(format!(
+        "server closed the connection before CONNECT_ACK without a reason ({detail})"
+    ))
+}
 
 fn negotiation_timeout_error(timeout: std::time::Duration) -> FlareError {
     FlareError::connection_timeout(format!(
@@ -46,21 +85,23 @@ fn negotiation_timeout_error(timeout: std::time::Duration) -> FlareError {
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_negotiation_notify(
     flag: Arc<AtomicBool>,
-    failure_reason: Arc<StdMutex<Option<String>>>,
+    failure: Arc<StdMutex<Option<FlareError>>>,
     notify: Arc<Notify>,
     timeout: std::time::Duration,
 ) -> Result<()> {
     let wait = async move {
         loop {
+            // 先登记唤醒再检查，避免检查与等待之间的通知丢失。
+            let notified = notify.notified();
             if flag.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            if let Ok(reason) = failure_reason.lock()
-                && let Some(msg) = reason.as_ref()
+            if let Ok(failure) = failure.lock()
+                && let Some(error) = failure.as_ref()
             {
-                return Err(FlareError::protocol_error(msg.clone()));
+                return Err(error.clone());
             }
-            notify.notified().await;
+            notified.await;
         }
     };
 
@@ -104,13 +145,15 @@ pub struct ClientCore {
     pub(crate) negotiation_completed: Arc<AtomicBool>,
     /// 用于等待 CONNECT_ACK 完成
     pub(crate) negotiation_notify: Arc<Notify>,
-    /// CONNECT_ACK 协商失败原因（`wait_for_negotiation` 立即返回 Err）
-    negotiation_failure_reason: Arc<StdMutex<Option<String>>>,
+    /// CONNECT_ACK 之前的失败（服务端拒绝、连接被关、CONNECT_ACK 无效）；
+    /// `wait_for_negotiation` 立即返回它
+    negotiation_failure: Arc<StdMutex<Option<FlareError>>>,
     /// 我方已请求断开（disconnect_internal 中置位）：若随后读循环仍收到 KICK，不向观察者通知「被踢」，避免重复登录/协议竞速时误报
     disconnect_requested: Arc<AtomicBool>,
-    /// WASM: browser WebSocket 回调线程同步入队，由 `wait_for_negotiation`/drain 在 LocalSet 内处理
+    /// WASM: browser WebSocket 回调线程同步入队，由 `wait_for_negotiation`/drain 在 LocalSet 内处理；
+    /// 每帧带着入队那一刻的协商状态（见 [`Self::handle_received_message`]）
     #[cfg(target_arch = "wasm32")]
-    wasm_inbound: Arc<StdMutex<Vec<Vec<u8>>>>,
+    wasm_inbound: Arc<StdMutex<Vec<(Vec<u8>, bool)>>>,
 }
 
 impl ClientCore {
@@ -139,7 +182,7 @@ impl ClientCore {
             pending_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             negotiation_completed: Arc::new(AtomicBool::new(false)),
             negotiation_notify: Arc::new(Notify::new()),
-            negotiation_failure_reason: Arc::new(StdMutex::new(None)),
+            negotiation_failure: Arc::new(StdMutex::new(None)),
             disconnect_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(target_arch = "wasm32")]
             wasm_inbound: Arc::new(StdMutex::new(Vec::new())),
@@ -149,6 +192,7 @@ impl ClientCore {
     /// WASM: enqueue bytes from the browser `onmessage` callback (sync context).
     #[cfg(target_arch = "wasm32")]
     pub fn push_wasm_inbound(&self, data: Vec<u8>) {
+        let negotiated = self.is_negotiation_completed();
         if let Ok(mut queue) = self.wasm_inbound.lock() {
             if queue.len() >= MAX_WASM_INBOUND_QUEUE {
                 queue.remove(0);
@@ -157,7 +201,7 @@ impl ClientCore {
                     MAX_WASM_INBOUND_QUEUE
                 );
             }
-            queue.push(data);
+            queue.push((data, negotiated));
         }
         self.negotiation_notify.notify_waiters();
     }
@@ -165,12 +209,12 @@ impl ClientCore {
     /// WASM: process all queued inbound frames on the current LocalSet task.
     #[cfg(target_arch = "wasm32")]
     pub async fn drain_wasm_inbound(&self) {
-        let batch: Vec<Vec<u8>> = match self.wasm_inbound.lock() {
+        let batch: Vec<(Vec<u8>, bool)> = match self.wasm_inbound.lock() {
             Ok(mut queue) if !queue.is_empty() => queue.drain(..).collect(),
             _ => return,
         };
-        for data in batch {
-            self.handle_message(data).await;
+        for (data, negotiated) in batch {
+            self.handle_received_message(data, negotiated).await;
         }
     }
 
@@ -196,7 +240,7 @@ impl ClientCore {
         self.disconnect_requested = Arc::clone(&shared.disconnect_requested);
         self.negotiation_completed = Arc::clone(&shared.negotiation_completed);
         self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
-        self.negotiation_failure_reason = Arc::clone(&shared.negotiation_failure_reason);
+        self.negotiation_failure = Arc::clone(&shared.negotiation_failure);
         self.heartbeat_config = Arc::clone(&shared.heartbeat_config);
         self.heartbeat_probe_wake = Arc::clone(&shared.heartbeat_probe_wake);
     }
@@ -338,15 +382,32 @@ impl ClientCore {
     ///
     /// 如果启用了路由，使用路由处理；否则直接通知观察者
     pub async fn handle_message(&self, data: Vec<u8>) {
-        // 根据协商完成标志决定使用哪个 parser
-        let negotiation_completed = self.negotiation_completed.load(Ordering::SeqCst);
+        let negotiated = self.negotiation_completed.load(Ordering::SeqCst);
+        self.handle_received_message(data, negotiated).await;
+    }
 
+    /// 处理一帧入站数据；`negotiated_at_receipt` 是这帧被读出那一刻的协商状态。
+    ///
+    /// 入站帧在独立任务里处理，而连接关闭事件在读循环里同步处理：服务端先发 KICKED 再关流时，
+    /// EOF 往往先把协商标志复位，KICKED 随后才被解析。若按处理时的标志选解析器，它会被当成
+    /// 协商前的 JSON 解析失败而整帧丢掉。解析器按读出时的状态选。
+    pub async fn handle_received_message(&self, data: Vec<u8>, negotiated_at_receipt: bool) {
         // 解析消息
-        let frame = if !negotiation_completed {
-            // 协商未完成：只使用 PRE_NEGOTIATION_PARSER（这个阶段只会收到 CONNECT_ACK）
+        let frame = if !negotiated_at_receipt {
+            // 协商未完成：使用 PRE_NEGOTIATION_PARSER（这个阶段只会收到 CONNECT_ACK 或拒绝 CONNECT 的 ERROR）
             use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
             match PRE_NEGOTIATION_PARSER.parse(&data) {
                 Ok(frame) => frame,
+                // 紧跟在 CONNECT_ACK 之后读出的帧：读出时协商尚未落地，此刻已经落地，按协商结果再解析一次
+                Err(_) if self.is_negotiation_completed() => {
+                    match self.parse_message(&data).await {
+                        Ok(frame) => frame,
+                        Err(e) => {
+                            tracing::warn!("Failed to parse message (negotiated): {}", e);
+                            return;
+                        }
+                    }
+                }
                 Err(e) => {
                     #[cfg(target_arch = "wasm32")]
                     web_sys::console::warn_1(
@@ -437,7 +498,9 @@ impl ClientCore {
         }
 
         // 处理系统命令（CONNECT_ACK, PONG, KICKED）
-        let is_system_command = self.handle_system_commands(&frame).await;
+        let is_system_command = self
+            .handle_system_commands(&frame, negotiated_at_receipt)
+            .await;
 
         // 关键修复：即使处理了系统命令，也要通知 observers
         // 这样 MessagePipeline 和 MessageListener 也能收到 CONNECT_ACK 等系统命令
@@ -466,7 +529,7 @@ impl ClientCore {
     ///
     /// # 返回
     /// `true` 表示已处理，不需要继续处理；`false` 表示不是系统命令或需要继续处理
-    async fn handle_system_commands(&self, frame: &Frame) -> bool {
+    async fn handle_system_commands(&self, frame: &Frame, negotiated_at_receipt: bool) -> bool {
         let Some(cmd) = &frame.command else {
             return false;
         };
@@ -493,8 +556,36 @@ impl ClientCore {
                 self.handle_kicked_command(frame).await;
                 true
             }
+            // CONNECT_ACK 之前的 ERROR 是服务端拒绝 CONNECT 的原因（读循环里通常已同步登记过，这里幂等）
+            SystemCommandType::Error if !negotiated_at_receipt => {
+                self.record_connect_rejection(sys_cmd);
+                true
+            }
             _ => false,
         }
+    }
+
+    /// 登记服务端拒绝 CONNECT 的原因（ERROR 系统帧），并唤醒等待协商的一方。
+    ///
+    /// 必须早于随后的关连接事件生效：[`ClientMessageObserver`](super::common::ClientMessageObserver)
+    /// 在读循环里同步调用它，关连接事件据此报出类型化原因，而不是泛泛的「连接被关」。
+    pub(crate) fn record_connect_rejection(
+        &self,
+        sys_cmd: &crate::common::protocol::SystemCommand,
+    ) {
+        let code = sys_cmd
+            .metadata
+            .get("code")
+            .and_then(|code| std::str::from_utf8(code).ok());
+        let error = connect_rejection_error(&sys_cmd.message, code);
+        if let Ok(mut failure) = self.negotiation_failure.lock() {
+            if failure.is_some() {
+                return;
+            }
+            tracing::warn!("[ClientCore] CONNECT rejected by server: {}", error);
+            *failure = Some(error);
+        }
+        self.negotiation_notify.notify_waiters();
     }
 
     /// 处理 CONNECT_ACK 命令
@@ -693,41 +784,56 @@ impl ClientCore {
     /// CONNECT_ACK 无效或协商失败：立即唤醒 `wait_for_negotiation` 并上报连接错误。
     async fn fail_negotiation(&self, reason: String) {
         tracing::warn!("[ClientCore] 协商失败: {}", reason);
-        if let Ok(mut stored) = self.negotiation_failure_reason.lock() {
-            *stored = Some(reason);
+        let error = FlareError::protocol_error(reason);
+        if let Ok(mut stored) = self.negotiation_failure.lock() {
+            *stored = Some(error.clone());
         }
         self.negotiation_notify.notify_waiters();
         self.stop_heartbeat();
         self.cancel_all_pending_responses().await;
-        if let Ok(reason) = self.negotiation_failure_reason.lock()
-            && let Some(msg) = reason.as_ref()
-        {
-            self.handle_connection_event(&ConnectionEvent::Error(FlareError::protocol_error(
-                msg.clone(),
-            )));
-        }
+        self.handle_connection_event(&ConnectionEvent::Error(error));
     }
 
     fn negotiation_failure_error(&self) -> Option<FlareError> {
-        self.negotiation_failure_reason
+        self.negotiation_failure
             .lock()
             .ok()
-            .and_then(|reason| {
-                reason.as_ref().map(|msg| {
-                    if msg.starts_with(TOKEN_REJECTED_PREFIX) {
-                        FlareError::authentication_failed(msg.clone())
-                    } else {
-                        FlareError::protocol_error(msg.clone())
-                    }
-                })
-            })
+            .and_then(|failure| failure.clone())
     }
 
     fn reset_negotiation_state(&self) {
         self.negotiation_completed.store(false, Ordering::SeqCst);
-        if let Ok(mut reason) = self.negotiation_failure_reason.lock() {
-            *reason = None;
+        if let Ok(mut failure) = self.negotiation_failure.lock() {
+            *failure = None;
         }
+    }
+
+    /// 连接在 CONNECT_ACK 之前没了（关闭或读出错）：立即结束协商等待。
+    ///
+    /// 服务端登记过拒绝原因（ERROR 帧）就报那个原因；没有原因就是连接失败——
+    /// 以前一律报成「令牌被拒」的鉴权失败，心跳失败、踢线后的断开也被误报成令牌问题。
+    fn fail_negotiation_on_close(&self, detail: &str) {
+        let error = if let Ok(mut failure) = self.negotiation_failure.lock() {
+            let error = failure
+                .take()
+                .unwrap_or_else(|| closed_before_connect_ack_error(detail));
+            *failure = Some(error.clone());
+            error
+        } else {
+            return;
+        };
+        tracing::warn!("[ClientCore] 协商阶段连接断开: {}", error);
+        self.negotiation_notify.notify_waiters();
+    }
+
+    /// 连接已建立、CONNECT_ACK 还没到、也不是我方主动断开。
+    /// 协商失败的原因只在下一条连接建立（[`ConnectionEvent::Connected`]）时清空。
+    fn closed_during_negotiation(&self) -> bool {
+        matches!(
+            self.state_manager.get_state(),
+            crate::client::connection::state::ConnectionState::Connected
+        ) && !self.is_negotiation_completed()
+            && !self.disconnect_requested.load(Ordering::SeqCst)
     }
 
     /// 处理连接事件
@@ -744,32 +850,28 @@ impl ClientCore {
         // 更新状态
         match event {
             ConnectionEvent::Connected => {
-                self.state_manager.set_connected();
-                self.reset_negotiation_state();
-            }
-            ConnectionEvent::Disconnected(reason) => {
-                // 服务端在 CONNECT_ACK 之前就关掉了连接：几乎只有一种情况——CONNECT 里的
-                // token 被拒（密钥/签发者对不上或已过期），网关校验失败后直接 remove_connection，
-                // 不回任何帧。以前这里只是复位状态，等协商的一方要干等到 10s 超时，
-                // 然后报「CONNECT_ACK not received，确认服务端跑的是 flare_chat_server」——
-                // 把一次密钥填错伪装成服务端没起。现在立刻唤醒等待者并给出鉴权失败。
-                let rejected_during_negotiation = matches!(
+                // 传输层在挂观察者时已经报过一次 Connected；客户端发完 CONNECT 后再报的那次
+                // 不能复位协商状态，否则已经到达的 CONNECT_ACK 或拒绝原因会被抹掉。
+                let already_connected = matches!(
                     self.state_manager.get_state(),
                     crate::client::connection::state::ConnectionState::Connected
-                ) && !self.is_negotiation_completed()
-                    && !self.disconnect_requested.load(Ordering::SeqCst);
+                );
+                self.state_manager.set_connected();
+                if !already_connected {
+                    self.reset_negotiation_state();
+                }
+            }
+            ConnectionEvent::Disconnected(reason) => {
+                // 服务端在 CONNECT_ACK 之前就关掉了连接：立即唤醒等协商的一方，别让它干等 10s 超时。
+                // 原因以服务端下发的 ERROR 帧为准（租户不可用、鉴权失败……）；没有原因就是连接失败。
+                let closed_during_negotiation = self.closed_during_negotiation();
                 self.state_manager.set_disconnected();
-                self.reset_negotiation_state();
-                if rejected_during_negotiation {
-                    let msg = format!(
-                        "{TOKEN_REJECTED_PREFIX}server closed the connection before CONNECT_ACK ({reason}); \
-                         the access token was rejected — check the signing secret, issuer and expiry"
-                    );
-                    tracing::warn!("[ClientCore] {}", msg);
-                    if let Ok(mut stored) = self.negotiation_failure_reason.lock() {
-                        *stored = Some(msg);
-                    }
-                    self.negotiation_notify.notify_waiters();
+                self.negotiation_completed.store(false, Ordering::SeqCst);
+                // 心跳绑在这条连接上：留着它，它会在死连接上继续发 PING，失败时再关一次连接并误报，
+                // 同时占着槽位，让下一条连接协商完成后起不了自己的心跳。
+                self.stop_heartbeat();
+                if closed_during_negotiation {
+                    self.fail_negotiation_on_close(reason);
                 }
                 let pending = Arc::clone(&self.pending_map);
                 crate::client::runtime::spawn_client_task(async move {
@@ -783,9 +885,14 @@ impl ClientCore {
                     }
                 });
             }
-            ConnectionEvent::Error(_) => {
+            ConnectionEvent::Error(error) => {
+                let closed_during_negotiation = self.closed_during_negotiation();
                 self.state_manager.set_failed();
-                self.reset_negotiation_state();
+                self.negotiation_completed.store(false, Ordering::SeqCst);
+                self.stop_heartbeat();
+                if closed_during_negotiation {
+                    self.fail_negotiation_on_close(&error.to_string());
+                }
                 let pending = Arc::clone(&self.pending_map);
                 crate::client::runtime::spawn_client_task(async move {
                     let mut map = pending.lock().await;
@@ -887,7 +994,7 @@ impl ClientCore {
         {
             wait_for_negotiation_notify(
                 Arc::clone(&self.negotiation_completed),
-                Arc::clone(&self.negotiation_failure_reason),
+                Arc::clone(&self.negotiation_failure),
                 Arc::clone(&self.negotiation_notify),
                 timeout,
             )
@@ -1003,7 +1110,7 @@ impl Clone for ClientCore {
             pending_map: Arc::clone(&self.pending_map),
             negotiation_completed: Arc::clone(&self.negotiation_completed), // 共享协商完成标志
             negotiation_notify: Arc::clone(&self.negotiation_notify),
-            negotiation_failure_reason: Arc::clone(&self.negotiation_failure_reason),
+            negotiation_failure: Arc::clone(&self.negotiation_failure),
             disconnect_requested: Arc::clone(&self.disconnect_requested),
             #[cfg(target_arch = "wasm32")]
             wasm_inbound: Arc::clone(&self.wasm_inbound),
@@ -1232,32 +1339,128 @@ mod heartbeat_bridge_tests {
 #[cfg(test)]
 mod negotiation_rejection_tests {
     use super::*;
+    use crate::common::error::ErrorCode;
+    use crate::common::protocol::{Reliability, frame_with_system_command};
 
     fn core() -> ClientCore {
         ClientCore::new(&ClientConfig::default())
     }
 
-    /// 网关拒掉 CONNECT 里的 token 时不回任何帧，直接关连接。等协商的一方必须立刻拿到
-    /// AUTHENTICATION_FAILED，而不是干等 10s 再报「CONNECT_ACK not received」。
+    fn rejection(message: &str, code: Option<&str>) -> crate::common::protocol::SystemCommand {
+        let metadata =
+            code.map(|code| HashMap::from([("code".to_string(), code.as_bytes().to_vec())]));
+        crate::common::protocol::builder::error(message.to_string(), metadata)
+    }
+
+    /// 服务端在 CONNECT_ACK 之前关连接却没给原因：等协商的一方立刻拿到连接失败，
+    /// 不再干等 10s，也不再被猜成令牌被拒（心跳失败、踢线后的断开都走这里）。
     #[test]
-    fn server_close_before_connect_ack_fails_negotiation_as_auth_failure() {
+    fn close_before_connect_ack_without_a_reason_is_a_connection_failure() {
         let core = core();
         core.handle_connection_event(&ConnectionEvent::Connected);
         assert!(core.negotiation_failure_error().is_none());
 
-        core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "heartbeat send failed".into(),
+        ));
 
         let err = core
             .negotiation_failure_error()
             .expect("协商阶段被断开必须立刻记为协商失败");
-        assert_eq!(
-            err.code(),
-            Some(crate::common::error::ErrorCode::AuthenticationFailed)
-        );
+        assert_eq!(err.code(), Some(ErrorCode::ConnectionFailed), "{err}");
         assert!(err.to_string().contains("before CONNECT_ACK"), "{err}");
+        assert!(!err.to_string().contains("TOKEN"), "{err}");
     }
 
-    /// 我方主动断开（切账号/登出）不是被拒，不能伪造鉴权失败。
+    /// 读出错（如 QUIC 连接被关）同样立即结束协商等待。
+    #[test]
+    fn read_error_before_connect_ack_fails_negotiation_at_once() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.handle_connection_event(&ConnectionEvent::Error(FlareError::io("connection lost")));
+        let err = core.negotiation_failure_error().expect("must fail at once");
+        assert_eq!(err.code(), Some(ErrorCode::ConnectionFailed), "{err}");
+    }
+
+    /// 服务端先下发 ERROR 帧再关连接：关连接事件保留服务端给的类型化原因。
+    #[test]
+    fn typed_rejection_survives_the_close_that_follows_it() {
+        for (message, expected) in [
+            ("TENANT_UNAVAILABLE", ErrorCode::PermissionDenied),
+            ("AUTHENTICATION_FAILED", ErrorCode::AuthenticationFailed),
+        ] {
+            let core = core();
+            core.handle_connection_event(&ConnectionEvent::Connected);
+            core.record_connect_rejection(&rejection(message, Some("AUTHENTICATION_FAILED")));
+            core.handle_connection_event(&ConnectionEvent::Disconnected(
+                "Stream closed by peer".into(),
+            ));
+
+            let err = core
+                .negotiation_failure_error()
+                .expect("rejection recorded");
+            assert_eq!(err.code(), Some(expected), "{err}");
+            assert!(err.to_string().contains(message), "{err}");
+        }
+    }
+
+    #[test]
+    fn connect_rejection_error_maps_typed_reasons() {
+        let cases = [
+            (
+                "TENANT_UNAVAILABLE",
+                Some("AUTHENTICATION_FAILED"),
+                ErrorCode::PermissionDenied,
+            ),
+            (
+                "AUTHENTICATION_FAILED",
+                Some("AUTHENTICATION_FAILED"),
+                ErrorCode::AuthenticationFailed,
+            ),
+            ("TOKEN_EXPIRED", None, ErrorCode::TokenExpired),
+            (
+                "SOME_NEW_REASON",
+                Some("AUTHENTICATION_FAILED"),
+                ErrorCode::AuthenticationFailed,
+            ),
+            ("", None, ErrorCode::ConnectionRefused),
+        ];
+        for (reason, code, expected) in cases {
+            let err = connect_rejection_error(reason, code);
+            assert_eq!(err.code(), Some(expected), "{reason}: {err}");
+            if !reason.is_empty() {
+                assert!(err.to_string().contains(reason), "{err}");
+            }
+        }
+    }
+
+    /// 等协商的一方被 ERROR 帧唤醒，拿到的是类型化错误而不是协议错误。
+    #[tokio::test]
+    async fn wait_for_negotiation_returns_the_typed_rejection() {
+        let core = Arc::new(core());
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        let waiter = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                core.wait_for_negotiation(std::time::Duration::from_secs(5))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        core.record_connect_rejection(&rejection(
+            "TENANT_UNAVAILABLE",
+            Some("AUTHENTICATION_FAILED"),
+        ));
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("woken at once")
+            .expect("join")
+            .expect_err("rejected");
+        assert_eq!(err.code(), Some(ErrorCode::PermissionDenied), "{err}");
+    }
+
+    /// 我方主动断开（切账号/登出）不是被拒，不能伪造协商失败。
     #[test]
     fn client_requested_disconnect_is_not_a_rejection() {
         let core = core();
@@ -1267,7 +1470,7 @@ mod negotiation_rejection_tests {
         assert!(core.negotiation_failure_error().is_none());
     }
 
-    /// 协商已经完成后的断线是普通掉线，走重连，不是 token 被拒。
+    /// 协商已经完成后的断线是普通掉线，走重连，不是协商失败。
     #[test]
     fn disconnect_after_negotiation_completed_is_not_a_rejection() {
         let core = core();
@@ -1275,5 +1478,122 @@ mod negotiation_rejection_tests {
         core.negotiation_completed.store(true, Ordering::SeqCst);
         core.handle_connection_event(&ConnectionEvent::Disconnected("Connection closed".into()));
         assert!(core.negotiation_failure_error().is_none());
+    }
+
+    /// 客户端发完 CONNECT 后补报的那次 Connected 不能复位协商：CONNECT_ACK 可能已经到了。
+    #[tokio::test]
+    async fn repeated_connected_keeps_a_completed_negotiation() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.update_parser(
+            crate::common::protocol::SerializationFormat::Protobuf,
+            crate::common::compression::CompressionAlgorithm::Gzip,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .await;
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        assert!(core.is_negotiation_completed());
+
+        // 新的一条连接（先断开再连上）才复位。
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "Stream closed by peer".into(),
+        ));
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        assert!(!core.is_negotiation_completed());
+    }
+
+    /// 连接断开时停掉绑在它上面的心跳，下一条连接协商完成后才能起自己的心跳。
+    #[tokio::test]
+    async fn disconnect_stops_the_heartbeat_of_that_connection() {
+        let mut core = core();
+        core.set_client_connection(Arc::new(Mutex::new(
+            Box::new(NoopConnection) as Box<dyn Connection>
+        )));
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.update_parser(
+            crate::common::protocol::SerializationFormat::Json,
+            crate::common::compression::CompressionAlgorithm::None,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .await;
+        assert!(
+            core.heartbeat_manager.lock().unwrap().is_some(),
+            "heartbeat started"
+        );
+
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "Stream closed by peer".into(),
+        ));
+        assert!(
+            core.heartbeat_manager.lock().unwrap().is_none(),
+            "heartbeat stopped"
+        );
+    }
+
+    /// 服务端先发 KICKED 再关流：关流事件先把协商标志复位，KICKED 的处理晚一步。
+    /// 它仍要按读出时的协商结果解析并交给上层，而不是按协商前 JSON 解析失败后整帧丢掉。
+    #[tokio::test]
+    async fn kicked_frame_read_before_the_close_still_reaches_observers() {
+        let core = core();
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.update_parser(
+            crate::common::protocol::SerializationFormat::Protobuf,
+            crate::common::compression::CompressionAlgorithm::Gzip,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        core.add_observer(Arc::new(RecordingObserver(Arc::clone(&seen))));
+        let kicked = frame_with_system_command(
+            crate::common::protocol::builder::kicked("TENANT_UNAVAILABLE".to_string(), None),
+            Reliability::AtLeastOnce,
+        );
+        let data = core
+            .parser
+            .lock()
+            .await
+            .serialize(&kicked)
+            .expect("serialize");
+
+        let negotiated_at_receipt = core.is_negotiation_completed();
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "Stream closed by peer".into(),
+        ));
+        core.handle_received_message(data, negotiated_at_receipt)
+            .await;
+
+        let messages = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, ConnectionEvent::Message(_)))
+            .count();
+        assert_eq!(messages, 1, "KICKED frame must reach observers");
+    }
+
+    struct RecordingObserver(Arc<StdMutex<Vec<ConnectionEvent>>>);
+
+    impl crate::transport::events::ConnectionObserver for RecordingObserver {
+        fn on_event(&self, event: &ConnectionEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    struct NoopConnection;
+
+    #[async_trait::async_trait]
+    impl Connection for NoopConnection {
+        fn add_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        fn remove_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> crate::common::platform::MonotonicInstant {
+            crate::common::platform::monotonic_now()
+        }
+        fn update_active_time(&mut self) {}
     }
 }

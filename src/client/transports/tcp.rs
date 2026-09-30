@@ -22,6 +22,8 @@ use tokio::sync::Mutex;
 pub struct TCPClient {
     config: ClientConfig,
     connection: Option<Arc<Mutex<Box<dyn Connection>>>>,
+    /// `connection` 是协议竞速刚建好、还没发过 CONNECT 的网络连接（见 QUIC 客户端同名字段）。
+    connection_prepared: bool,
     connection_id: String,
     core: ClientCore,
     reconnect_attempts: u32,
@@ -34,6 +36,7 @@ impl TCPClient {
         Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -51,6 +54,7 @@ impl TCPClient {
         Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -63,14 +67,22 @@ impl TCPClient {
         let connection = self.establish_tcp_connection().await?;
         let connection_arc = Arc::new(Mutex::new(connection));
         self.connection = Some(Arc::clone(&connection_arc));
+        self.connection_prepared = true;
         Ok(connection_arc)
     }
 
     async fn internal_connect(&mut self) -> Result<()> {
-        let connection_arc = if let Some(connection) = &self.connection {
-            connection.clone()
-        } else {
-            self.establish_network_connection().await?
+        // 只复用协议竞速刚建好的网络连接；被踢后留下的旧连接关掉重建（原因见 QUIC 客户端）。
+        let connection_arc = match self.connection.take() {
+            Some(prepared) if std::mem::take(&mut self.connection_prepared) => prepared,
+            stale => {
+                self.connection_prepared = false;
+                if let Some(stale) = stale {
+                    let mut conn = stale.lock().await;
+                    let _ = conn.close().await;
+                }
+                Arc::new(Mutex::new(self.establish_tcp_connection().await?))
+            }
         };
 
         self.setup_connection_with_observer(connection_arc.clone())
@@ -147,6 +159,7 @@ impl TCPClient {
         self.reconnect_attempts += 1;
         sleep(self.config.reconnect_interval).await;
 
+        self.connection_prepared = false;
         if let Some(conn) = self.connection.take() {
             let mut c = conn.lock().await;
             let _ = c.close().await;
@@ -196,6 +209,7 @@ impl Client for TCPClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        self.connection_prepared = false;
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await
     }
 

@@ -26,6 +26,9 @@ use tokio::sync::Mutex;
 pub struct QUICClient {
     config: ClientConfig,
     connection: Option<Arc<Mutex<Box<dyn Connection>>>>,
+    /// `connection` 是协议竞速刚建好、还没发过 CONNECT 的网络连接。只有这时 `connect()`
+    /// 才能直接复用它；否则它是上一条会话留下的连接（可能已被服务端踢掉）。
+    connection_prepared: bool,
     connection_id: String,
     core: ClientCore,
     reconnect_attempts: u32,
@@ -44,6 +47,7 @@ impl QUICClient {
         Ok(Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -82,6 +86,7 @@ impl QUICClient {
         Ok(Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -139,19 +144,28 @@ impl QUICClient {
         let connection_arc = Arc::new(Mutex::new(connection));
         // 保存连接，以便后续 connect() 时使用
         self.connection = Some(Arc::clone(&connection_arc));
+        self.connection_prepared = true;
         Ok(connection_arc)
     }
 
     /// 内部连接实现
     async fn internal_connect(&mut self) -> Result<()> {
-        // 如果连接已建立（协议竞速场景），直接发送 CONNECT
-        // 否则先建立网络连接
-        let connection_arc = if let Some(connection) = &self.connection {
-            // 连接已建立，直接使用
-            connection.clone()
-        } else {
-            // 建立新的网络连接
-            self.establish_network_connection().await?
+        // 协议竞速刚建好的网络连接直接发 CONNECT；其余情况一律新建。
+        //
+        // 被踢/被服务端移除之后，旧连接还挂在 `self.connection` 上。发送前的惰性重连
+        // （`ClientWrapper::ensure_ready_for_send` → `connect()`）若复用它，CONNECT 会写进
+        // 服务端已经不读的旧流：传输层照样报 Connected，却永远等不到 CONNECT_ACK，
+        // 直到心跳在旧连接上失败才真正重连。
+        let connection_arc = match self.connection.take() {
+            Some(prepared) if std::mem::take(&mut self.connection_prepared) => prepared,
+            stale => {
+                self.connection_prepared = false;
+                if let Some(stale) = stale {
+                    let mut conn = stale.lock().await;
+                    let _ = conn.close().await;
+                }
+                Arc::new(Mutex::new(self.establish_quic_connection().await?))
+            }
         };
 
         // 设置连接和观察者（会发送 CONNECT 消息）
@@ -284,6 +298,7 @@ impl QUICClient {
         sleep(self.config.reconnect_interval).await;
 
         // 关闭旧连接
+        self.connection_prepared = false;
         if let Some(conn) = self.connection.take() {
             let mut c = conn.lock().await;
             let _ = c.close().await;
@@ -334,6 +349,7 @@ impl Client for QUICClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        self.connection_prepared = false;
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await
     }
 

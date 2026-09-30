@@ -26,16 +26,42 @@ impl ClientMessageObserver {
     }
 }
 
+impl ClientMessageObserver {
+    /// 协商完成前读到的帧只可能是 CONNECT_ACK 或拒绝 CONNECT 的 ERROR。ERROR 必须在读循环里
+    /// 同步登记：服务端发完它紧接着就关连接，关连接事件是同步处理的，而帧的处理在另一个任务里，
+    /// 晚一步就只剩一个没有原因的「连接被关」。
+    fn record_pre_negotiation_rejection(&self, data: &[u8]) {
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        use crate::common::protocol::flare::core::commands::command::Type;
+        use crate::common::protocol::flare::core::commands::system_command::Type as SystemType;
+
+        if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(data)
+            && let Some(Type::System(system)) =
+                frame.command.as_ref().and_then(|c| c.r#type.as_ref())
+            && system.r#type == SystemType::Error as i32
+        {
+            self.core.record_connect_rejection(system);
+        }
+    }
+}
+
 impl ConnectionObserver for ClientMessageObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
                 let core = Arc::clone(&self.core);
                 let data_clone = data.clone();
+                // 帧读出这一刻的协商状态：处理任务可能晚于随后的关连接事件执行（见
+                // `ClientCore::handle_received_message`）。
+                let negotiated = core.is_negotiation_completed();
+                if !negotiated {
+                    self.record_pre_negotiation_rejection(data);
+                }
                 #[cfg(target_arch = "wasm32")]
                 {
                     // Browser onmessage is sync; queue bytes and drain on the LocalSet task
                     // that is already running `wait_for_negotiation` / `run_async`.
+                    let _ = negotiated;
                     core.push_wasm_inbound(data_clone);
                     let core_drain = Arc::clone(&core);
                     crate::client::wasm_tokio::spawn_detached(async move {
@@ -45,7 +71,7 @@ impl ConnectionObserver for ClientMessageObserver {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     crate::client::runtime::spawn_client_task(async move {
-                        core.handle_message(data_clone).await;
+                        core.handle_received_message(data_clone, negotiated).await;
                     });
                 }
             }

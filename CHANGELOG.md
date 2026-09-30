@@ -34,6 +34,21 @@
 
 ### 修复
 
+- 客户端（QUIC）：被服务端踢下线或移除之后，下一次发送不再复用旧连接。此前惰性重连把
+  CONNECT 发在服务端已经不读的旧流上，传输层照样报 Connected，客户端却等不到 CONNECT_ACK，
+  要等心跳在旧连接上失败（约 24 s）才真正重连。TCP 客户端有同样的问题，一并修复。
+- QUIC 传输在对端结束流或读出错后即标记为关闭：此后发送立即失败，新挂的观察者只会收到
+  Disconnected。读任务等第一个观察者挂上才开始读，服务端不再因观察者挂得晚而丢掉客户端
+  刚发来的 CONNECT。
+- 客户端：连接断开时停掉绑在这条连接上的心跳。此前旧心跳留在死连接上继续发 PING，失败时
+  再关一次连接并上报断开，还占着槽位，下一条连接协商完成后起不了自己的心跳。
+- 客户端：CONNECT_ACK 之前连接被关，按服务端先下发的 ERROR 帧分类：`TENANT_UNAVAILABLE`
+  报 `PERMISSION_DENIED`，`AUTHENTICATION_FAILED`、`TOKEN_EXPIRED` 等错误码原样上报；
+  服务端没给原因时报 `CONNECTION_FAILED`。此前一律当成令牌被拒，心跳失败、踢线后的断开
+  都被误报成鉴权失败。新增 `connect_rejection_error` 与 `TENANT_UNAVAILABLE_REASON`，
+  去掉未发布过的 `TOKEN_REJECTED_PREFIX`。
+- 客户端：入站帧按读出那一刻的协商状态选解析器。服务端先发 KICKED 再关流时，关流事件常常
+  先把协商标志复位，KICKED 随后被当成协商前的 JSON 解析失败而整帧丢掉，上层看不到踢线原因。
 - 缺少事件处理器时返回配置错误，不再 panic。服务端在启动配置不完整时
   应当给出可读的错误，而不是崩掉。
 - 服务端拒绝 CONNECT（认证失败）时，关连接前先发一个 ERROR 系统帧，编码与
