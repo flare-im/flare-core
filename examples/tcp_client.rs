@@ -46,32 +46,29 @@ impl ConnectionObserver for ChatObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Message(data) => {
-                if let Ok(frame) = self.parser.parse(data) {
-                    if let Some(cmd) = &frame.command {
-                        if let Some(Type::Payload(msg_cmd)) = &cmd.r#type {
-                            let message = match String::from_utf8(msg_cmd.payload.clone()) {
-                                Ok(text) => text,
-                                Err(_) => {
-                                    format!("<binary_data: {} bytes>", msg_cmd.payload.len())
-                                }
-                            };
+                if let Ok(frame) = self.parser.parse(data)
+                    && let Some(cmd) = &frame.command
+                    && let Some(Type::Payload(msg_cmd)) = &cmd.r#type
+                {
+                    let message = match String::from_utf8(msg_cmd.payload.clone()) {
+                        Ok(text) => text,
+                        Err(_) => format!("<binary_data: {} bytes>", msg_cmd.payload.len()),
+                    };
 
-                            if let Some(type_bytes) = msg_cmd.metadata.get("type") {
-                                let msg_type = String::from_utf8(type_bytes.clone())
-                                    .unwrap_or_else(|_| "unknown".to_string());
-                                if msg_type == "join" || msg_type == "leave" {
-                                    println!("\n[系统] {message}");
-                                } else {
-                                    println!("\n{message}");
-                                }
-                            } else {
-                                println!("\n{message}");
-                            }
-
-                            print!("{}> ", self.username);
-                            let _ = io::stdout().flush();
+                    if let Some(type_bytes) = msg_cmd.metadata.get("type") {
+                        let msg_type = String::from_utf8(type_bytes.clone())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        if msg_type == "join" || msg_type == "leave" {
+                            println!("\n[系统] {message}");
+                        } else {
+                            println!("\n{message}");
                         }
+                    } else {
+                        println!("\n{message}");
                     }
+
+                    print!("{}> ", self.username);
+                    let _ = io::stdout().flush();
                 }
             }
             ConnectionEvent::Connected => {
