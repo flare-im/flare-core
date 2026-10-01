@@ -102,6 +102,18 @@ impl ConnectionHandlerObserverAdapter {
         manager: Arc<ConnectionManager>,
         server_core: Option<Arc<crate::server::transports::server_core::ServerCore>>,
     ) {
+        // 连接已移出连接表（踢线、客户端断开、CONNECT 被拒、停机）：队列里剩下的帧直接丢弃。
+        // 以前它们照常出队，按协商前的格式解析后交给业务层——被踢下线、租户被停用的连接，
+        // 排在队列里的 MESSAGE 仍会被处理。只有 CONNECT 照旧交给 ServerCore（它会因连接不存在而结束）。
+        if manager.get_connection(&conn_id).is_none() && !Self::is_pre_negotiation_connect(&data) {
+            debug!(
+                "[ConnectionHandlerObserverAdapter] 连接已移除，丢弃入站帧: connection_id={}, bytes={}",
+                conn_id,
+                data.len()
+            );
+            return;
+        }
+
         // **关键修复**：在处理消息时立即更新连接活跃时间，防止连接被心跳检测器清理
         // 这必须在处理消息之前更新，因为消息处理可能耗时较长
         let manager_trait =
@@ -209,7 +221,7 @@ impl ConnectionHandlerObserverAdapter {
                 );
             } else {
                 debug!(
-                    "[ConnectionHandlerObserverAdapter] ✅ 协商已确认: connection_id={}，之后将严格使用协商后的 parser",
+                    "[ConnectionHandlerObserverAdapter] 协商已确认: connection_id={}，之后将严格使用协商后的 parser",
                     conn_id
                 );
             }
@@ -452,6 +464,13 @@ impl ConnectionHandlerObserverAdapter {
         // CONNECT 消息已由 handle_connect_complete 处理，不需要再调用 handle_frame
     }
 
+    /// 这帧是否是协商前格式（JSON、不压缩、不加密）的 CONNECT。
+    fn is_pre_negotiation_connect(data: &[u8]) -> bool {
+        PRE_NEGOTIATION_PARSER
+            .parse(data)
+            .is_ok_and(|frame| Self::is_connect_message(&frame))
+    }
+
     /// 检查是否是 CONNECT 消息
     fn is_connect_message(frame: &crate::common::protocol::Frame) -> bool {
         frame.command.as_ref().and_then(|cmd| {
@@ -682,6 +701,18 @@ mod terminal_error_tests {
 
     #[async_trait]
     impl ServerEventHandler for Recorder {
+        async fn handle_message(
+            &self,
+            command: &crate::common::protocol::PayloadCommand,
+            connection_id: &str,
+        ) -> Result<Option<crate::common::protocol::Frame>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("message:{connection_id}:{}", command.message_id));
+            Ok(None)
+        }
+
         async fn on_disconnect(&self, connection_id: &str, _reason: Option<&str>) -> Result<()> {
             self.0
                 .lock()
@@ -776,6 +807,63 @@ mod terminal_error_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(recorder.events(), ["error:c1", "disconnect:c1"]);
+    }
+
+    fn message_frame(message_id: &str) -> Vec<u8> {
+        use crate::common::protocol::{Reliability, frame_with_payload_command, send_message};
+        let frame = frame_with_payload_command(
+            send_message(message_id.to_string(), b"hello".to_vec(), None, None),
+            Reliability::AtLeastOnce,
+        );
+        PRE_NEGOTIATION_PARSER.serialize(&frame).unwrap()
+    }
+
+    async fn wait_for_events(recorder: &Recorder, expected: usize) {
+        let started = Instant::now();
+        while recorder.events().len() < expected && started.elapsed() < CLEANUP_BOUND {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 连接移出连接表之后，入站队列里剩下的非 CONNECT 帧直接丢弃，不再交给业务层。
+    /// 移除之前的帧照常处理（对照）。
+    #[tokio::test]
+    async fn frames_queued_after_removal_never_reach_the_business_layer() {
+        let (manager, _devices, recorder, adapter) = registered_connection().await;
+
+        adapter.on_event(&ConnectionEvent::Message(message_frame("before")));
+        wait_for_events(&recorder, 1).await;
+        assert_eq!(recorder.events(), ["message:c1:before"]);
+
+        manager.remove_connection("c1").unwrap();
+        adapter.on_event(&ConnectionEvent::Message(message_frame("after-1")));
+        adapter.on_event(&ConnectionEvent::Message(message_frame("after-2")));
+        // 给消费任务足够时间处理这两帧
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            recorder.events(),
+            ["message:c1:before"],
+            "frames dequeued after the connection was removed must be dropped"
+        );
+    }
+
+    #[test]
+    fn only_pre_negotiation_connect_frames_survive_removal() {
+        use crate::common::protocol::{Reliability, frame_with_system_command};
+        let connect = frame_with_system_command(
+            crate::common::protocol::builder::connect(
+                crate::common::protocol::SerializationFormat::Json,
+                std::collections::HashMap::new(),
+            ),
+            Reliability::BestEffort,
+        );
+        let connect = PRE_NEGOTIATION_PARSER.serialize(&connect).unwrap();
+        assert!(ConnectionHandlerObserverAdapter::is_pre_negotiation_connect(&connect));
+        assert!(!ConnectionHandlerObserverAdapter::is_pre_negotiation_connect(&message_frame("m")));
+        assert!(
+            !ConnectionHandlerObserverAdapter::is_pre_negotiation_connect(b"\x00\x01 not json")
+        );
     }
 
     /// 帧排队期间连接已被移出连接表是良性竞争，记 debug；连接还在却更新失败才记 warn。
