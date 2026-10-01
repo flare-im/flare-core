@@ -346,3 +346,98 @@ async fn rejected_connect_surfaces_the_typed_reason() {
         server.stop().await.expect("stop server");
     }
 }
+
+/// 记下断开原因与错误的监听器。
+#[derive(Default)]
+struct CloseRecorder {
+    acks: AtomicUsize,
+    disconnects: std::sync::Mutex<Vec<String>>,
+    errors: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl MessageListener for CloseRecorder {
+    async fn on_message(&self, frame: &Frame) -> Result<Option<Frame>> {
+        if let Some(CommandType::System(system)) =
+            frame.command.as_ref().and_then(|c| c.r#type.as_ref())
+            && system.r#type == SystemType::ConnectAck as i32
+        {
+            self.acks.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(None)
+    }
+
+    async fn on_disconnect(&self, reason: Option<&str>) -> Result<()> {
+        self.disconnects
+            .lock()
+            .unwrap()
+            .push(reason.unwrap_or_default().to_string());
+        Ok(())
+    }
+
+    async fn on_error(&self, error: &str) -> Result<()> {
+        self.errors.lock().unwrap().push(error.to_string());
+        Ok(())
+    }
+}
+
+/// QUIC 服务端停机：客户端收到 CLOSE(SERVER_SHUTDOWN)，以这个原因断开（不是报错），服务端不必
+/// 等满宽限期。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_stop_tells_quic_clients_why() {
+    use flare_core::common::shutdown::{SERVER_SHUTDOWN_CLOSE_GRACE, is_server_shutdown_reason};
+
+    let (server, port) = start_server(None).await;
+    let recorder = Arc::new(CloseRecorder::default());
+    let tls = TlsConfig {
+        ca_cert_data: Some(server_identity().clone()),
+        ..TlsConfig::none()
+    };
+    let url = format!("quic://127.0.0.1:{port}");
+    let client = FlareClientBuilder::new(url.clone())
+        .with_protocol_url(TransportProtocol::QUIC, url)
+        .with_protocol_race(vec![TransportProtocol::QUIC])
+        .with_user_id("bob".to_string())
+        .with_token("test-token".to_string())
+        .with_listener(recorder.clone())
+        .with_device_info(DeviceInfo::new(
+            "owner-device".to_string(),
+            DevicePlatform::PC,
+        ))
+        .with_format(SerializationFormat::Protobuf)
+        .with_tls(tls)
+        .with_connect_timeout(Duration::from_secs(5))
+        .build_with_race()
+        .await
+        .expect("client connects");
+    wait_until("CONNECT_ACK", Duration::from_secs(5), || async {
+        recorder.acks.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    let started = Instant::now();
+    server.stop().await.expect("stop server");
+    let stop_took = started.elapsed();
+
+    wait_until("client sees the close", Duration::from_secs(3), || async {
+        !recorder.disconnects.lock().unwrap().is_empty()
+    })
+    .await;
+    let reasons = recorder.disconnects.lock().unwrap().clone();
+    assert!(
+        reasons
+            .iter()
+            .all(|reason| is_server_shutdown_reason(reason)),
+        "disconnect reasons must carry SERVER_SHUTDOWN: {reasons:?}"
+    );
+    assert!(
+        recorder.errors.lock().unwrap().is_empty(),
+        "a planned shutdown is not a connection error: {:?}",
+        recorder.errors.lock().unwrap()
+    );
+    assert!(
+        stop_took < SERVER_SHUTDOWN_CLOSE_GRACE,
+        "the client closed by itself: {stop_took:?}"
+    );
+    assert!(!client.is_connected_async().await);
+}
