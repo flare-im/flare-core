@@ -107,10 +107,14 @@ impl ServerWrapper {
         ServerHandle::send_to(&*s, connection_id, frame).await
     }
 
-    /// 向指定用户的所有连接发送消息
-    pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+    /// 向（租户，用户）的所有连接发送消息；其他租户里同名用户的连接收不到
+    pub async fn send_to_user(
+        &self,
+        owner: &crate::server::device::DeviceOwner,
+        frame: &Frame,
+    ) -> Result<()> {
         let s = self.server.lock().await;
-        ServerHandle::send_to_user(&*s, user_id, frame).await
+        ServerHandle::send_to_user(&*s, owner, frame).await
     }
 
     /// 广播消息到所有连接

@@ -393,12 +393,12 @@ impl ServerCore {
             .await
     }
 
-    /// 向指定用户的所有连接发送消息
+    /// 向（租户，用户）的所有连接发送消息
     ///
-    /// 每个连接使用其协商后的序列化格式和压缩算法
-    pub async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+    /// 只投递到该租户下的连接；每个连接使用其协商后的序列化格式和压缩算法
+    pub async fn send_to_user(&self, owner: &DeviceOwner, frame: &Frame) -> Result<()> {
         let manager_trait = self.connection_manager_trait();
-        manager_trait.send_frame_to_user(user_id, frame, None).await
+        manager_trait.send_frame_to_user(owner, frame, None).await
     }
 
     /// 广播消息到所有连接
@@ -476,12 +476,9 @@ impl ServerCore {
             .authenticate_connection(frame, connection_id, &negotiation)
             .await?;
 
-        // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
-        // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
-        let user_id = identity
-            .user_id
-            .clone()
-            .or_else(|| negotiation.user_id.clone());
+        // 用户只取连接身份：启用认证时来自认证结果（认证通过却没给用户的已在上一步拒绝），
+        // 未启用认证时就是客户端在 CONNECT 里的自报值。不再拿自报值补认证结果的缺。
+        let user_id = identity.user_id.clone();
         // 设备按（租户，用户）分桶；租户只取认证身份，启用认证时不采信客户端自报的租户
         let device_owner = user_id
             .as_deref()
@@ -1037,7 +1034,22 @@ impl ServerCore {
             .await
         {
             Ok(auth_result) => {
-                if auth_result.authenticated {
+                if auth_result.authenticated
+                    && auth_result
+                        .user_id
+                        .as_deref()
+                        .is_none_or(|user_id| user_id.trim().is_empty())
+                {
+                    // 认证器说通过却没给出用户：这是认证器的实现问题。不能拿客户端在 CONNECT 里自报的
+                    // user_id 顶上——那等于不认证，持任意有效令牌就能冒用别人的身份。
+                    error!(
+                        "[ServerCore] ❌ 认证器返回已通过但没有 user_id，拒绝连接: connection_id={}",
+                        connection_id
+                    );
+                    Err(crate::common::error::FlareError::authentication_failed(
+                        "认证结果缺少用户".to_string(),
+                    ))
+                } else if auth_result.authenticated {
                     debug!(
                         "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}, tenant_id={:?}",
                         connection_id,
@@ -1138,10 +1150,9 @@ impl ServerCore {
     ) {
         let manager = Arc::clone(&self.connection_manager);
 
-        // 优先使用认证返回的 user_id，如果没有则使用 negotiation 中的 user_id
-        // 这样可以确保即使认证未启用，也能从 CONNECT 消息中获取 user_id
+        // update.user_id 就是连接身份里的用户（见 handle_connect_message），这里不再回落到自报值
         let auth_user_id = update.user_id.clone();
-        let user_id = auth_user_id.clone().or_else(|| negotiation.user_id.clone());
+        let user_id = auth_user_id.clone();
 
         // 只更新基本信息，不标记协商完成，也不创建 parser/pipeline
         // parser/pipeline 将在 CONNECT_ACK 发送完成后创建
@@ -1257,8 +1268,8 @@ impl ServerHandle for ServerCore {
         self.send_to(connection_id, frame).await
     }
 
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
-        self.send_to_user(user_id, frame).await
+    async fn send_to_user(&self, owner: &DeviceOwner, frame: &Frame) -> Result<()> {
+        self.send_to_user(owner, frame).await
     }
 
     async fn broadcast(&self, frame: &Frame) -> Result<()> {
@@ -1514,6 +1525,80 @@ mod tests {
             assert_eq!(
                 system.metadata.get("code").map(Vec::as_slice),
                 Some(expected_code.as_str().as_bytes())
+            );
+        }
+    }
+
+    /// 认证器说通过却没给出用户（或给了空用户）时拒绝 CONNECT，不拿客户端自报的 user_id 顶上：
+    /// 否则持任意有效令牌的客户端报上别人的 user_id，连接就绑到了别人名下。
+    #[tokio::test]
+    async fn authenticated_result_without_a_user_is_rejected() {
+        use crate::common::error::ErrorCode;
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        use crate::common::protocol::flare::core::commands::{command, system_command};
+        use crate::server::auth::AuthResult;
+        for auth_result in [
+            AuthResult::success(None),
+            AuthResult::success(Some("  ".to_string())),
+            AuthResult::success_with_metadata(None, HashMap::new()).with_tenant_id("tenant-a"),
+        ] {
+            let devices = Arc::new(DeviceManager::new(
+                crate::common::device::DeviceConflictStrategy::PlatformExclusive,
+            ));
+            let core = ServerCore::new(&ServerConfig::default().enable_auth(), None)
+                .with_device_manager(Some(devices.clone()))
+                .with_authenticator(Some(Arc::new(Reject(auth_result))));
+            let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+            core.connection_manager
+                .add_connection(
+                    "c1".to_string(),
+                    Box::new(RecordingConnection {
+                        sent: sent.clone(),
+                        last_active: monotonic_now(),
+                    }),
+                    None,
+                    true,
+                )
+                .unwrap();
+            let (connection, _) = core.connection_manager.get_connection("c1").unwrap();
+            let connect = frame_with_system_command(
+                crate::common::protocol::builder::connect(
+                    SerializationFormat::Json,
+                    HashMap::from([
+                        ("token".to_string(), b"t".to_vec()),
+                        ("user_id".to_string(), b"victim".to_vec()),
+                        ("device_id".to_string(), b"d1".to_vec()),
+                        ("platform".to_string(), b"web".to_vec()),
+                    ]),
+                ),
+                Reliability::AtLeastOnce,
+            );
+
+            let error = core
+                .handle_connect_complete(&connect, "c1", connection)
+                .await
+                .expect_err("CONNECT without an authenticated user must be rejected");
+
+            assert_eq!(error.code(), Some(ErrorCode::AuthenticationFailed));
+            let sent = sent.lock().unwrap().clone();
+            assert_eq!(sent.len(), 1, "exactly the rejection frame, no CONNECT_ACK");
+            let frame = PRE_NEGOTIATION_PARSER.parse(&sent[0]).expect("JSON frame");
+            let Some(command::Type::System(system)) = frame.command.and_then(|c| c.r#type) else {
+                panic!("system command expected");
+            };
+            assert_eq!(system.r#type, system_command::Type::Error as i32);
+            let (_, info) = core.connection_manager.get_connection("c1").unwrap();
+            assert_eq!(info.user_id, None, "the declared user must not be bound");
+            assert!(
+                core.connection_manager
+                    .get_user_connections(&DeviceOwner::new(None, "victim"))
+                    .is_empty()
+            );
+            assert!(
+                devices
+                    .get_user_connections(&DeviceOwner::new(None, "victim"))
+                    .await
+                    .is_empty()
             );
         }
     }
@@ -1830,6 +1915,67 @@ mod tests {
         assert_eq!(
             connection_tenant(&core, "attacker-1").as_deref(),
             Some("tenant-a")
+        );
+    }
+
+    /// 按用户投递只落在认证租户内：两个租户里 user_id 相同的用户各自登录，发给其中一个租户的
+    /// 帧不会写到另一个租户的连接上。
+    #[tokio::test]
+    async fn send_to_user_is_scoped_to_the_authenticated_tenant() {
+        let (core, _) = device_core(&ServerConfig::default().enable_auth());
+        let mut sent = HashMap::new();
+        for (connection_id, token) in [("a-1", "shared@tenant-a"), ("b-1", "shared@tenant-b")] {
+            let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+            core.connection_manager
+                .add_connection(
+                    connection_id.to_string(),
+                    Box::new(RecordingConnection {
+                        sent: frames.clone(),
+                        last_active: monotonic_now(),
+                    }),
+                    None,
+                    true,
+                )
+                .unwrap();
+            let connect = frame_with_system_command(
+                crate::common::protocol::builder::connect(
+                    SerializationFormat::Json,
+                    HashMap::from([
+                        ("token".to_string(), token.as_bytes().to_vec()),
+                        ("device_id".to_string(), connection_id.as_bytes().to_vec()),
+                        ("platform".to_string(), b"web".to_vec()),
+                    ]),
+                ),
+                Reliability::AtLeastOnce,
+            );
+            core.handle_connect_message(&connect, connection_id)
+                .await
+                .expect("CONNECT accepted");
+            sent.insert(connection_id, frames);
+        }
+
+        let ping = frame_with_system_command(
+            crate::common::protocol::builder::ping(),
+            Reliability::BestEffort,
+        );
+        core.send_to_user(&DeviceOwner::new(Some("tenant-a"), "shared"), &ping)
+            .await
+            .expect("send to the tenant-a user");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while sent["a-1"].lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tenant-a never got the frame"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 写队列异步落盘：给另一租户的连接留出同样的机会，确认它确实什么都没收到
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(sent["a-1"].lock().unwrap().len(), 1);
+        assert!(
+            sent["b-1"].lock().unwrap().is_empty(),
+            "tenant-b's same-named user must not receive tenant-a's frame"
         );
     }
 

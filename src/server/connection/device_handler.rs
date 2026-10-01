@@ -355,7 +355,8 @@ mod tests {
         assert_eq!(result.conflict_connections, vec!["old-conn".to_string()]);
 
         // 关键断言：旧连接必须已从连接管理器移除
-        let user_conns = manager.get_user_connections("user1");
+        // 两条连接都没有租户元数据，归在默认租户下
+        let user_conns = manager.get_user_connections(&DeviceOwner::new(None, "user1"));
         assert!(
             !user_conns.contains(&"old-conn".to_string()),
             "设备冲突处理后旧连接应已从连接管理器移除，实际仍在: {:?}",

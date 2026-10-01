@@ -42,14 +42,15 @@ impl ConnectionManagerTrait for ConnectionManager {
         }
 
         let mut info = ConnectionInfo::new(connection_id.clone(), requires_auth);
-        info.user_id = user_id.clone();
+        info.user_id = user_id;
+        let owner = info.owner();
 
         let entry = self.new_connection_entry(&connection_id, Arc::clone(&connection), info);
         shard.insert(connection_id.clone(), entry);
 
         // 如果提供了用户 ID，添加到用户连接映射
-        if let Some(user_id) = user_id
-            && let Err(err) = self.insert_user_connection(user_id, &connection_id)
+        if let Some(owner) = owner
+            && let Err(err) = self.insert_user_connection(owner, &connection_id)
         {
             shard.remove(&connection_id);
             self.release_connection_slot();
@@ -100,8 +101,8 @@ impl ConnectionManagerTrait for ConnectionManager {
         })
     }
 
-    async fn get_user_connections(&self, user_id: &str) -> Vec<String> {
-        ConnectionManager::get_user_connections(self, user_id)
+    async fn get_user_connections(&self, owner: &DeviceOwner) -> Vec<String> {
+        ConnectionManager::get_user_connections(self, owner)
     }
 
     async fn bind_user(&self, connection_id: &str, user_id: String) -> Result<()> {
@@ -161,9 +162,9 @@ impl ConnectionManagerTrait for ConnectionManager {
             .await
     }
 
-    async fn send_to_user(&self, user_id: &str, data: &[u8]) -> Result<()> {
+    async fn send_to_user(&self, owner: &DeviceOwner, data: &[u8]) -> Result<()> {
         let connections =
-            self.connection_handles_for_ids(ConnectionManager::get_user_connections(self, user_id));
+            self.connection_handles_for_ids(ConnectionManager::get_user_connections(self, owner));
 
         stream::iter(connections)
             .for_each_concurrent(
@@ -254,18 +255,23 @@ impl ConnectionManagerTrait for ConnectionManager {
 
     async fn send_frame_to_user(
         &self,
-        user_id: &str,
+        owner: &DeviceOwner,
         frame: &crate::common::protocol::Frame,
         parser: Option<&crate::common::MessageParser>,
     ) -> Result<()> {
-        let connection_ids = ConnectionManager::get_user_connections(self, user_id);
+        let connection_ids = ConnectionManager::get_user_connections(self, owner);
 
         if let Some(parser) = parser {
             let connections = self.connection_auth_snapshots_for_ids(connection_ids);
             let data = match parser.serialize(frame) {
                 Ok(data) => data,
                 Err(e) => {
-                    tracing::warn!("Failed to serialize frame for user {}: {:?}", user_id, e);
+                    tracing::warn!(
+                        "Failed to serialize frame for user {} in tenant {}: {:?}",
+                        owner.user_id(),
+                        owner.tenant_id(),
+                        e
+                    );
                     return Ok(());
                 }
             };

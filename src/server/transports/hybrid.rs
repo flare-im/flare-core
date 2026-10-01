@@ -341,10 +341,14 @@ impl ServerHandle for HybridServer {
         ))
     }
 
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+    async fn send_to_user(
+        &self,
+        owner: &crate::server::device::DeviceOwner,
+        frame: &Frame,
+    ) -> Result<()> {
         // 直接通过 ServerCore（实现了 ServerHandle）发送消息
         if let Some(ref core) = self.core {
-            return ServerHandle::send_to_user(&**core, user_id, frame).await;
+            return ServerHandle::send_to_user(&**core, owner, frame).await;
         }
         Err(crate::common::error::FlareError::protocol_error(
             "ServerCore not initialized".to_string(),

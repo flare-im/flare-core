@@ -1,12 +1,19 @@
 //! 连接管理器模块
 //!
 //! 提供连接的统一管理、存储和查询功能
-//! 支持按连接 ID、用户 ID 等方式管理连接
+//! 支持按连接 ID、（租户，用户）等方式管理连接
+//!
+//! 用户索引按（租户，用户）即 [`DeviceOwner`] 建立：两个租户里 user_id 相同的用户是两个人，
+//! 按用户投递、查询与计数都只落在本租户。连接的租户取自连接元数据里的
+//! [`TENANT_ID_METADATA_KEY`]（认证结果写入），没有租户的连接归入默认租户
+//! [`DEFAULT_TENANT_ID`](crate::server::device::DEFAULT_TENANT_ID)。
 
 use crate::common::error::{FlareError, Result};
+use crate::server::auth::TENANT_ID_METADATA_KEY;
 use crate::server::connection::r#trait::{
     ConnectionManagerTrait, ConnectionStats as TraitConnectionStats,
 };
+use crate::server::device::DeviceOwner;
 use crate::transport::connection::Connection;
 use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
@@ -33,7 +40,7 @@ type ConnectionAuthSnapshot = (String, ConnectionWriteHandle, bool);
 type ConnectionSnapshot = (String, ConnectionWriteHandle, ConnectionInfo);
 type TimeoutConnectionSnapshot = (String, ConnectionHandle, Option<String>);
 type ConnectionShard = RwLock<HashMap<String, ConnectionEntry>>;
-type UserConnectionShard = RwLock<HashMap<String, Vec<String>>>;
+type UserConnectionShard = RwLock<HashMap<DeviceOwner, Vec<String>>>;
 
 struct QueuedWrite {
     data: Vec<u8>,
@@ -65,24 +72,24 @@ impl ConnectionRemovalRegistry {
 
         self.connection_count.fetch_sub(1, Ordering::Relaxed);
 
-        if let Some(user_id) = info.user_id {
-            self.remove_user_connection(&user_id, connection_id);
+        if let Some(owner) = info.owner() {
+            self.remove_user_connection(&owner, connection_id);
         }
 
         true
     }
 
-    fn remove_user_connection(&self, user_id: &str, connection_id: &str) {
+    fn remove_user_connection(&self, owner: &DeviceOwner, connection_id: &str) {
         let Some(user_connection_shards) = self.user_connection_shards.upgrade() else {
             return;
         };
-        let shard_index = ConnectionManager::shard_index(user_id, user_connection_shards.len());
+        let shard_index = ConnectionManager::shard_index(owner, user_connection_shards.len());
 
         let Ok(mut shard) = user_connection_shards[shard_index].write() else {
             return;
         };
 
-        if ConnectionManager::remove_user_connection_index(&mut shard, user_id, connection_id) {
+        if ConnectionManager::remove_user_connection_index(&mut shard, owner, connection_id) {
             self.user_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -342,6 +349,21 @@ impl ConnectionInfo {
         self.authenticated
     }
 
+    /// 连接所属的（租户，用户）；没有绑定用户时为 `None`
+    ///
+    /// 租户取连接元数据里的 [`TENANT_ID_METADATA_KEY`]，缺失或为空时归入默认租户。
+    /// 这是连接管理器用户索引的键，按用户投递与查询都按它限定。
+    pub fn owner(&self) -> Option<DeviceOwner> {
+        self.user_id.as_deref().map(|user_id| {
+            DeviceOwner::new(
+                self.metadata
+                    .get(TENANT_ID_METADATA_KEY)
+                    .map(String::as_str),
+                user_id,
+            )
+        })
+    }
+
     /// 设置设备信息
     pub fn with_device_info(mut self, device_info: crate::common::device::DeviceInfo) -> Self {
         self.device_info = Some(device_info);
@@ -379,15 +401,15 @@ impl ConnectionInfo {
 
 /// 连接管理器
 ///
-/// 管理所有活跃连接，支持按 ID 查询、按用户 ID 查询等功能
+/// 管理所有活跃连接，支持按 ID 查询、按（租户，用户）查询等功能
 pub struct ConnectionManager {
     /// 分片连接存储：connection_id -> (Connection, ConnectionInfo)
     connection_shards: Arc<Vec<ConnectionShard>>,
-    /// 分片用户连接索引：user_id -> connection_ids
+    /// 分片用户连接索引：（租户，用户）-> connection_ids
     user_connection_shards: Arc<Vec<UserConnectionShard>>,
     /// 当前连接数。高频读路径不应抢全局连接表锁。
     connection_count: Arc<AtomicUsize>,
-    /// 当前有连接绑定的用户数。指标采集不应抢用户索引锁。
+    /// 当前有连接绑定的（租户，用户）数。指标采集不应抢用户索引锁。
     user_count: Arc<AtomicUsize>,
     /// 单次底层写入超时时间
     send_timeout: Duration,

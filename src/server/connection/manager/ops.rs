@@ -1,22 +1,26 @@
 use super::*;
 
 impl ConnectionManager {
-    /// 获取用户的所有连接
+    /// 获取（租户，用户）的所有连接
+    ///
+    /// 只返回该租户下的连接：其他租户里 user_id 相同的用户是另一个人，不会出现在结果里。
     ///
     /// # 参数
-    /// - `user_id`: 用户 ID
+    /// - `owner`: （租户，用户）；没有租户的连接属于默认租户，用 `DeviceOwner::new(None, user_id)` 查
     ///
     /// # 返回
-    /// 该用户的所有连接 ID 列表
-    pub fn get_user_connections(&self, user_id: &str) -> Vec<String> {
-        self.user_connection_shard(user_id)
+    /// 该（租户，用户）的所有连接 ID 列表
+    pub fn get_user_connections(&self, owner: &DeviceOwner) -> Vec<String> {
+        self.user_connection_shard(owner)
             .read()
             .ok()
-            .and_then(|user_connections| user_connections.get(user_id).cloned())
+            .and_then(|user_connections| user_connections.get(owner).cloned())
             .unwrap_or_default()
     }
 
     /// 更新连接的用户 ID（用于认证后绑定用户）
+    ///
+    /// 用户绑定在连接当前的租户下（见 [`ConnectionInfo::owner`]）。
     ///
     /// # 参数
     /// - `connection_id`: 连接 ID
@@ -31,18 +35,11 @@ impl ConnectionManager {
             FlareError::protocol_error(format!("Connection {} not found", connection_id))
         })?;
 
-        // 如果之前有用户 ID，先移除旧映射
-        if let Some(old_user_id) = &info.user_id {
-            self.remove_user_connection(old_user_id, connection_id)?;
-        }
+        let before = info.owner();
+        info.user_id = Some(user_id);
+        let after = info.owner();
 
-        // 更新用户 ID
-        info.user_id = Some(user_id.clone());
-
-        // 添加到新用户映射
-        self.insert_user_connection(user_id, connection_id)?;
-
-        Ok(())
+        self.reindex_user_connection(connection_id, before, after)
     }
 
     /// 更新连接的最后活跃时间
@@ -302,37 +299,14 @@ impl ConnectionManager {
             FlareError::protocol_error(format!("Connection {} not found", connection_id))
         })?;
 
-        // 保存旧的 user_id（在调用 set_authenticated 之前）
-        let old_user_id = info.user_id.clone();
+        let before = info.owner();
 
-        let final_user_id = user_id.or(old_user_id.clone());
+        // 设置认证状态（user_id 为 None 时保留已有的用户）
+        info.set_authenticated(user_id);
 
-        // 设置认证状态（如果 final_user_id 是 Some，会设置 user_id）
-        info.set_authenticated(final_user_id.clone());
-
-        // 如果有 user_id（传入的或已存在的），确保用户连接映射正确
-        if let Some(user_id) = final_user_id {
-            // 如果 user_id 发生变化，需要更新映射
-            let user_id_changed = old_user_id
-                .as_ref()
-                .map(|old| old != &user_id)
-                .unwrap_or(true);
-
-            if user_id_changed {
-                // 如果之前有旧用户 ID，先移除旧映射
-                if let Some(old_user_id) = old_user_id {
-                    self.remove_user_connection(&old_user_id, connection_id)?;
-                }
-
-                // 添加新映射（检查是否已存在，避免重复）
-                self.insert_user_connection(user_id, connection_id)?;
-            } else {
-                // user_id 没有变化，只需确保映射存在
-                self.insert_user_connection(user_id, connection_id)?;
-            }
-        }
-
-        Ok(())
+        // 用户变了就把索引挪到新键下；没变只确保索引在
+        let after = info.owner();
+        self.reindex_user_connection(connection_id, before, after)
     }
 
     /// 更新连接的协商信息（设备信息、序列化格式、压缩算法）
@@ -356,6 +330,9 @@ impl ConnectionManager {
             FlareError::protocol_error(format!("Connection {} not found", connection_id))
         })?;
 
+        // 合并元数据前记下旧的（租户，用户）：元数据里的租户变了，用户索引也要换键
+        let before = info.owner();
+
         // 更新协商信息（但不标记协商完成）
         // 协商完成将在 CONNECT_ACK 发送完成后由 update_connection_negotiation_with_pipeline 标记
         info.device_info = device_info;
@@ -371,32 +348,15 @@ impl ConnectionManager {
         // 注意：这里不设置 negotiation_completed = true
         // 也不创建 cached_parser，这些将在 CONNECT_ACK 发送完成后设置
 
-        // 保存旧的 user_id（在修改之前）
-        let old_user_id = info.user_id.clone();
-
-        let user_id_to_set = user_id.clone().or(old_user_id.clone());
-
-        // 添加调试日志
-        if user_id_to_set.is_none() {
-            tracing::trace!(connection_id = %connection_id,incoming_user_id = ?user_id,old_user_id = ?old_user_id,"update_connection_negotiation: user_id_to_set is None, user_id will not be set");
+        // 没传 user_id 时保留已有的用户
+        if user_id.is_some() {
+            info.user_id = user_id;
+        } else {
+            tracing::trace!(connection_id = %connection_id, old_user_id = ?info.user_id, "update_connection_negotiation: no incoming user_id, keeping the existing one");
         }
 
-        if let Some(user_id_val) = user_id_to_set {
-            // 如果之前有用户 ID 且与新 user_id 不同，先移除旧映射
-            if let Some(old_user_id) = old_user_id
-                && old_user_id != user_id_val
-            {
-                self.remove_user_connection(&old_user_id, connection_id)?;
-            }
-
-            // 更新用户 ID
-            info.user_id = Some(user_id_val.clone());
-
-            // 添加到新用户映射
-            self.insert_user_connection(user_id_val, connection_id)?;
-        }
-
-        Ok(())
+        let after = info.owner();
+        self.reindex_user_connection(connection_id, before, after)
     }
 
     /// 更新连接的协商信息（设备信息、序列化格式、压缩算法、加密方式）并设置 pipeline
@@ -421,6 +381,8 @@ impl ConnectionManager {
             FlareError::protocol_error(format!("Connection {} not found", connection_id))
         })?;
 
+        let before = info.owner();
+
         // 更新协商信息
         info.device_info = device_info;
         info.serialization_format = serialization_format;
@@ -432,37 +394,19 @@ impl ConnectionManager {
         info.cached_parser = Some(std::sync::Arc::new(parser));
         info.cached_pipeline = pipeline;
 
-        // 保存旧的 user_id（在修改之前）
-        let old_user_id = info.user_id.clone();
-
-        let user_id_to_set = user_id.clone().or(old_user_id.clone());
-
-        // 添加调试日志
-        if user_id_to_set.is_none() {
+        // 没传 user_id 时保留已有的用户
+        if user_id.is_some() {
+            info.user_id = user_id;
+        } else {
             tracing::trace!(
                 connection_id = %connection_id,
-                incoming_user_id = ?user_id,
-                old_user_id = ?old_user_id,
-                "update_connection_negotiation_with_pipeline: user_id_to_set is None, user_id will not be set"
+                old_user_id = ?info.user_id,
+                "update_connection_negotiation_with_pipeline: no incoming user_id, keeping the existing one"
             );
         }
 
-        if let Some(user_id_val) = user_id_to_set {
-            // 如果之前有用户 ID 且与新 user_id 不同，先移除旧映射
-            if let Some(old_user_id) = old_user_id
-                && old_user_id != user_id_val
-            {
-                self.remove_user_connection(&old_user_id, connection_id)?;
-            }
-
-            // 更新用户 ID
-            info.user_id = Some(user_id_val.clone());
-
-            // 添加到新用户映射
-            self.insert_user_connection(user_id_val, connection_id)?;
-        }
-
-        Ok(())
+        let after = info.owner();
+        self.reindex_user_connection(connection_id, before, after)
     }
 
     /// 标记协商已确认（客户端收到 CONNECT_ACK 后发送确认）
@@ -511,7 +455,7 @@ impl ConnectionManager {
         self.connection_count.load(Ordering::Relaxed)
     }
 
-    /// 获取当前绑定了连接的用户数
+    /// 获取当前绑定了连接的用户数（按（租户，用户）计：不同租户里 user_id 相同的用户各算一个）
     pub fn user_count(&self) -> usize {
         self.user_count.load(Ordering::Relaxed)
     }

@@ -70,7 +70,7 @@ impl ConnectionManager {
         (connection, writer, info)
     }
 
-    pub(super) fn shard_index(key: &str, shard_count: usize) -> usize {
+    pub(super) fn shard_index<K: Hash + ?Sized>(key: &K, shard_count: usize) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish() as usize % shard_count
@@ -84,12 +84,12 @@ impl ConnectionManager {
         &self.connection_shards[self.connection_shard_index(connection_id)]
     }
 
-    pub(super) fn user_connection_shard_index(&self, user_id: &str) -> usize {
-        Self::shard_index(user_id, self.user_connection_shards.len())
+    pub(super) fn user_connection_shard_index(&self, owner: &DeviceOwner) -> usize {
+        Self::shard_index(owner, self.user_connection_shards.len())
     }
 
-    pub(super) fn user_connection_shard(&self, user_id: &str) -> &UserConnectionShard {
-        &self.user_connection_shards[self.user_connection_shard_index(user_id)]
+    pub(super) fn user_connection_shard(&self, owner: &DeviceOwner) -> &UserConnectionShard {
+        &self.user_connection_shards[self.user_connection_shard_index(owner)]
     }
 
     pub(super) fn reserve_connection_slot(&self, max_connections: usize) -> Result<()> {
@@ -118,37 +118,62 @@ impl ConnectionManager {
 
     pub(super) fn insert_user_connection(
         &self,
-        user_id: String,
+        owner: DeviceOwner,
         connection_id: &str,
     ) -> Result<()> {
         let mut user_connections = self
-            .user_connection_shard(&user_id)
+            .user_connection_shard(&owner)
             .write()
             .map_err(|_| FlareError::general_error("Failed to lock user_connection shard"))?;
-        if Self::insert_user_connection_index(&mut user_connections, user_id, connection_id) {
+        if Self::insert_user_connection_index(&mut user_connections, owner, connection_id) {
             self.user_count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
 
-    pub(super) fn remove_user_connection(&self, user_id: &str, connection_id: &str) -> Result<()> {
+    pub(super) fn remove_user_connection(
+        &self,
+        owner: &DeviceOwner,
+        connection_id: &str,
+    ) -> Result<()> {
         let mut user_connections = self
-            .user_connection_shard(user_id)
+            .user_connection_shard(owner)
             .write()
             .map_err(|_| FlareError::general_error("Failed to lock user_connection shard"))?;
-        if Self::remove_user_connection_index(&mut user_connections, user_id, connection_id) {
+        if Self::remove_user_connection_index(&mut user_connections, owner, connection_id) {
             self.user_count.fetch_sub(1, Ordering::Relaxed);
         }
         Ok(())
     }
 
+    /// 连接的（租户，用户）从 `before` 变成 `after` 之后，把用户索引挪到新键下。
+    ///
+    /// 调用方持有连接分片的写锁并已改完连接信息；用户或租户任一变化都会换键。
+    /// 键没变时只确保索引在（幂等），不重复计数。
+    pub(super) fn reindex_user_connection(
+        &self,
+        connection_id: &str,
+        before: Option<DeviceOwner>,
+        after: Option<DeviceOwner>,
+    ) -> Result<()> {
+        if let Some(before) = &before
+            && after.as_ref() != Some(before)
+        {
+            self.remove_user_connection(before, connection_id)?;
+        }
+        if let Some(after) = after {
+            self.insert_user_connection(after, connection_id)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn insert_user_connection_index(
-        user_connections: &mut HashMap<String, Vec<String>>,
-        user_id: String,
+        user_connections: &mut HashMap<DeviceOwner, Vec<String>>,
+        owner: DeviceOwner,
         connection_id: &str,
     ) -> bool {
-        let is_new_user = !user_connections.contains_key(&user_id);
-        let conn_ids = user_connections.entry(user_id).or_default();
+        let is_new_user = !user_connections.contains_key(&owner);
+        let conn_ids = user_connections.entry(owner).or_default();
         if !conn_ids.iter().any(|id| id == connection_id) {
             conn_ids.push(connection_id.to_string());
         }
@@ -156,17 +181,17 @@ impl ConnectionManager {
     }
 
     pub(super) fn remove_user_connection_index(
-        user_connections: &mut HashMap<String, Vec<String>>,
-        user_id: &str,
+        user_connections: &mut HashMap<DeviceOwner, Vec<String>>,
+        owner: &DeviceOwner,
         connection_id: &str,
     ) -> bool {
-        let Some(conn_ids) = user_connections.get_mut(user_id) else {
+        let Some(conn_ids) = user_connections.get_mut(owner) else {
             return false;
         };
 
         conn_ids.retain(|id| id != connection_id);
         if conn_ids.is_empty() {
-            user_connections.remove(user_id);
+            user_connections.remove(owner);
             true
         } else {
             false
@@ -178,7 +203,8 @@ impl ConnectionManager {
     /// # 参数
     /// - `connection_id`: 连接唯一标识符
     /// - `connection`: 连接实例
-    /// - `user_id`: 可选的用户 ID（如果已认证）
+    /// - `user_id`: 可选的用户 ID（如果已认证）。此时连接还没有租户元数据，先记在默认租户下，
+    ///   协商写入租户后索引随之迁移
     /// - `requires_auth`: 是否需要认证（如果为 false，连接直接标记为已验证）
     ///
     /// # 返回
@@ -230,15 +256,16 @@ impl ConnectionManager {
         }
 
         let mut info = ConnectionInfo::new(connection_id.clone(), requires_auth);
-        info.user_id = user_id.clone();
+        info.user_id = user_id;
+        let owner = info.owner();
 
         let connection = Arc::new(Mutex::new(connection));
         let entry = self.new_connection_entry(&connection_id, connection, info);
         shard.insert(connection_id.clone(), entry);
 
         // 如果提供了用户 ID，添加到用户连接映射
-        if let Some(user_id) = user_id
-            && let Err(err) = self.insert_user_connection(user_id, &connection_id)
+        if let Some(owner) = owner
+            && let Err(err) = self.insert_user_connection(owner, &connection_id)
         {
             shard.remove(&connection_id);
             self.release_connection_slot();
@@ -268,8 +295,8 @@ impl ConnectionManager {
         self.release_connection_slot();
 
         // 如果连接关联了用户，从用户连接映射中移除
-        if let Some(user_id) = info.user_id {
-            self.remove_user_connection(&user_id, connection_id)?;
+        if let Some(owner) = info.owner() {
+            self.remove_user_connection(&owner, connection_id)?;
         }
 
         Ok(())
@@ -586,8 +613,8 @@ impl ConnectionManager {
             for connection_id in ids {
                 if let Some((_, writer, info)) = shard.remove(&connection_id) {
                     writer.close_underlying_in_background();
-                    if let Some(user_id) = info.user_id {
-                        removed_user_connections.push((user_id, connection_id.clone()));
+                    if let Some(owner) = info.owner() {
+                        removed_user_connections.push((owner, connection_id.clone()));
                     }
                     removed_ids.push(connection_id);
                 }
@@ -606,12 +633,12 @@ impl ConnectionManager {
 
     pub(super) fn remove_user_connections_batch<I>(&self, user_connections: I)
     where
-        I: IntoIterator<Item = (String, String)>,
+        I: IntoIterator<Item = (DeviceOwner, String)>,
     {
         let mut entries_by_shard = vec![Vec::new(); self.user_connection_shards.len()];
-        for (user_id, connection_id) in user_connections {
-            let shard_index = self.user_connection_shard_index(&user_id);
-            entries_by_shard[shard_index].push((user_id, connection_id));
+        for (owner, connection_id) in user_connections {
+            let shard_index = self.user_connection_shard_index(&owner);
+            entries_by_shard[shard_index].push((owner, connection_id));
         }
 
         let removed_users = entries_by_shard
@@ -628,8 +655,8 @@ impl ConnectionManager {
 
                 entries
                     .into_iter()
-                    .filter(|(user_id, connection_id)| {
-                        Self::remove_user_connection_index(&mut shard, user_id, connection_id)
+                    .filter(|(owner, connection_id)| {
+                        Self::remove_user_connection_index(&mut shard, owner, connection_id)
                     })
                     .count()
             })

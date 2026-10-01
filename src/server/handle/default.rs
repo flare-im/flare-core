@@ -5,6 +5,7 @@
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
 use crate::server::connection::ConnectionManagerTrait;
+use crate::server::device::DeviceOwner;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -58,15 +59,18 @@ pub trait ServerHandle: Send + Sync {
         (success, failure)
     }
 
-    /// 向指定用户的所有连接发送消息
+    /// 向（租户，用户）的所有连接发送消息
+    ///
+    /// 只投递到该租户下的连接：两个租户里 user_id 相同的用户是两个人，互相收不到。
+    /// 单租户部署用 `DeviceOwner::new(None, user_id)`，即默认租户。
     ///
     /// # 参数
-    /// - `user_id`: 目标用户 ID
+    /// - `owner`: 目标（租户，用户）
     /// - `frame`: 要发送的 Frame
     ///
     /// # 返回
     /// 发送成功返回 `Ok(())`，失败返回错误
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()>;
+    async fn send_to_user(&self, owner: &DeviceOwner, frame: &Frame) -> Result<()>;
 
     /// 广播消息到所有连接
     ///
@@ -159,10 +163,10 @@ impl ServerHandle for DefaultServerHandle {
             .await
     }
 
-    async fn send_to_user(&self, user_id: &str, frame: &Frame) -> Result<()> {
+    async fn send_to_user(&self, owner: &DeviceOwner, frame: &Frame) -> Result<()> {
         // 传入 None，让 ConnectionManager 为每个连接使用其协商的格式
         self.connection_manager
-            .send_frame_to_user(user_id, frame, None)
+            .send_frame_to_user(owner, frame, None)
             .await
     }
 

@@ -22,6 +22,13 @@
   归入默认租户 `"0"`。
 - 启用认证时，设备冲突不再使用客户端在 CONNECT 里自报的 `user_id`，改用认证结果里的
   用户。此前持有效令牌的客户端报上别人的 user_id，就能把对方同平台的设备踢下线。
+- 连接管理器的用户索引改按（租户，用户）建立。此前按裸 user_id 建索引：`send_to_user`
+  会把帧写到其他租户里 user_id 相同的用户的连接上，`get_user_connections` 也返回其他
+  租户的连接，用户数把两个租户的同名用户算成一个。现在按连接元数据里的租户（认证结果写入）
+  限定，没有租户的连接归入默认租户 `"0"`；租户在用户之后才写入时，索引随之迁移。
+- 启用认证时，认证器返回「通过」却没有给出用户（或给了空用户）就拒绝 CONNECT，客户端收到
+  `AUTHENTICATION_FAILED`。此前回落到客户端在 CONNECT 里自报的 `user_id`，持任意有效
+  令牌就能把连接绑到别人名下。
 
 ### 不兼容变更
 
@@ -33,6 +40,16 @@
   用结构体字面量构造它的代码需要补上这个字段或改用 `..Default::default()`。
 - `AuthResult` 新增 `retryable` 字段（见下文「修复」中的暂时性拒绝）。用结构体字面量构造
   它的代码需要补上这个字段，或改用 `success` / `failure` / `retryable_failure` 构造。
+- 按用户寻址的接口改为接收 `&DeviceOwner`（租户，用户），不再接收裸 user_id：
+  `ConnectionManager::get_user_connections`，`ConnectionManagerTrait` 的
+  `get_user_connections`、`send_to_user`、`send_frame_to_user`，`ServerHandle::send_to_user`，
+  以及 `ServerCore`、`FlareServer`、`ObserverServer`、`SimpleServer`、`MessageContext`、
+  `ServerWrapper` 的 `send_to_user`。单租户部署传 `DeviceOwner::new(None, user_id)`。
+  `bind_user` 签名不变，用户绑在连接当前的租户下；`user_count` 与
+  `ConnectionStats::total_users` 按（租户，用户）计数。新增 `ConnectionInfo::owner`。
+- `DefaultAuthenticator` 改为采用客户端在 CONNECT 元数据 `user_id` 里自报的用户（它本就
+  不校验令牌），客户端没报时按认证失败拒绝。此前它返回不带用户的「通过」，由服务端回落到
+  自报值，没报 `user_id` 的客户端会以无用户的身份接入。
 
 ### 修复
 

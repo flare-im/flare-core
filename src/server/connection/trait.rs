@@ -6,6 +6,7 @@
 use crate::common::MessageParser;
 use crate::common::error::Result;
 use crate::common::protocol::Frame;
+use crate::server::device::DeviceOwner;
 use crate::transport::connection::Connection;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -74,10 +75,14 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         connection_id: &str,
     ) -> Option<(Arc<Mutex<Box<dyn Connection>>>, ConnectionInfo)>;
 
-    /// 获取用户的所有连接 ID
-    async fn get_user_connections(&self, user_id: &str) -> Vec<String>;
+    /// 获取（租户，用户）的所有连接 ID
+    ///
+    /// 只返回该租户下的连接。用户索引按（租户，用户）建立：两个租户里 user_id 相同的用户是两个人。
+    /// 连接的租户取连接元数据里的 `tenant_id`（认证结果写入），没有租户的连接属于默认租户
+    /// [`DEFAULT_TENANT_ID`](crate::server::device::DEFAULT_TENANT_ID)。
+    async fn get_user_connections(&self, owner: &DeviceOwner) -> Vec<String>;
 
-    /// 绑定用户到连接
+    /// 绑定用户到连接（绑在连接当前的租户下）
     async fn bind_user(&self, connection_id: &str, user_id: String) -> Result<()>;
 
     /// 更新连接的最后活跃时间
@@ -114,8 +119,8 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// 向指定连接发送数据（字节数组）
     async fn send_to_connection(&self, connection_id: &str, data: &[u8]) -> Result<()>;
 
-    /// 向指定用户的所有连接发送数据（字节数组）
-    async fn send_to_user(&self, user_id: &str, data: &[u8]) -> Result<()>;
+    /// 向（租户，用户）的所有连接发送数据（字节数组）；其他租户里同名用户的连接收不到
+    async fn send_to_user(&self, owner: &DeviceOwner, data: &[u8]) -> Result<()>;
 
     /// 广播消息到所有连接（字节数组）
     async fn broadcast(&self, data: &[u8]) -> Result<()>;
@@ -187,10 +192,12 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
         Ok(())
     }
 
-    /// 向指定用户的所有连接发送 Frame（自动序列化）
+    /// 向（租户，用户）的所有连接发送 Frame（自动序列化）
+    ///
+    /// 只投递到该租户下的连接，其他租户里 user_id 相同的用户收不到。
     ///
     /// # 参数
-    /// - `user_id`: 用户 ID
+    /// - `owner`: （租户，用户）
     /// - `frame`: 要发送的 Frame
     /// - `parser`: 消息解析器，用于序列化 Frame（如果为 None，则为每个连接使用其协商的格式）
     ///
@@ -198,11 +205,11 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
     /// 发送成功返回 `Ok(())`，失败返回错误
     async fn send_frame_to_user(
         &self,
-        user_id: &str,
+        owner: &DeviceOwner,
         frame: &Frame,
         parser: Option<&MessageParser>,
     ) -> Result<()> {
-        let connection_ids = self.get_user_connections(user_id).await;
+        let connection_ids = self.get_user_connections(owner).await;
         for conn_id in connection_ids {
             // 为每个连接使用其协商的格式（如果 parser 为 None）
             let _ = self.send_frame_to(&conn_id, frame, parser).await;
@@ -281,6 +288,6 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
 pub struct ConnectionStats {
     /// 总连接数
     pub total_connections: usize,
-    /// 总用户数
+    /// 总用户数（按（租户，用户）计：不同租户里 user_id 相同的用户各算一个）
     pub total_users: usize,
 }
