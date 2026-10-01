@@ -42,7 +42,8 @@ pub const TENANT_UNAVAILABLE_REASON: &str = "TENANT_UNAVAILABLE";
 /// 映射成客户端错误。
 ///
 /// - `TENANT_UNAVAILABLE` → `PERMISSION_DENIED`；
-/// - 其余能识别的错误码（如 `AUTHENTICATION_FAILED`、`TOKEN_EXPIRED`）原样使用；
+/// - 其余能识别的错误码（如 `AUTHENTICATION_FAILED`、`TOKEN_EXPIRED`，以及服务端暂时放不了行时的
+///   `SERVICE_UNAVAILABLE`）原样使用；
 /// - 原因认不出时退回 `metadata.code`，再认不出就是 `CONNECTION_REFUSED`。
 ///
 /// 错误文本以类型化原因开头，上层可以据此分辨。
@@ -1418,6 +1419,17 @@ mod negotiation_rejection_tests {
                 ErrorCode::AuthenticationFailed,
             ),
             ("TOKEN_EXPIRED", None, ErrorCode::TokenExpired),
+            // 暂时性拒绝：认证依赖读不到，客户端应退避重连
+            (
+                "SERVICE_UNAVAILABLE",
+                Some("SERVICE_UNAVAILABLE"),
+                ErrorCode::ServiceUnavailable,
+            ),
+            (
+                "TENANT_RUNTIME_UNREADABLE",
+                Some("SERVICE_UNAVAILABLE"),
+                ErrorCode::ServiceUnavailable,
+            ),
             (
                 "SOME_NEW_REASON",
                 Some("AUTHENTICATION_FAILED"),

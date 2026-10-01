@@ -24,6 +24,13 @@ pub struct AuthResult {
     pub error_message: Option<String>,
     /// 用户元数据（可选，用于存储额外的用户信息）
     pub user_metadata: Option<std::collections::HashMap<String, String>>,
+    /// 拒绝是否只是暂时的（只在 `authenticated == false` 时有意义）
+    ///
+    /// 认证依赖暂时读不到（例如租户状态库抖动）时，认证器没有对令牌或租户下结论，只是此刻
+    /// 无法放行。服务端据此以 `SERVICE_UNAVAILABLE` 拒绝 CONNECT，客户端退避重连即可；
+    /// 不能报成鉴权失败或租户不可用，否则客户端会去换令牌或终止会话。见
+    /// [`AuthResult::retryable_failure`]。
+    pub retryable: bool,
 }
 
 impl AuthResult {
@@ -34,6 +41,7 @@ impl AuthResult {
             user_id,
             error_message: None,
             user_metadata: None,
+            retryable: false,
         }
     }
 
@@ -47,6 +55,7 @@ impl AuthResult {
             user_id,
             error_message: None,
             user_metadata: Some(metadata),
+            retryable: false,
         }
     }
 
@@ -57,6 +66,19 @@ impl AuthResult {
             user_id: None,
             error_message: Some(error_message),
             user_metadata: None,
+            retryable: false,
+        }
+    }
+
+    /// 创建暂时性的拒绝：认证依赖暂时不可用，稍后重试可能放行
+    ///
+    /// 服务端以 `SERVICE_UNAVAILABLE` 拒绝 CONNECT（关连接前下发的 ERROR 帧 metadata `code` 也是
+    /// 它）。`error_message` 是类型化错误码时原样作为 ERROR 帧的 message，否则下发
+    /// `SERVICE_UNAVAILABLE`，文本只进服务端日志。
+    pub fn retryable_failure(error_message: String) -> Self {
+        Self {
+            retryable: true,
+            ..Self::failure(error_message)
         }
     }
 
@@ -125,6 +147,23 @@ pub trait Authenticator: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_retryable_failure_is_marked_transient() {
+        let transient = AuthResult::retryable_failure("projection unreachable".to_string());
+        assert!(!transient.authenticated);
+        assert!(transient.retryable);
+        assert_eq!(
+            transient.error_message.as_deref(),
+            Some("projection unreachable")
+        );
+
+        assert!(!AuthResult::failure("TENANT_UNAVAILABLE".to_string()).retryable);
+        assert!(!AuthResult::success(Some("u".to_string())).retryable);
+        assert!(
+            !AuthResult::success_with_metadata(Some("u".to_string()), Default::default()).retryable
+        );
+    }
 
     #[test]
     fn tenant_is_carried_in_the_auth_metadata() {

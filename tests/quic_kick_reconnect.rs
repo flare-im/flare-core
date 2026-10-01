@@ -64,8 +64,8 @@ struct NoopHandler;
 #[async_trait]
 impl ServerEventHandler for NoopHandler {}
 
-/// 认证器按固定原因拒绝全部 CONNECT。
-struct RejectAll(&'static str);
+/// 认证器按同一个结果拒绝全部 CONNECT。
+struct RejectAll(AuthResult);
 
 #[async_trait]
 impl Authenticator for RejectAll {
@@ -76,7 +76,7 @@ impl Authenticator for RejectAll {
         _device_info: Option<&DeviceInfo>,
         _metadata: Option<&HashMap<String, Vec<u8>>>,
     ) -> Result<AuthResult> {
-        Ok(AuthResult::failure(self.0.to_string()))
+        Ok(self.0.clone())
     }
 }
 
@@ -299,22 +299,30 @@ async fn server_disconnect_is_seen_at_once_and_the_next_send_reconnects() {
 }
 
 /// CONNECT 被拒时，客户端拿到的错误按服务端下发的类型化原因分类：
-/// 租户不可用不是鉴权失败，鉴权失败才是鉴权失败。
+/// 租户不可用不是鉴权失败，鉴权失败才是鉴权失败；认证依赖暂时读不到（如租户状态库抖动）
+/// 是可重试的 SERVICE_UNAVAILABLE，既不是鉴权失败也不是租户不可用。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejected_connect_surfaces_the_typed_reason() {
-    for (auth_reason, expected_code, expected_text) in [
+    for (auth_result, expected_code, expected_text) in [
         (
-            "TENANT_UNAVAILABLE",
+            AuthResult::failure("TENANT_UNAVAILABLE".to_string()),
             ErrorCode::PermissionDenied,
             "TENANT_UNAVAILABLE",
         ),
         (
-            "Token 无效或已过期",
+            AuthResult::failure("Token 无效或已过期".to_string()),
             ErrorCode::AuthenticationFailed,
             "AUTHENTICATION_FAILED",
         ),
+        (
+            AuthResult::retryable_failure("tenant runtime projection unavailable".to_string()),
+            ErrorCode::ServiceUnavailable,
+            "SERVICE_UNAVAILABLE",
+        ),
     ] {
-        let (server, port) = start_server(Some(Arc::new(RejectAll(auth_reason)))).await;
+        let auth_reason = auth_result.error_message.clone().unwrap_or_default();
+        let retryable = auth_result.retryable;
+        let (server, port) = start_server(Some(Arc::new(RejectAll(auth_result)))).await;
         let started = Instant::now();
         let error = match client_builder(port, "owner-device", Arc::new(AckCounter::default()))
             .build_with_race()
@@ -325,6 +333,12 @@ async fn rejected_connect_surfaces_the_typed_reason() {
         };
         assert_eq!(error.code(), Some(expected_code), "{error}");
         assert!(error.to_string().contains(expected_text), "{error}");
+        assert_eq!(expected_code.is_retryable(), retryable, "{error}");
+        if retryable {
+            // 服务端内部文本不下发；也不能带上会让客户端终止会话的租户原因
+            assert!(!error.to_string().contains(&auth_reason), "{error}");
+            assert!(!error.to_string().contains("TENANT_UNAVAILABLE"), "{error}");
+        }
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "rejection must not wait for the negotiation timeout"

@@ -31,6 +31,8 @@
   `DeviceManager::remove_connection`，按连接 ID 移除设备。
 - `NegotiationResult` 新增 `tenant_id` 字段（客户端自报，只在未启用认证时采用）。
   用结构体字面量构造它的代码需要补上这个字段或改用 `..Default::default()`。
+- `AuthResult` 新增 `retryable` 字段（见下文「修复」中的暂时性拒绝）。用结构体字面量构造
+  它的代码需要补上这个字段，或改用 `success` / `failure` / `retryable_failure` 构造。
 
 ### 修复
 
@@ -60,6 +62,12 @@
   格式编码。错误原因是类型化错误码时原样作为 message 和 metadata `reason`，否则用错误码
   本身（如 `SERVICE_UNAVAILABLE`）；metadata `code` 为错误码。此前客户端刚收到 ACK 就被
   无原因断开，无法与网络故障区分。`PermissionDenied` 的 CONNECT 失败改记 warn。
+- 认证器可以给出暂时性拒绝：`AuthResult::retryable_failure`，用于认证依赖暂时读不到
+  （例如租户状态库抖动）、并没有对令牌或租户下结论的情况。服务端以 `SERVICE_UNAVAILABLE`
+  拒绝 CONNECT，ERROR 帧的 metadata `code` 也是它，客户端拿到的错误码为
+  `SERVICE_UNAVAILABLE`（可重试）。此前认证器只能报失败，客户端拿到的不是鉴权失败就是
+  `TENANT_UNAVAILABLE`，前者让客户端去换令牌，后者让它终止会话、不再重连，一次数据库
+  抖动就会让这段时间里连进来的客户端一直离线。
 
 ### 其他
 

@@ -552,11 +552,13 @@ impl ServerCore {
             match self.handle_connect_message(frame, connection_id).await {
                 Ok(negotiated) => negotiated,
                 Err(e) => {
-                    if matches!(
-                        e.code(),
-                        Some(crate::common::error::ErrorCode::AuthenticationFailed)
-                    ) {
-                        Self::send_connect_rejection(&connection, connection_id, e.reason()).await;
+                    if let Some(
+                        code @ (crate::common::error::ErrorCode::AuthenticationFailed
+                        | crate::common::error::ErrorCode::ServiceUnavailable),
+                    ) = e.code()
+                    {
+                        Self::send_connect_rejection(&connection, connection_id, code, e.reason())
+                            .await;
                     }
                     return Err(e);
                 }
@@ -680,18 +682,22 @@ impl ServerCore {
     }
 
     /// 拒绝 CONNECT 前先告诉客户端原因：一个 ERROR 帧，编码与 CONNECT_ACK 相同（协商前 JSON）。
-    /// 调用方随后关闭连接。没有这一帧，客户端只能看到连接被关掉，分不清是令牌失效还是租户被停用。
+    /// 调用方随后关闭连接。没有这一帧，客户端只能看到连接被关掉，分不清是令牌失效、租户被停用，
+    /// 还是服务端暂时放不了行。
     ///
-    /// `message` 只在认证器给的是类型化错误码（如 `TENANT_UNAVAILABLE`）时原样下发，其余一律
-    /// `AUTHENTICATION_FAILED`，免得把服务端内部错误文本带给客户端。直接写连接而不走写队列：
+    /// metadata `code` 是拒绝的类别：`AUTHENTICATION_FAILED`（认证器给了结论），或
+    /// `SERVICE_UNAVAILABLE`（[`AuthResult::retryable_failure`](crate::server::auth::AuthResult::retryable_failure)，
+    /// 客户端应退避重连）。`message` 只在认证器给的是类型化错误码（如 `TENANT_UNAVAILABLE`）时原样
+    /// 下发，其余一律用 `code`，免得把服务端内部错误文本带给客户端。直接写连接而不走写队列：
     /// 移除连接会立刻关闭写队列，排在队列里的帧会被丢掉。
     async fn send_connect_rejection(
         connection: &Arc<tokio::sync::Mutex<Box<dyn crate::transport::connection::Connection>>>,
         connection_id: &str,
+        code: crate::common::error::ErrorCode,
         reason: &str,
     ) {
         use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
-        let code = crate::common::error::ErrorCode::AuthenticationFailed.as_str();
+        let code = code.as_str();
         let message = if is_typed_reason(reason) {
             reason
         } else {
@@ -1043,6 +1049,20 @@ impl ServerCore {
                         user_id: auth_result.user_id,
                         metadata: auth_result.user_metadata,
                     })
+                } else if auth_result.retryable {
+                    // 认证依赖暂时不可用（如租户状态读不到）：不是对令牌或租户的结论。按服务不可用拒绝，
+                    // 客户端退避重连；报成鉴权失败会让客户端去换令牌，报成租户不可用会让它终止会话。
+                    let error_msg = auth_result
+                        .error_message
+                        .unwrap_or_else(|| "认证暂不可用".to_string());
+                    warn!(
+                        "[ServerCore] 认证暂不可用，按可重试拒绝: connection_id={}, error={}",
+                        connection_id, error_msg
+                    );
+                    Err(crate::common::error::FlareError::localized(
+                        crate::common::error::ErrorCode::ServiceUnavailable,
+                        error_msg,
+                    ))
                 } else {
                     let error_msg = auth_result
                         .error_message
@@ -1412,7 +1432,8 @@ mod tests {
         }
     }
 
-    struct Reject(&'static str);
+    /// 认证器总是给出同一个拒绝结果。
+    struct Reject(crate::server::auth::AuthResult);
 
     #[async_trait]
     impl Authenticator for Reject {
@@ -1423,23 +1444,45 @@ mod tests {
             _device_info: Option<&crate::common::device::DeviceInfo>,
             _metadata: Option<&HashMap<String, Vec<u8>>>,
         ) -> Result<crate::server::auth::AuthResult> {
-            Ok(crate::server::auth::AuthResult::failure(self.0.to_string()))
+            Ok(self.0.clone())
         }
     }
 
     /// 被拒的 CONNECT 在关连接前收到一个 ERROR 帧（协商前 JSON）：类型化原因原样下发，
-    /// 其余文本一律换成 AUTHENTICATION_FAILED。
+    /// 其余文本一律换成拒绝类别的错误码。认证器给了结论的是 AUTHENTICATION_FAILED；
+    /// 暂时性拒绝（认证依赖读不到）是 SERVICE_UNAVAILABLE，客户端据此退避重连，
+    /// 而不是换令牌或终止会话。
     #[tokio::test]
     async fn rejected_connect_tells_the_client_why_before_the_close() {
+        use crate::common::error::ErrorCode;
         use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
         use crate::common::protocol::flare::core::commands::{command, system_command};
-        for (auth_message, expected) in [
-            ("TENANT_UNAVAILABLE", "TENANT_UNAVAILABLE"),
-            ("Token 无效或已过期", "AUTHENTICATION_FAILED"),
+        use crate::server::auth::AuthResult;
+        for (auth_result, expected_code, expected_message) in [
+            (
+                AuthResult::failure("TENANT_UNAVAILABLE".to_string()),
+                ErrorCode::AuthenticationFailed,
+                "TENANT_UNAVAILABLE",
+            ),
+            (
+                AuthResult::failure("Token 无效或已过期".to_string()),
+                ErrorCode::AuthenticationFailed,
+                "AUTHENTICATION_FAILED",
+            ),
+            (
+                AuthResult::retryable_failure("tenant runtime projection unavailable".to_string()),
+                ErrorCode::ServiceUnavailable,
+                "SERVICE_UNAVAILABLE",
+            ),
+            (
+                AuthResult::retryable_failure("TENANT_RUNTIME_UNREADABLE".to_string()),
+                ErrorCode::ServiceUnavailable,
+                "TENANT_RUNTIME_UNREADABLE",
+            ),
         ] {
             let config = ServerConfig::default().enable_auth();
             let core = ServerCore::new(&config, None)
-                .with_authenticator(Some(Arc::new(Reject(auth_message))));
+                .with_authenticator(Some(Arc::new(Reject(auth_result))));
             let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
             let connection: Arc<tokio::sync::Mutex<Box<dyn Connection>>> =
                 Arc::new(tokio::sync::Mutex::new(Box::new(RecordingConnection {
@@ -1459,10 +1502,7 @@ mod tests {
                 .await
                 .expect_err("CONNECT must be rejected");
 
-            assert_eq!(
-                error.code(),
-                Some(crate::common::error::ErrorCode::AuthenticationFailed)
-            );
+            assert_eq!(error.code(), Some(expected_code), "{error}");
             let sent = sent.lock().unwrap();
             assert_eq!(sent.len(), 1, "exactly the rejection frame, no CONNECT_ACK");
             let frame = PRE_NEGOTIATION_PARSER.parse(&sent[0]).expect("JSON frame");
@@ -1470,10 +1510,10 @@ mod tests {
                 panic!("system command expected");
             };
             assert_eq!(system.r#type, system_command::Type::Error as i32);
-            assert_eq!(system.message, expected);
+            assert_eq!(system.message, expected_message);
             assert_eq!(
                 system.metadata.get("code").map(Vec::as_slice),
-                Some(b"AUTHENTICATION_FAILED".as_slice())
+                Some(expected_code.as_str().as_bytes())
             );
         }
     }
