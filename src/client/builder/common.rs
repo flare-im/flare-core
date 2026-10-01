@@ -73,6 +73,24 @@ impl ClientWrapper {
             return Ok(());
         }
 
+        // 上一条连接因服务端停机断开：先在抖动窗口里随机等一段再连。停机是计划内的，立即重连只会
+        // 撞上还没起来的实例；所有客户端同一刻重连，又会把刚起来的实例冲垮。等待时不占着客户端锁。
+        let pause = {
+            let client = self.client.lock().await;
+            if client.is_connected() {
+                Duration::ZERO
+            } else {
+                client.core().reconnect_delay(Duration::ZERO)
+            }
+        };
+        if !pause.is_zero() {
+            tracing::info!(
+                ?pause,
+                "server shut down the previous connection; pausing before reconnecting"
+            );
+            crate::common::platform::sleep(pause).await;
+        }
+
         {
             let mut client = self.client.lock().await;
             if !client.is_connected() {

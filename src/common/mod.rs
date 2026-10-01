@@ -31,6 +31,7 @@ pub mod platform;
 pub mod protobuf_decoder;
 pub mod protocol;
 pub mod serializer;
+pub mod shutdown;
 pub mod utils;
 
 // Commonly used types are re-exported here for ergonomic imports.
@@ -63,4 +64,7 @@ pub use protocol::{
     SerializationFormat, SystemCommand,
 };
 pub use serializer::{SerializationUtil, Serializer};
+pub use shutdown::{
+    SERVER_SHUTDOWN_REASON, is_server_shutdown_reason, server_shutdown_reconnect_delay,
+};
 pub use utils::*;

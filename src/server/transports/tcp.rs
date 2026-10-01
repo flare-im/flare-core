@@ -6,7 +6,7 @@ use crate::common::error::Result;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
 use crate::server::transports::Server;
-use crate::server::transports::common::ServerConnectionHelper;
+use crate::server::transports::common::{AcceptGate, ServerConnectionHelper};
 use crate::server::transports::server_core::ServerCore;
 use crate::transport::connection::Connection;
 use crate::transport::tcp::TCPTransport;
@@ -20,6 +20,8 @@ pub struct TCPServer {
     config: ServerConfig,
     core: Arc<ServerCore>,
     is_running: Arc<Mutex<bool>>,
+    /// 关闭后 accept 循环退出并释放监听端口；每次 start 换一个新的
+    accept_gate: AcceptGate,
 }
 
 impl TCPServer {
@@ -36,6 +38,7 @@ impl TCPServer {
             config,
             core,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         }
     }
 
@@ -44,6 +47,7 @@ impl TCPServer {
             config,
             core,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         }
     }
 }
@@ -65,6 +69,8 @@ impl Server for TCPServer {
         })?;
 
         *self.is_running.lock().await = true;
+        self.accept_gate = AcceptGate::new();
+        let mut accept_stopped = self.accept_gate.watch();
         self.core.start_heartbeat(&self.config);
 
         let manager = Arc::clone(&self.core.connection_manager);
@@ -76,7 +82,12 @@ impl Server for TCPServer {
         tokio::spawn(async move {
             debug!("[TCPServer] listening on {addr}");
             while *is_running.lock().await {
-                match listener.accept().await {
+                let accepted = tokio::select! {
+                    biased;
+                    () = accept_stopped.closed() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                match accepted {
                     Ok((stream, peer)) => {
                         debug!("[TCPServer] accepted connection from {peer}");
                         let manager_clone = Arc::clone(&manager);
@@ -110,7 +121,12 @@ impl Server for TCPServer {
         Ok(())
     }
 
+    async fn stop_accepting(&mut self) {
+        self.accept_gate.close();
+    }
+
     async fn stop(&mut self) -> Result<()> {
+        self.accept_gate.close();
         ServerConnectionHelper::stop_server(&self.core, &self.is_running)
             .await
             .map_err(|e| {

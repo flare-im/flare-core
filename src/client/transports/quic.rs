@@ -294,8 +294,8 @@ impl QUICClient {
         self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
 
-        // 等待重连间隔
-        sleep(self.config.reconnect_interval).await;
+        // 等待重连间隔；上一条连接因服务端停机断开时改为短暂的随机等待
+        sleep(self.core.reconnect_delay(self.config.reconnect_interval)).await;
 
         // 关闭旧连接
         self.connection_prepared = false;

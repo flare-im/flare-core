@@ -3,10 +3,11 @@
 //! 专注于 QUIC 协议层面的连接处理，连接管理和心跳检测由 ServerCore 统一管理
 
 use crate::common::error::Result;
+use crate::common::shutdown::SERVER_SHUTDOWN_REASON;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
 use crate::server::transports::Server;
-use crate::server::transports::common::ServerConnectionHelper;
+use crate::server::transports::common::{AcceptGate, ServerConnectionHelper};
 use crate::server::transports::server_core::ServerCore;
 use crate::transport::connection::Connection;
 use crate::transport::quic::QUICTransport;
@@ -25,7 +26,11 @@ pub struct QUICServer {
     config: ServerConfig,
     core: Arc<ServerCore>,
     endpoint: Option<Endpoint>,
+    /// 运行中端点的句柄：停止接受新连接时拒绝新握手，停机最后关闭端点、释放 UDP 端口
+    running_endpoint: Option<Endpoint>,
     is_running: Arc<Mutex<bool>>,
+    /// 关闭后 accept 循环退出；每次 start 换一个新的
+    accept_gate: AcceptGate,
 }
 
 impl QUICServer {
@@ -48,7 +53,9 @@ impl QUICServer {
             config,
             core,
             endpoint: Some(endpoint),
+            running_endpoint: None,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         })
     }
 
@@ -62,7 +69,9 @@ impl QUICServer {
             config,
             core,
             endpoint: Some(endpoint),
+            running_endpoint: None,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         })
     }
 
@@ -145,6 +154,9 @@ impl Server for QUICServer {
         let endpoint = self.endpoint.take().ok_or_else(|| {
             crate::common::error::FlareError::connection_failed("端点未初始化".to_string())
         })?;
+        self.running_endpoint = Some(endpoint.clone());
+        self.accept_gate = AcceptGate::new();
+        let mut accept_stopped = self.accept_gate.watch();
 
         // 准备共享资源
         let manager = Arc::clone(&self.core.connection_manager);
@@ -156,7 +168,12 @@ impl Server for QUICServer {
         tokio::spawn(async move {
             debug!("[QUIC Server] 开始监听连接");
             while *is_running.lock().await {
-                if let Some(conn) = endpoint.accept().await {
+                let incoming = tokio::select! {
+                    biased;
+                    () = accept_stopped.closed() => break,
+                    incoming = endpoint.accept() => incoming,
+                };
+                if let Some(conn) = incoming {
                     debug!("[QUIC Server] 收到新连接，等待握手");
                     let manager_clone = Arc::clone(&manager);
                     let config_clone = config.clone();
@@ -206,15 +223,29 @@ impl Server for QUICServer {
         Ok(())
     }
 
+    async fn stop_accepting(&mut self) {
+        self.accept_gate.close();
+        // 端点上的新握手一律拒绝，已建立的连接不受影响
+        if let Some(endpoint) = &self.running_endpoint {
+            endpoint.set_server_config(None);
+        }
+    }
+
     async fn stop(&mut self) -> Result<()> {
-        ServerConnectionHelper::stop_server(&self.core, &self.is_running)
+        self.stop_accepting().await;
+        let result = ServerConnectionHelper::stop_server(&self.core, &self.is_running)
             .await
             .map_err(|e| {
                 crate::common::error::FlareError::connection_failed(format!(
                     "停止服务器失败: {}",
                     e
                 ))
-            })
+            });
+        // 在线连接都已关闭：关掉端点，释放 UDP 端口
+        if let Some(endpoint) = self.running_endpoint.take() {
+            endpoint.close(0u32.into(), SERVER_SHUTDOWN_REASON.as_bytes());
+        }
+        result
     }
 
     fn is_running(&self) -> bool {
@@ -258,8 +289,8 @@ async fn handle_quic_connection(
         }
     };
 
-    // 创建传输层连接
-    let transport = QUICTransport::new(send, recv);
+    // 创建传输层连接；带上连接句柄，停机时能在连接层面带原因关闭
+    let transport = QUICTransport::new(send, recv).with_connection(connection);
     let connection: Box<dyn Connection> = Box::new(transport);
 
     // 使用公共模块设置连接

@@ -151,6 +151,9 @@ pub struct ClientCore {
     negotiation_failure: Arc<StdMutex<Option<FlareError>>>,
     /// 我方已请求断开（disconnect_internal 中置位）：若随后读循环仍收到 KICK，不向观察者通知「被踢」，避免重复登录/协议竞速时误报
     disconnect_requested: Arc<AtomicBool>,
+    /// 上一条连接因服务端停机而断开（收到 CLOSE(SERVER_SHUTDOWN)，或断开原因是停机）：
+    /// 下一次重连先随机等一小段（见 [`crate::common::shutdown`]），新连接建立时清除。
+    server_shutdown: Arc<AtomicBool>,
     /// WASM: browser WebSocket 回调线程同步入队，由 `wait_for_negotiation`/drain 在 LocalSet 内处理；
     /// 每帧带着入队那一刻的协商状态（见 [`Self::handle_received_message`]）
     #[cfg(target_arch = "wasm32")]
@@ -185,6 +188,7 @@ impl ClientCore {
             negotiation_notify: Arc::new(Notify::new()),
             negotiation_failure: Arc::new(StdMutex::new(None)),
             disconnect_requested: Arc::new(AtomicBool::new(false)),
+            server_shutdown: Arc::new(AtomicBool::new(false)),
             #[cfg(target_arch = "wasm32")]
             wasm_inbound: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -224,6 +228,26 @@ impl ClientCore {
         self.disconnect_requested.store(value, Ordering::SeqCst);
     }
 
+    /// 重连前该等多久：上一条连接因服务端停机而断开时，在
+    /// [`SERVER_SHUTDOWN_RECONNECT_MIN`](crate::common::shutdown::SERVER_SHUTDOWN_RECONNECT_MIN)–
+    /// [`SERVER_SHUTDOWN_RECONNECT_MAX`](crate::common::shutdown::SERVER_SHUTDOWN_RECONNECT_MAX)
+    /// 之间随机取值（只用一次），否则用 `configured`。
+    ///
+    /// 停机是计划内的：按配置的间隔立即重试，只会撞上还没起来的实例；所有客户端同一刻重连，
+    /// 又会把刚起来的实例冲垮。
+    pub fn reconnect_delay(&self, configured: std::time::Duration) -> std::time::Duration {
+        if self.server_shutdown.swap(false, Ordering::SeqCst) {
+            crate::common::shutdown::server_shutdown_reconnect_delay()
+        } else {
+            configured
+        }
+    }
+
+    /// 上一条连接是否因服务端停机而断开（新连接建立后复位）。
+    pub fn closed_by_server_shutdown(&self) -> bool {
+        self.server_shutdown.load(Ordering::SeqCst)
+    }
+
     /// 我方是否已主动断开这个客户端。主动断开后它不能再被「发送前自动重连」拉起来：
     /// 上层（SDK）已经换了新客户端或登出，旧客户端复活会带着旧 token 建出一条上层不知道的连接。
     pub fn is_disconnect_requested(&self) -> bool {
@@ -242,6 +266,7 @@ impl ClientCore {
         self.negotiation_completed = Arc::clone(&shared.negotiation_completed);
         self.negotiation_notify = Arc::clone(&shared.negotiation_notify);
         self.negotiation_failure = Arc::clone(&shared.negotiation_failure);
+        self.server_shutdown = Arc::clone(&shared.server_shutdown);
         self.heartbeat_config = Arc::clone(&shared.heartbeat_config);
         self.heartbeat_probe_wake = Arc::clone(&shared.heartbeat_probe_wake);
     }
@@ -279,7 +304,7 @@ impl ClientCore {
         self.negotiation_completed.store(true, Ordering::SeqCst);
         self.negotiation_notify.notify_waiters();
         tracing::info!(
-            "[ClientCore] ✅ 协商完成，解析器已更新: 最终序列化方式={:?}, 最终压缩方式={:?}, 最终加密方式={:?}, negotiation_completed={}",
+            "[ClientCore] 协商完成，解析器已更新: 最终序列化方式={:?}, 最终压缩方式={:?}, 最终加密方式={:?}, negotiation_completed={}",
             format,
             compression_clone,
             encryption_clone,
@@ -464,7 +489,7 @@ impl ClientCore {
             let mut pending = self.pending_map.lock().await;
             if let Some(sender) = pending.remove(&frame.message_id) {
                 tracing::debug!(
-                    "[ClientCore] ✅ 匹配到等待的响应: message_id={}",
+                    "[ClientCore] 匹配到等待的响应: message_id={}",
                     frame.message_id
                 );
                 if sender.send(frame.clone()).is_err() {
@@ -475,14 +500,14 @@ impl ClientCore {
                     false // 发送失败，继续处理
                 } else {
                     tracing::debug!(
-                        "[ClientCore] ✅ 响应已发送到等待通道: message_id={}",
+                        "[ClientCore] 响应已发送到等待通道: message_id={}",
                         frame.message_id
                     );
                     true // 发送成功，这是等待的响应，不需要继续处理
                 }
             } else {
                 tracing::debug!(
-                    "[ClientCore] ❌ 未找到等待的响应: message_id={}",
+                    "[ClientCore] 未找到等待的响应: message_id={}",
                     frame.message_id
                 );
                 false // 不是等待的响应，继续处理
@@ -562,6 +587,11 @@ impl ClientCore {
                 self.record_connect_rejection(sys_cmd);
                 true
             }
+            SystemCommandType::Close => {
+                self.handle_close_command(frame, sys_cmd, negotiated_at_receipt)
+                    .await;
+                true
+            }
             _ => false,
         }
     }
@@ -602,7 +632,7 @@ impl ClientCore {
         match self.handle_connect_ack(frame) {
             Ok((format, compression, encryption)) => {
                 tracing::info!(
-                    "[ClientCore] ✅ 收到 CONNECT_ACK: 服务端确定的序列化方式={:?}, 压缩方式={:?}, 加密方式={:?}",
+                    "[ClientCore] 收到 CONNECT_ACK: 服务端确定的序列化方式={:?}, 压缩方式={:?}, 加密方式={:?}",
                     format,
                     compression,
                     encryption
@@ -613,14 +643,14 @@ impl ClientCore {
                     self.update_parser(format, compression.clone(), encryption.clone())
                         .await;
                     tracing::info!(
-                        "[ClientCore] ✅ 解析器已更新为协商后的格式: {:?}, 压缩: {:?}, 加密: {:?}",
+                        "[ClientCore] 解析器已更新为协商后的格式: {:?}, 压缩: {:?}, 加密: {:?}",
                         format,
                         compression,
                         encryption
                     );
                 } else {
                     tracing::info!(
-                        "[ClientCore] ℹ️  强制模式：继续使用客户端强制指定的格式: {:?}, 压缩: {:?}",
+                        "[ClientCore] 强制模式：继续使用客户端强制指定的格式: {:?}, 压缩: {:?}",
                         self.config.get_serialization_format(),
                         self.config.get_compression()
                     );
@@ -667,7 +697,7 @@ impl ClientCore {
         };
 
         let reason = sys_cmd.message.clone();
-        tracing::warn!("[ClientCore] ⚠️  收到被踢消息: {}", reason);
+        tracing::warn!("[ClientCore] 收到被踢消息: {}", reason);
 
         // 解析被踢原因（从 metadata 中获取详细信息）
         let kick_reason = Self::parse_kick_reason(&reason, sys_cmd);
@@ -705,6 +735,63 @@ impl ClientCore {
         }
     }
 
+    /// 处理服务端下发的 CLOSE：服务端要关闭这条连接（典型是停机，原因为 `SERVER_SHUTDOWN`）。
+    ///
+    /// 协商完成后收到：以类型化原因自行断开，观察者收到的断开原因形如
+    /// `SERVER_SHUTDOWN: server closed the connection`，上层据此调整重连节奏（停机后先随机等一小段，
+    /// 而不是按错误立即重试）；不必等服务端在宽限期满后强行关闭。协商完成前收到：按服务端拒绝 CONNECT
+    /// 登记原因（metadata `code` 为 `SERVICE_UNAVAILABLE`，可重试）。
+    async fn handle_close_command(
+        &self,
+        frame: &Frame,
+        sys_cmd: &crate::common::protocol::SystemCommand,
+        negotiated_at_receipt: bool,
+    ) {
+        if let Some(ref handler) = self.event_handler
+            && let Err(e) = handler
+                .handle_system_command(SystemCommandType::Close, frame)
+                .await
+        {
+            tracing::warn!("[ClientCore] 事件处理器处理 CLOSE 失败: {}", e);
+        }
+
+        if crate::common::shutdown::is_server_shutdown_close(sys_cmd) {
+            self.server_shutdown.store(true, Ordering::SeqCst);
+        }
+        if !negotiated_at_receipt {
+            self.record_connect_rejection(sys_cmd);
+            return;
+        }
+
+        let reason = Self::close_reason(sys_cmd);
+        tracing::info!(reason = %reason, "[ClientCore] server is closing the connection");
+        let Some(connection) = self.take_client_connection() else {
+            tracing::debug!("[ClientCore] CLOSE received without an active connection");
+            return;
+        };
+        let detail = format!("{reason}: server closed the connection");
+        let mut conn = connection.lock().await;
+        if let Err(e) = conn.close_with_reason(&detail).await {
+            tracing::debug!("[ClientCore] closing after server CLOSE failed: {}", e);
+        }
+    }
+
+    /// CLOSE 的原因：`message`，没有就用 metadata `reason`，都没有为 `CLOSE`。
+    fn close_reason(sys_cmd: &crate::common::protocol::SystemCommand) -> String {
+        let message = sys_cmd.message.trim();
+        if !message.is_empty() {
+            return message.to_string();
+        }
+        sys_cmd
+            .metadata
+            .get("reason")
+            .and_then(|reason| std::str::from_utf8(reason).ok())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("CLOSE")
+            .to_string()
+    }
+
     /// 解析被踢原因（内部辅助函数）
     fn parse_kick_reason(
         base_reason: &str,
@@ -729,12 +816,12 @@ impl ClientCore {
             if let Err(e) = conn.close().await {
                 tracing::error!("[ClientCore] 断开连接失败: {}", e);
             } else {
-                tracing::info!("[ClientCore] ✅ 已主动断开连接（被踢）");
+                tracing::info!("[ClientCore] 已主动断开连接（被踢）");
             }
         } else {
             // 如果 client_connection 未设置，记录警告但不阻塞
             // 连接会在底层传输层自动关闭
-            tracing::warn!("[ClientCore] ⚠️  客户端连接未设置，等待底层传输层关闭连接");
+            tracing::warn!("[ClientCore] 客户端连接未设置，等待底层传输层关闭连接");
         }
     }
 
@@ -860,12 +947,17 @@ impl ClientCore {
                 self.state_manager.set_connected();
                 if !already_connected {
                     self.reset_negotiation_state();
+                    self.server_shutdown.store(false, Ordering::SeqCst);
                 }
             }
             ConnectionEvent::Disconnected(reason) => {
                 // 服务端在 CONNECT_ACK 之前就关掉了连接：立即唤醒等协商的一方，别让它干等 10s 超时。
                 // 原因以服务端下发的 ERROR 帧为准（租户不可用、鉴权失败……）；没有原因就是连接失败。
                 let closed_during_negotiation = self.closed_during_negotiation();
+                // WebSocket 关闭帧、QUIC 应用关闭带来的停机原因（没收到或不认得 CLOSE 帧时）
+                if crate::common::shutdown::is_server_shutdown_reason(reason) {
+                    self.server_shutdown.store(true, Ordering::SeqCst);
+                }
                 self.state_manager.set_disconnected();
                 self.negotiation_completed.store(false, Ordering::SeqCst);
                 // 心跳绑在这条连接上：留着它，它会在死连接上继续发 PING，失败时再关一次连接并误报，
@@ -1113,6 +1205,7 @@ impl Clone for ClientCore {
             negotiation_notify: Arc::clone(&self.negotiation_notify),
             negotiation_failure: Arc::clone(&self.negotiation_failure),
             disconnect_requested: Arc::clone(&self.disconnect_requested),
+            server_shutdown: Arc::clone(&self.server_shutdown),
             #[cfg(target_arch = "wasm32")]
             wasm_inbound: Arc::clone(&self.wasm_inbound),
         }
@@ -1195,6 +1288,46 @@ mod client_core_tests {
             cloned.heartbeat_effective_interval(),
             Duration::from_secs(28)
         );
+    }
+
+    /// 服务端停机断开后，下一次重连先在抖动窗口里随机等一段（只用一次）；新连接建立后复位。
+    /// 其余断开照常按配置的间隔。
+    #[tokio::test]
+    async fn reconnect_after_a_server_shutdown_waits_a_jittered_pause_once() {
+        use crate::common::shutdown::{
+            SERVER_SHUTDOWN_RECONNECT_MAX, SERVER_SHUTDOWN_RECONNECT_MIN,
+        };
+        let configured = Duration::from_millis(100);
+        let core = ClientCore::new(&ClientConfig::default());
+
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "WebSocket connection closed by peer".to_string(),
+        ));
+        assert!(!core.closed_by_server_shutdown());
+        assert_eq!(core.reconnect_delay(configured), configured);
+
+        for reason in [
+            "SERVER_SHUTDOWN",
+            "SERVER_SHUTDOWN: server closed the connection",
+        ] {
+            core.handle_connection_event(&ConnectionEvent::Disconnected(reason.to_string()));
+            assert!(core.closed_by_server_shutdown(), "{reason}");
+            let delay = core.reconnect_delay(configured);
+            assert!(
+                (SERVER_SHUTDOWN_RECONNECT_MIN..=SERVER_SHUTDOWN_RECONNECT_MAX).contains(&delay),
+                "{reason}: {delay:?}"
+            );
+            // 只用一次
+            assert_eq!(core.reconnect_delay(configured), configured);
+        }
+
+        // 新连接建立即复位
+        core.handle_connection_event(&ConnectionEvent::Disconnected(
+            "SERVER_SHUTDOWN".to_string(),
+        ));
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        assert!(!core.closed_by_server_shutdown());
+        assert_eq!(core.reconnect_delay(configured), configured);
     }
 
     #[test]

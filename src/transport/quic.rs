@@ -21,6 +21,18 @@ pub struct QUICTransport {
     is_closed: Arc<AtomicBool>,
     /// 读任务等第一个观察者挂上才开始读（本端关闭或传输对象释放时也放行，让它退出）。
     reader_gate: Arc<Notify>,
+    /// 流所在的 QUIC 连接（可选）。有它时 [`Connection::close_going_away`] 以应用错误码 0 和原因
+    /// 关闭整条连接，对端读到的是 `ApplicationClosed` 与原因，而不只是流结束。
+    connection: Option<quinn::Connection>,
+}
+
+/// 读流失败的两类结局。
+enum ReadFailure {
+    /// 对端在连接层面结束了连接（应用关闭、传输层关闭、空闲超时、无状态重置）、本端已关闭连接，
+    /// 或对端重置了这条流：这是断开，带上可读的原因。
+    Closed(String),
+    /// 真正的错误：协议违例、版本不符、帧长度非法、读到一半流就结束等。
+    Error(FlareError),
 }
 
 impl QUICTransport {
@@ -57,7 +69,14 @@ impl QUICTransport {
             last_active,
             is_closed,
             reader_gate,
+            connection: None,
         }
+    }
+
+    /// 记下流所在的 QUIC 连接，让 [`Connection::close_going_away`] 能在连接层面关闭并带上原因。
+    pub fn with_connection(mut self, connection: quinn::Connection) -> Self {
+        self.connection = Some(connection);
+        self
     }
 
     /// 接收任务：使用提供的 RecvStream 接收消息
@@ -113,14 +132,21 @@ impl QUICTransport {
                     );
                     break;
                 }
-                Err(e) => {
-                    // 读取失败（含连接级关闭，如对端关连接、空闲超时），发送错误事件
-                    debug!("[QUIC Transport] Read error: {}", e);
+                Err(ReadFailure::Closed(reason)) => {
+                    // 连接级关闭（对端关连接、空闲超时、无状态重置）或流被重置：这是断开，不是错误。
+                    // 以前一律报 Error，客户端把服务端停机、对端重启都当成故障处理。
+                    debug!("[QUIC Transport] Connection closed: {}", reason);
                     Self::mark_closed_by_peer(&is_closed, &send_stream);
                     Self::notify_observers_and_clear(
                         &observers_arc,
-                        &ConnectionEvent::Error(FlareError::io(e.to_string())),
+                        &ConnectionEvent::Disconnected(reason),
                     );
+                    break;
+                }
+                Err(ReadFailure::Error(e)) => {
+                    debug!("[QUIC Transport] Read error: {}", e);
+                    Self::mark_closed_by_peer(&is_closed, &send_stream);
+                    Self::notify_observers_and_clear(&observers_arc, &ConnectionEvent::Error(e));
                     break;
                 }
             }
@@ -148,7 +174,9 @@ impl QUICTransport {
     /// 从流中读取完整消息（使用长度前缀）
     ///
     /// 消息格式：4字节长度前缀（u32，网络字节序）+ 消息数据
-    async fn read_stream(recv: &mut quinn::RecvStream) -> Result<Vec<u8>> {
+    async fn read_stream(
+        recv: &mut quinn::RecvStream,
+    ) -> std::result::Result<Vec<u8>, ReadFailure> {
         // 首先读取长度前缀（4字节）
         let mut length_buf = [0u8; 4];
         let mut length_bytes_read = 0;
@@ -163,16 +191,16 @@ impl QUICTransport {
                         return Ok(Vec::new());
                     } else {
                         // 部分读取了长度前缀，这是错误
-                        return Err(FlareError::io(
+                        return Err(ReadFailure::Error(FlareError::io(
                             "Stream closed while reading length prefix".to_string(),
-                        ));
+                        )));
                     }
                 }
                 Ok(Some(n)) => {
                     length_bytes_read += n;
                 }
                 Err(e) => {
-                    return Err(FlareError::io(e.to_string()));
+                    return Err(Self::classify_read_error(e));
                 }
             }
         }
@@ -186,10 +214,10 @@ impl QUICTransport {
 
         if length > 10 * 1024 * 1024 {
             // 限制最大消息大小为 10MB
-            return Err(FlareError::io(format!(
+            return Err(ReadFailure::Error(FlareError::io(format!(
                 "Message too large: {} bytes",
                 length
-            )));
+            ))));
         }
 
         // 读取完整的消息数据
@@ -200,21 +228,57 @@ impl QUICTransport {
             match recv.read(&mut buf[bytes_read..]).await {
                 Ok(Some(0)) | Ok(None) => {
                     // EOF，但还没读完所有数据
-                    return Err(FlareError::io(format!(
+                    return Err(ReadFailure::Error(FlareError::io(format!(
                         "Stream closed while reading message: expected {} bytes, got {}",
                         length, bytes_read
-                    )));
+                    ))));
                 }
                 Ok(Some(n)) => {
                     bytes_read += n;
                 }
                 Err(e) => {
-                    return Err(FlareError::io(e.to_string()));
+                    return Err(Self::classify_read_error(e));
                 }
             }
         }
 
         Ok(buf)
+    }
+
+    /// 区分连接级关闭与真正的读错误。
+    ///
+    /// 对端以应用错误关闭连接时，原因是非空 UTF-8 就原样作为断开原因（例如服务端停机时的
+    /// `SERVER_SHUTDOWN`），上层据此识别类型化原因。
+    fn classify_read_error(error: quinn::ReadError) -> ReadFailure {
+        use quinn::{ConnectionError, ReadError};
+        match &error {
+            ReadError::ConnectionLost(ConnectionError::ApplicationClosed(close)) => {
+                let reason = std::str::from_utf8(&close.reason)
+                    .ok()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty());
+                ReadFailure::Closed(match reason {
+                    Some(reason) => reason.to_string(),
+                    None => format!(
+                        "QUIC connection closed by peer (application code {})",
+                        close.error_code
+                    ),
+                })
+            }
+            ReadError::ConnectionLost(
+                lost @ (ConnectionError::ConnectionClosed(_)
+                | ConnectionError::TimedOut
+                | ConnectionError::Reset
+                | ConnectionError::LocallyClosed),
+            ) => ReadFailure::Closed(format!("QUIC connection closed: {lost}")),
+            ReadError::Reset(code) => {
+                ReadFailure::Closed(format!("QUIC stream reset by peer (code {code})"))
+            }
+            ReadError::ConnectionLost(lost) => {
+                ReadFailure::Error(FlareError::io(format!("connection lost: {lost}")))
+            }
+            _ => ReadFailure::Error(FlareError::io(error.to_string())),
+        }
     }
 
     fn notify_observers(observers_arc: &Arc<Mutex<Vec<ArcObserver>>>, event: &ConnectionEvent) {
@@ -320,6 +384,16 @@ impl Connection for QUICTransport {
         close_result
     }
 
+    /// 结束发送流后，有连接句柄时以应用错误码 0 和 `reason` 关闭整条连接：对端读到
+    /// `ApplicationClosed` 与原因，而不是只看到流结束。
+    async fn close_going_away(&mut self, reason: &str) -> Result<()> {
+        let result = self.close_with_reason(reason).await;
+        if let Some(connection) = &self.connection {
+            connection.close(0u32.into(), reason.as_bytes());
+        }
+        result
+    }
+
     fn last_active_time(&self) -> std::time::Instant {
         self.last_active
             .lock()
@@ -343,5 +417,77 @@ impl Drop for QUICTransport {
         // 没关就被释放、且从没挂过观察者的流，读任务还在等：放它退出，别连同接收流一起泄漏。
         self.is_closed.store(true, Ordering::SeqCst);
         self.reader_gate.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn::{ApplicationClose, ConnectionError, ReadError, VarInt};
+
+    fn closed(failure: ReadFailure) -> Option<String> {
+        match failure {
+            ReadFailure::Closed(reason) => Some(reason),
+            ReadFailure::Error(_) => None,
+        }
+    }
+
+    /// 对端以应用错误关闭连接是断开：原因原样带上（服务端停机时是 SERVER_SHUTDOWN）。
+    #[test]
+    fn application_close_is_a_disconnect_with_the_peer_reason() {
+        let failure = QUICTransport::classify_read_error(ReadError::ConnectionLost(
+            ConnectionError::ApplicationClosed(ApplicationClose {
+                error_code: VarInt::from_u32(0),
+                reason: bytes::Bytes::from_static(b"SERVER_SHUTDOWN"),
+            }),
+        ));
+        let reason = closed(failure).expect("application close is a disconnect");
+        assert_eq!(reason, "SERVER_SHUTDOWN");
+        assert!(crate::common::is_server_shutdown_reason(&reason));
+
+        let failure = QUICTransport::classify_read_error(ReadError::ConnectionLost(
+            ConnectionError::ApplicationClosed(ApplicationClose {
+                error_code: VarInt::from_u32(7),
+                reason: bytes::Bytes::new(),
+            }),
+        ));
+        assert_eq!(
+            closed(failure).as_deref(),
+            Some("QUIC connection closed by peer (application code 7)")
+        );
+    }
+
+    /// 空闲超时、无状态重置、本端已关闭、对端重置流都是断开，不是错误。
+    #[test]
+    fn connection_level_closes_are_disconnects() {
+        for error in [
+            ReadError::ConnectionLost(ConnectionError::TimedOut),
+            ReadError::ConnectionLost(ConnectionError::Reset),
+            ReadError::ConnectionLost(ConnectionError::LocallyClosed),
+            ReadError::Reset(VarInt::from_u32(3)),
+        ] {
+            let description = error.to_string();
+            assert!(
+                closed(QUICTransport::classify_read_error(error)).is_some(),
+                "{description} must be reported as a disconnect"
+            );
+        }
+    }
+
+    /// 协议违例、版本不符、流状态错误仍是错误。
+    #[test]
+    fn protocol_failures_stay_errors() {
+        for error in [
+            ReadError::ConnectionLost(ConnectionError::VersionMismatch),
+            ReadError::ConnectionLost(ConnectionError::CidsExhausted),
+            ReadError::ClosedStream,
+            ReadError::IllegalOrderedRead,
+        ] {
+            let description = error.to_string();
+            assert!(
+                closed(QUICTransport::classify_read_error(error)).is_none(),
+                "{description} must stay an error"
+            );
+        }
     }
 }

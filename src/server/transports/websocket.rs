@@ -6,7 +6,7 @@ use crate::common::error::Result;
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
 use crate::server::transports::Server;
-use crate::server::transports::common::ServerConnectionHelper;
+use crate::server::transports::common::{AcceptGate, ServerConnectionHelper};
 use crate::server::transports::server_core::ServerCore;
 use crate::transport::connection::Connection;
 use crate::transport::websocket::WebSocketTransport;
@@ -25,6 +25,8 @@ pub struct WebSocketServer {
     config: ServerConfig,
     core: Arc<ServerCore>,
     is_running: Arc<Mutex<bool>>,
+    /// 关闭后 accept 循环退出并释放监听端口；每次 start 换一个新的
+    accept_gate: AcceptGate,
 }
 
 impl WebSocketServer {
@@ -44,6 +46,7 @@ impl WebSocketServer {
             config,
             core,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         }
     }
 
@@ -53,6 +56,7 @@ impl WebSocketServer {
             config,
             core,
             is_running: Arc::new(Mutex::new(false)),
+            accept_gate: AcceptGate::new(),
         }
     }
 }
@@ -72,6 +76,8 @@ impl Server for WebSocketServer {
         })?;
 
         *self.is_running.lock().await = true;
+        self.accept_gate = AcceptGate::new();
+        let mut accept_stopped = self.accept_gate.watch();
 
         // 启动心跳检测
         self.core.start_heartbeat(&self.config);
@@ -85,8 +91,15 @@ impl Server for WebSocketServer {
 
         tokio::spawn(async move {
             debug!("[WebSocketServer] 开始监听连接");
+            // 停止接受新连接时立即退出并释放监听端口。以前循环停在 accept 上，停机后还会再接一条
+            // 连接，监听端口也一直占着，直到下一条连接到来。
             while *is_running.lock().await {
-                match listener.accept().await {
+                let accepted = tokio::select! {
+                    biased;
+                    () = accept_stopped.closed() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                match accepted {
                     Ok((stream, _addr)) => {
                         debug!("[WebSocketServer] 收到新连接");
                         let manager_clone = Arc::clone(&manager);
@@ -125,7 +138,12 @@ impl Server for WebSocketServer {
         Ok(())
     }
 
+    async fn stop_accepting(&mut self) {
+        self.accept_gate.close();
+    }
+
     async fn stop(&mut self) -> Result<()> {
+        self.accept_gate.close();
         ServerConnectionHelper::stop_server(&self.core, &self.is_running)
             .await
             .map_err(|e| {

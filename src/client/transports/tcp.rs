@@ -157,7 +157,8 @@ impl TCPClient {
 
         self.core.state_manager.start_connecting();
         self.reconnect_attempts += 1;
-        sleep(self.config.reconnect_interval).await;
+        // 上一条连接因服务端停机断开时改为短暂的随机等待
+        sleep(self.core.reconnect_delay(self.config.reconnect_interval)).await;
 
         self.connection_prepared = false;
         if let Some(conn) = self.connection.take() {

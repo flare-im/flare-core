@@ -27,9 +27,9 @@ impl ClientMessageObserver {
 }
 
 impl ClientMessageObserver {
-    /// 协商完成前读到的帧只可能是 CONNECT_ACK 或拒绝 CONNECT 的 ERROR。ERROR 必须在读循环里
-    /// 同步登记：服务端发完它紧接着就关连接，关连接事件是同步处理的，而帧的处理在另一个任务里，
-    /// 晚一步就只剩一个没有原因的「连接被关」。
+    /// 协商完成前读到的帧只可能是 CONNECT_ACK、拒绝 CONNECT 的 ERROR，或服务端停机时的 CLOSE。
+    /// ERROR 与 CLOSE 必须在读循环里同步登记：服务端发完它紧接着就关连接，关连接事件是同步处理的，
+    /// 而帧的处理在另一个任务里，晚一步就只剩一个没有原因的「连接被关」。
     fn record_pre_negotiation_rejection(&self, data: &[u8]) {
         use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
         use crate::common::protocol::flare::core::commands::command::Type;
@@ -38,7 +38,8 @@ impl ClientMessageObserver {
         if let Ok(frame) = PRE_NEGOTIATION_PARSER.parse(data)
             && let Some(Type::System(system)) =
                 frame.command.as_ref().and_then(|c| c.r#type.as_ref())
-            && system.r#type == SystemType::Error as i32
+            && (system.r#type == SystemType::Error as i32
+                || system.r#type == SystemType::Close as i32)
         {
             self.core.record_connect_rejection(system);
         }
@@ -116,7 +117,7 @@ impl ClientConnectionHelper {
         // 如果协商未完成，记录警告（但允许发送，因为可能是系统消息）
         if !negotiation_completed {
             tracing::warn!(
-                "[ClientConnectionHelper] ⚠️  协商未完成但尝试发送消息: message_id={}, format={:?}, compression={:?}, encryption={:?}",
+                "[ClientConnectionHelper] 协商未完成但尝试发送消息: message_id={}, format={:?}, compression={:?}, encryption={:?}",
                 frame.message_id,
                 parser.default_format(),
                 parser.default_compression(),

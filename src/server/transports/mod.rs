@@ -93,6 +93,12 @@ pub trait Server: Send + Sync {
     /// 停止成功返回 `Ok(())`，失败返回错误
     async fn stop(&mut self) -> Result<()>;
 
+    /// 停止接受新连接，已建立的连接保持不动。
+    ///
+    /// 停机时先关入口，再通知在线连接：否则收到停机通知、随后重连的客户端可能又连到这个正在退出的
+    /// 实例上。默认什么都不做；[`Self::stop`] 本身也会先停止接受新连接。
+    async fn stop_accepting(&mut self) {}
+
     /// 检查服务器运行状态
     ///
     /// # 返回

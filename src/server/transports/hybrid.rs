@@ -4,6 +4,7 @@
 //! 统一管理连接和心跳检测，简化服务器实现
 
 use super::Server;
+use super::common::ServerConnectionHelper;
 use super::server_core::ServerCore;
 use crate::common::config_types::TransportProtocol;
 use crate::common::error::Result;
@@ -309,6 +310,18 @@ impl Server for HybridServer {
         // 停止心跳检测
         if let Some(ref mut core) = self.core {
             core.stop_heartbeat();
+        }
+
+        // 先关所有协议的入口，再统一处理在线连接：收到停机通知的客户端不会又连到某个还开着的入口上
+        for server in &self.servers {
+            server.lock().await.stop_accepting().await;
+        }
+        if let Some(core) = &self.core {
+            ServerConnectionHelper::shutdown_connections(
+                core,
+                crate::common::shutdown::SERVER_SHUTDOWN_CLOSE_GRACE,
+            )
+            .await;
         }
 
         // 停止所有服务器

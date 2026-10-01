@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message, error::ProtocolError};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -300,6 +302,43 @@ impl WebSocketTransport {
         notify_connection_observers_and_clear(&self.observers, event, "websocket observers");
     }
 
+    /// 关闭连接并以 `reason` 通知观察者；`frame` 为关闭帧要带的关闭码与原因（`None` 不带）。
+    async fn close_inner(&mut self, reason: &str, frame: Option<CloseFrame>) -> Result<()> {
+        // 标记为已关闭：读任务此后读到的帧不再上报
+        let was_closed = self.is_closed.swap(true, Ordering::SeqCst);
+        // 从没挂过观察者的连接（如协议竞速落选的连接），读任务还在等：放它退出
+        self.reader_gate.notify_one();
+
+        let close_result = match &mut self.sink {
+            WebSocketSink::Tls(sink) => {
+                let mut s = sink.lock().await;
+                Self::close_sink(&mut *s, frame).await
+            }
+            WebSocketSink::Plain(sink) => {
+                let mut s = sink.lock().await;
+                Self::close_sink(&mut *s, frame).await
+            }
+        };
+        self.notify_observers_and_clear(&ConnectionEvent::Disconnected(reason.to_string()));
+        // 对端先关闭时读任务已经结束了连接，那时再关报的错不算关闭失败。
+        if was_closed { Ok(()) } else { close_result }
+    }
+
+    /// 先发带关闭码的关闭帧（如有），再结束发送端。
+    async fn close_sink<S>(sink: &mut S, frame: Option<CloseFrame>) -> Result<()>
+    where
+        S: futures_util::Sink<Message, Error = WsError> + Unpin,
+    {
+        if let Some(frame) = frame {
+            sink.send(Message::Close(Some(frame)))
+                .await
+                .map_err(|e| FlareError::connection_failed(e.to_string()))?;
+        }
+        sink.close()
+            .await
+            .map_err(|e| FlareError::connection_failed(e.to_string()))
+    }
+
     /// 发送 WebSocket 协议层的 PONG 响应 (TLS)
     #[allow(clippy::type_complexity)]
     async fn send_pong_response_tls(
@@ -442,28 +481,17 @@ impl Connection for WebSocketTransport {
     }
 
     async fn close_with_reason(&mut self, reason: &str) -> Result<()> {
-        // 标记为已关闭：读任务此后读到的帧不再上报
-        let was_closed = self.is_closed.swap(true, Ordering::SeqCst);
-        // 从没挂过观察者的连接（如协议竞速落选的连接），读任务还在等：放它退出
-        self.reader_gate.notify_one();
+        self.close_inner(reason, None).await
+    }
 
-        let close_result = match &mut self.sink {
-            WebSocketSink::Tls(sink) => {
-                let mut s = sink.lock().await;
-                s.close()
-                    .await
-                    .map_err(|e| FlareError::connection_failed(e.to_string()))
-            }
-            WebSocketSink::Plain(sink) => {
-                let mut s = sink.lock().await;
-                s.close()
-                    .await
-                    .map_err(|e| FlareError::connection_failed(e.to_string()))
-            }
+    /// 关闭帧带 1001（Going Away）与 `reason`。不带关闭码时对端只能看到 1005（没有状态码），
+    /// 分不清是服务端停机还是别的原因。
+    async fn close_going_away(&mut self, reason: &str) -> Result<()> {
+        let frame = CloseFrame {
+            code: CloseCode::Away,
+            reason: reason.to_string().into(),
         };
-        self.notify_observers_and_clear(&ConnectionEvent::Disconnected(reason.to_string()));
-        // 对端先关闭时读任务已经结束了连接，那时再关报的错不算关闭失败。
-        if was_closed { Ok(()) } else { close_result }
+        self.close_inner(reason, Some(frame)).await
     }
 
     fn last_active_time(&self) -> std::time::Instant {

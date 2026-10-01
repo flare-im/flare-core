@@ -62,6 +62,16 @@ pub trait Connection: Send + Sync {
         self.close().await
     }
 
+    /// Closes the connection because this endpoint is going away (for example the server is
+    /// shutting down) and tells the peer `reason` where the transport can carry one: WebSocket
+    /// sends close code 1001 (Going Away) with `reason`, QUIC closes the connection with
+    /// application error code 0 and `reason`. Observers receive `Disconnected(reason)`.
+    ///
+    /// The default falls back to [`Self::close_with_reason`].
+    async fn close_going_away(&mut self, reason: &str) -> Result<()> {
+        self.close_with_reason(reason).await
+    }
+
     /// Returns last activity time (send/receive). Used for heartbeat and idle detection.
     fn last_active_time(&self) -> MonotonicInstant;
 

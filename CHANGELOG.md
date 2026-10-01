@@ -116,6 +116,41 @@
   ERROR。单条连接的传输错误（QUIC 对端直接关连接、读流出错）改记 warn：客户端进程被杀、网络
   切换都会走到这里，不是服务端故障。
 
+- 服务端：WebSocket、TCP、QUIC 服务端停止后立即退出 accept 循环。此前循环停在 accept 上，
+  停止后还会再接一条连接，WebSocket 与 TCP 的监听端口一直占着，直到下一条连接到来；QUIC 端点
+  不再接受新握手，停止的最后关闭端点。
+- 服务端：连接移出连接表（踢线、客户端断开、CONNECT 被拒、停机）之后，本连接入站队列里剩下的
+  非 CONNECT 帧直接丢弃。此前它们照常出队，按协商前的格式解析后交给业务层：被踢下线、租户被停用
+  的连接排在队列里的 MESSAGE 仍会被处理。
+- QUIC 传输：对端在连接层面结束连接（应用关闭、传输层关闭、空闲超时、无状态重置）、本端已关闭
+  连接或对端重置流时上报 `Disconnected`，应用关闭带的非空原因原样作为断开原因（例如
+  `SERVER_SHUTDOWN`）；协议违例、版本不符、帧长度非法等仍是 `Error`。此前一律报 `Error`，
+  客户端把服务端停机、对端重启都当成故障，只监听断开的上层不会重连；服务端业务层对这几类关闭
+  只收到 `on_disconnect`，不再先收到 `on_error`。
+- 服务端与客户端日志去掉装饰用的 emoji。
+
+### 新增
+
+- 服务端停机的关闭约定（`common::shutdown`）：停止前给每条在线连接下发 CLOSE 系统命令，
+  `message` 与 metadata `reason` 为 `SERVER_SHUTDOWN`，metadata `code` 为
+  `SERVICE_UNAVAILABLE`；最多等 `SERVER_SHUTDOWN_CLOSE_GRACE`（1 s）让客户端自行断开，期满
+  还在的连接由服务端关闭：WebSocket 关闭帧为 1001（Going Away）、原因 `SERVER_SHUTDOWN`，
+  QUIC 以应用错误码 0 与同一原因关闭连接。此前停机直接关连接，WebSocket 客户端看到的是 1005，
+  分不清停机与故障。不认得 CLOSE 的旧客户端把它当作未知系统帧忽略，由服务端在宽限期满后关闭，
+  行为与此前相同。新增 `server_shutdown_close`、`server_shutdown_close_frame`、
+  `is_server_shutdown_close`、`is_server_shutdown_reason`、`server_shutdown_reconnect_delay`
+  及相关常量。
+- 客户端收到 CLOSE 后以类型化原因自行断开（断开原因形如
+  `SERVER_SHUTDOWN: server closed the connection`）；断开原因是停机时，下一次重连（发送前的
+  惰性重连与 `try_reconnect`）先在 1–5 s 之间随机等一段，只用一次，新连接建立后复位，而不是按
+  配置的间隔立即重试。新增 `ClientCore::reconnect_delay` 与 `ClientCore::closed_by_server_shutdown`。
+- `Connection::close_going_away`（默认回落到 `close_with_reason`）：WebSocket 关闭帧带 1001
+  与原因；`QUICTransport::with_connection` 记下流所在的连接后，以应用错误码 0 与原因关闭整条
+  连接。
+- `Server::stop_accepting`（默认什么都不做）：停止接受新连接、保留已建立的连接。WebSocket、
+  TCP、QUIC 服务端实现了它，`stop` 也先停止接受新连接；`HybridServer::stop` 先关所有协议的入口，
+  再统一通知在线连接。
+
 ### 其他
 
 - 每个示例在 `Cargo.toml` 里声明所需特性（`required-features`）。关掉默认特性构建示例时，
