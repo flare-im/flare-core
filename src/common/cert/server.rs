@@ -140,7 +140,7 @@ fn ensure_certificates_exist() -> Result<()> {
             FlareError::protocol_error(format!("Failed to write private key file: {}", e))
         })?;
 
-        tracing::info!("✅ 自动生成证书: certs/server.crt 和 certs/server.key");
+        tracing::info!("自动生成证书: certs/server.crt 和 certs/server.key");
     }
 
     Ok(())

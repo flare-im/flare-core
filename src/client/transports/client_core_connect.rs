@@ -264,7 +264,7 @@ impl ClientCore {
         if let Some(client_conn) = client_conn_opt {
             let mut conn = client_conn.lock().await;
             conn.send(&data).await?;
-            tracing::debug!("[ClientCore] ✅ 已发送 NEGOTIATION_READY 命令");
+            tracing::debug!("[ClientCore] 已发送 NEGOTIATION_READY 命令");
             Ok(())
         } else {
             Err(FlareError::connection_failed(

@@ -270,7 +270,7 @@ impl ServerMessageWrapper {
                             }
                         } else {
                             tracing::debug!(
-                                "[ServerMessageWrapper] ✅ 协商已确认: connection_id={}",
+                                "[ServerMessageWrapper] 协商已确认: connection_id={}",
                                 conn_id
                             );
                         }
@@ -494,12 +494,12 @@ impl ConnectionHandler for ServerMessageWrapper {
     }
 
     async fn on_connect(&self, connection_id: &str) -> crate::common::error::Result<()> {
-        info!("[ServerMessageWrapper] ✅ 新连接: {}", connection_id);
+        info!("[ServerMessageWrapper] 新连接: {}", connection_id);
         self.event_handler.on_connect(connection_id).await
     }
 
     async fn on_disconnect(&self, connection_id: &str) -> crate::common::error::Result<()> {
-        info!("[ServerMessageWrapper] ❌ 连接断开: {}", connection_id);
+        info!("[ServerMessageWrapper] 连接断开: {}", connection_id);
 
         // 通知事件处理器
         let _ = self.event_handler.on_disconnect(connection_id, None).await;

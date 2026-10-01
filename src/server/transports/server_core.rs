@@ -566,7 +566,7 @@ impl ServerCore {
         let final_compression = negotiation_parser.default_compression();
         let final_encryption = negotiation_parser.default_encryption();
         debug!(
-            "[ServerCore] ✅ 协商完成: connection_id={}, 最终序列化方式={:?}, 最终压缩方式={:?},最终加密方式={:?}",
+            "[ServerCore] 协商完成: connection_id={}, 最终序列化方式={:?}, 最终压缩方式={:?},最终加密方式={:?}",
             connection_id, final_format, final_compression, final_encryption
         );
 
@@ -787,7 +787,7 @@ impl ServerCore {
         }
 
         debug!(
-            "[ServerCore] ✅ 协商最终完成（CONNECT_ACK 已发送）: connection_id={}",
+            "[ServerCore] 协商最终完成（CONNECT_ACK 已发送）: connection_id={}",
             connection_id
         );
     }
@@ -872,11 +872,11 @@ impl ServerCore {
         final_encryption: EncryptionAlgorithm,
     ) {
         debug!(
-            "[ServerCore] 📥 收到 CONNECT 消息: connection_id={}",
+            "[ServerCore] 收到 CONNECT 消息: connection_id={}",
             connection_id
         );
         debug!(
-            "[ServerCore] 📋 协商详情: 客户端请求={:?}, 客户端是否指定格式={}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?},最终加密={:?} device={:?}, user_id={:?}",
+            "[ServerCore] 协商详情: 客户端请求={:?}, 客户端是否指定格式={}, 客户端压缩={:?}, 强制模式={}, 服务端默认={:?}, 服务端默认压缩={:?}, 最终格式={:?}, 最终压缩={:?},最终加密={:?} device={:?}, user_id={:?}",
             negotiation.serialization_format,
             negotiation.serialization_format_specified,
             negotiation.compression,
@@ -917,7 +917,7 @@ impl ServerCore {
             if let Some(owner) = owner {
                 let user_id = owner.user_id();
                 info!(
-                    "[ServerCore] 🔍 开始设备冲突检测: tenant_id={}, user_id={}, connection_id={}, platform={:?}",
+                    "[ServerCore] 开始设备冲突检测: tenant_id={}, user_id={}, connection_id={}, platform={:?}",
                     owner.tenant_id(),
                     user_id,
                     connection_id,
@@ -944,7 +944,7 @@ impl ServerCore {
                         conflict_connections.retain(|conn_id| {
                             if conn_id == connection_id {
                                 error!(
-                                    "[ServerCore] ❌ 错误：冲突连接列表包含新连接ID，已过滤: connection_id={}",
+                                    "[ServerCore] 错误：冲突连接列表包含新连接ID，已过滤: connection_id={}",
                                     connection_id
                                 );
                                 false
@@ -955,7 +955,7 @@ impl ServerCore {
 
                         if !conflict_connections.is_empty() {
                             info!(
-                                "[ServerCore] ⚠️  检测到设备冲突: user_id={}, 新连接={}, 将踢掉 {} 个旧连接: {:?}",
+                                "[ServerCore] 检测到设备冲突: user_id={}, 新连接={}, 将踢掉 {} 个旧连接: {:?}",
                                 user_id,
                                 connection_id,
                                 conflict_connections.len(),
@@ -963,7 +963,7 @@ impl ServerCore {
                             );
                         } else {
                             debug!(
-                                "[ServerCore] ✅ 无设备冲突: user_id={}, platform={:?}, 新连接={}",
+                                "[ServerCore] 无设备冲突: user_id={}, platform={:?}, 新连接={}",
                                 user_id, platform, connection_id
                             );
                         }
@@ -1181,18 +1181,18 @@ impl ServerCore {
                 match conn_info.user_id {
                     Some(ref updated_user_id) => {
                         debug!(
-                            "[ServerCore] ✅ 验证成功: 连接信息中的 user_id={}",
+                            "[ServerCore] 验证成功: 连接信息中的 user_id={}",
                             updated_user_id
                         );
                     }
                     None => {
-                        error!("[ServerCore] ❌ 验证失败: 连接信息中的 user_id 仍为 None");
+                        error!("[ServerCore] 验证失败: 连接信息中的 user_id 仍为 None");
                     }
                 }
             }
         } else {
             warn!(
-                "[ServerCore] ⚠️  连接信息中没有 user_id: connection_id={}, negotiation.user_id={:?}, auth_user_id={:?}",
+                "[ServerCore] 连接信息中没有 user_id: connection_id={}, negotiation.user_id={:?}, auth_user_id={:?}",
                 connection_id, negotiation.user_id, auth_user_id
             );
         }
@@ -1218,12 +1218,12 @@ impl ServerCore {
 
         if auth_enabled {
             debug!(
-                "[ServerCore] ✅ 连接已标记为已验证（认证通过）: connection_id={}, user_id={:?}",
+                "[ServerCore] 连接已标记为已验证（认证通过）: connection_id={}, user_id={:?}",
                 connection_id, auth_user_id
             );
         } else {
             debug!(
-                "[ServerCore] ✅ 连接已标记为已验证（无需认证）: connection_id={}, user_id={:?}",
+                "[ServerCore] 连接已标记为已验证（无需认证）: connection_id={}, user_id={:?}",
                 connection_id, auth_user_id
             );
         }

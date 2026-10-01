@@ -470,7 +470,7 @@ impl ConnectionObserver for FlareObserver {
     fn on_event(&self, event: &ConnectionEvent) {
         match event {
             ConnectionEvent::Connected => {
-                info!("[FlareClient] ✅ 已连接");
+                info!("[FlareClient] 已连接");
                 // 在后台任务中调用 listener.on_connect
                 let listener = self.listener.clone();
                 crate::client::runtime::spawn_client_task(async move {
@@ -483,7 +483,7 @@ impl ConnectionObserver for FlareObserver {
             ConnectionEvent::Disconnected(reason) => {
                 // 使用 Arc<str> 避免 String clone，减少内存分配
                 let reason_arc: Arc<str> = Arc::from(reason.as_str());
-                info!("[FlareClient] ❌ 连接断开: {}", reason_arc);
+                info!("[FlareClient] 连接断开: {}", reason_arc);
                 let listener = self.listener.clone();
                 crate::client::runtime::spawn_client_task(async move {
                     if let Err(e) = listener.on_disconnect(Some(&reason_arc)).await {
@@ -515,7 +515,7 @@ impl ConnectionObserver for FlareObserver {
                     // 连接丢失错误，记录为 warn 级别并通知 listener
                     // 注意：底层客户端（WebSocketClient/QUICClient）会自动尝试重连
                     warn!("[FlareClient] 连接丢失: {:?}", err);
-                    info!("[FlareClient] 💡 底层客户端将自动尝试重连（如果配置了重连）");
+                    info!("[FlareClient] 底层客户端将自动尝试重连（如果配置了重连）");
                     let listener = self.listener.clone();
                     // 使用 Arc<str> 避免 String clone，减少内存分配
                     let err_str_arc: Arc<str> = Arc::from(err_str.as_str());
@@ -576,7 +576,7 @@ impl ConnectionObserver for FlareObserver {
                                 crate::common::MessageParser::new(format, compression, encryption);
                             pipeline.update_parser(new_parser).await;
                             debug!(
-                                "[FlareObserver] ✅ 已更新 MessagePipeline 的 parser: format={:?}, compression={:?}, encryption={:?}",
+                                "[FlareObserver] 已更新 MessagePipeline 的 parser: format={:?}, compression={:?}, encryption={:?}",
                                 format, compression_clone, encryption_clone
                             );
                         }

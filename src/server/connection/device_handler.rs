@@ -63,7 +63,7 @@ pub async fn handle_device_conflict(
                 conflict_connections = conflicts;
                 if !conflict_connections.is_empty() {
                     info!(
-                        "[DeviceHandler] ✅ 设备冲突检测: 租户 {} 用户 {} 的新平台 {:?} 将踢掉 {} 个旧连接: {:?}",
+                        "[DeviceHandler] 设备冲突检测: 租户 {} 用户 {} 的新平台 {:?} 将踢掉 {} 个旧连接: {:?}",
                         owner.tenant_id(),
                         user_id,
                         platform,
@@ -98,7 +98,7 @@ pub async fn handle_device_conflict(
 
     if let Some(device_mgr) = device_manager_clone {
         info!(
-            "[DeviceHandler] 🔍 开始处理 {} 个冲突连接，新连接ID: {}",
+            "[DeviceHandler] 开始处理 {} 个冲突连接，新连接ID: {}",
             conflict_connections.len(),
             connection_id
         );
@@ -107,14 +107,14 @@ pub async fn handle_device_conflict(
             // 确保不处理新连接本身（防御性检查）
             if conflict_conn_id == connection_id {
                 error!(
-                    "[DeviceHandler] ❌ 严重错误：冲突连接列表包含新连接ID！跳过处理: connection_id={}",
+                    "[DeviceHandler] 严重错误：冲突连接列表包含新连接ID！跳过处理: connection_id={}",
                     connection_id
                 );
                 continue;
             }
 
             info!(
-                "[DeviceHandler] 📤 准备踢掉旧连接: connection_id={} (新连接ID: {})",
+                "[DeviceHandler] 准备踢掉旧连接: connection_id={} (新连接ID: {})",
                 conflict_conn_id, connection_id
             );
 
@@ -156,7 +156,7 @@ pub async fn handle_device_conflict(
                         // 再次验证：确保发送给的是旧连接，不是新连接
                         if conflict_conn_id == connection_id {
                             error!(
-                                "[DeviceHandler] ❌ 严重错误：尝试发送KICKED消息给新连接！跳过: connection_id={}",
+                                "[DeviceHandler] 严重错误：尝试发送KICKED消息给新连接！跳过: connection_id={}",
                                 connection_id
                             );
                             continue;
@@ -170,10 +170,10 @@ pub async fn handle_device_conflict(
                             );
                         } else {
                             info!(
-                                "[DeviceHandler] ✅ 已发送被踢消息给旧连接 {} (新连接: {}): {}",
+                                "[DeviceHandler] 已发送被踢消息给旧连接 {} (新连接: {}): {}",
                                 conflict_conn_id, connection_id, reason
                             );
-                            info!("[DeviceHandler] 💡 客户端收到 KICKED 消息后将主动断开连接");
+                            info!("[DeviceHandler] 客户端收到 KICKED 消息后将主动断开连接");
                         }
                     }
                     Err(e) => {
@@ -188,7 +188,7 @@ pub async fn handle_device_conflict(
                 // 注意：连接断开事件会在 DefaultServerMessageObserver 中处理连接管理器的清理
                 if conflict_conn_id == connection_id {
                     error!(
-                        "[DeviceHandler] ❌ 严重错误：尝试从设备管理器移除新连接的设备！跳过: connection_id={}",
+                        "[DeviceHandler] 严重错误：尝试从设备管理器移除新连接的设备！跳过: connection_id={}",
                         connection_id
                     );
                     continue;
@@ -197,7 +197,7 @@ pub async fn handle_device_conflict(
                 match device_mgr.remove_device(owner, conflict_conn_id).await {
                     Ok(_) => {
                         info!(
-                            "[DeviceHandler] ✅ 旧连接的设备已从设备管理器移除: {} (新连接: {})",
+                            "[DeviceHandler] 旧连接的设备已从设备管理器移除: {} (新连接: {})",
                             conflict_conn_id, connection_id
                         );
                     }
@@ -222,7 +222,7 @@ pub async fn handle_device_conflict(
             match manager.remove_connection(conflict_conn_id).await {
                 Ok(_) => {
                     info!(
-                        "[DeviceHandler] ✅ 旧连接已从连接管理器同步移除: {} (新连接: {})",
+                        "[DeviceHandler] 旧连接已从连接管理器同步移除: {} (新连接: {})",
                         conflict_conn_id, connection_id
                     );
                 }
@@ -236,20 +236,20 @@ pub async fn handle_device_conflict(
         }
 
         info!(
-            "[DeviceHandler] ✅ 设备冲突处理完成: 新连接 {} 已保留，已向 {} 个旧连接发送 KICKED 消息",
+            "[DeviceHandler] 设备冲突处理完成: 新连接 {} 已保留，已向 {} 个旧连接发送 KICKED 消息",
             connection_id,
             conflict_connections.len()
         );
     } else {
         // 如果没有设备管理器，无法发送被踢消息（因为需要设备管理器来管理冲突）
         warn!(
-            "[DeviceHandler] ⚠️  无设备管理器，无法处理设备冲突: {} 个冲突连接",
+            "[DeviceHandler] 无设备管理器，无法处理设备冲突: {} 个冲突连接",
             conflict_connections.len()
         );
     }
 
     info!(
-        "[DeviceHandler] 🎯 设备冲突处理完成: 新连接 {} 保留，已通知 {} 个旧连接断开（客户端将主动断开）",
+        "[DeviceHandler] 设备冲突处理完成: 新连接 {} 保留，已通知 {} 个旧连接断开（客户端将主动断开）",
         connection_id,
         conflict_connections.len()
     );

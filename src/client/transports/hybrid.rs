@@ -467,7 +467,7 @@ impl HybridClient {
                                 first_success = Some((protocol_index, protocol, client, elapsed));
                                 let ms = elapsed.as_secs_f64() * 1000.0;
                                 tracing::info!(
-                                    "🏆 第一个成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
+                                    "第一个成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
                                     protocol,
                                     protocol_index,
                                     ms
@@ -485,7 +485,7 @@ impl HybridClient {
                                     ));
                                     let ms = elapsed.as_secs_f64() * 1000.0;
                                     tracing::debug!(
-                                        "⚡ 几乎同时成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
+                                        "几乎同时成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
                                         protocol,
                                         protocol_index,
                                         ms
@@ -494,7 +494,7 @@ impl HybridClient {
                                     // 连接太慢，关闭它
                                     let ms = elapsed.as_secs_f64() * 1000.0;
                                     tracing::debug!(
-                                        "🐌 连接太慢，关闭: {:?} (优先级: {}, 耗时: {:.3}ms)",
+                                        "连接太慢，关闭: {:?} (优先级: {}, 耗时: {:.3}ms)",
                                         protocol,
                                         protocol_index,
                                         ms
@@ -555,7 +555,7 @@ impl HybridClient {
     /// 异步关闭客户端（不阻塞）
     fn disconnect_client_async(protocol: TransportProtocol, priority: usize, elapsed: Duration) {
         tracing::debug!(
-            "🐌 连接太慢，关闭: {:?} (优先级: {}, 耗时: {:?})",
+            "连接太慢，关闭: {:?} (优先级: {}, 耗时: {:?})",
             protocol,
             priority,
             elapsed
@@ -587,7 +587,7 @@ impl HybridClient {
             let selected_ms = selected_elapsed.as_secs_f64() * 1000.0;
             let total_ms = race_start.elapsed().as_secs_f64() * 1000.0;
             tracing::info!(
-                "✅ 协议竞速成功: {:?} (优先级: {}, 网络连接耗时: {:.3}ms, 总竞速时间: {:.3}ms)",
+                "协议竞速成功: {:?} (优先级: {}, 网络连接耗时: {:.3}ms, 总竞速时间: {:.3}ms)",
                 selected_protocol,
                 selected_index,
                 selected_ms,
@@ -600,7 +600,7 @@ impl HybridClient {
 
             // 现在发送 CONNECT 消息（网络连接已建立）
             tracing::debug!(
-                "📤 发送 CONNECT 消息: {:?} (优先级: {})",
+                "发送 CONNECT 消息: {:?} (优先级: {})",
                 selected_protocol,
                 selected_index
             );
@@ -622,7 +622,7 @@ impl HybridClient {
         successful_clients: &[SuccessfulConnection],
         errors: &[FailedConnection],
     ) {
-        tracing::info!("📊 协议竞速耗时统计：");
+        tracing::info!("协议竞速耗时统计：");
 
         // 收集所有协议的结果（成功 + 失败）
         let mut all_results: Vec<(usize, TransportProtocol, Option<Duration>, Option<String>)> =
@@ -663,18 +663,13 @@ impl HybridClient {
                         .unwrap_or(false);
                     if is_first {
                         tracing::info!(
-                            "  [{:2}] {:12} ✅ 成功 - {:.3}ms ⭐ (已选中)",
+                            "  [{:2}] {:12} 成功 - {:.3}ms (已选中)",
                             index,
                             protocol_name,
                             ms
                         );
                     } else {
-                        tracing::info!(
-                            "  [{:2}] {:12} ✅ 成功 - {:.3}ms",
-                            index,
-                            protocol_name,
-                            ms
-                        );
+                        tracing::info!("  [{:2}] {:12} 成功 - {:.3}ms", index, protocol_name, ms);
                     }
                 }
                 (Some(elapsed), Some(err)) => {
@@ -686,7 +681,7 @@ impl HybridClient {
                         err
                     };
                     tracing::info!(
-                        "  [{:2}] {:12} ❌ 失败 - {:.3}ms - {}",
+                        "  [{:2}] {:12} 失败 - {:.3}ms - {}",
                         index,
                         protocol_name,
                         ms,
@@ -731,7 +726,7 @@ impl HybridClient {
         for handle in handles {
             if let Ok((protocol, res)) = handle.await {
                 match res {
-                    Ok(()) => tracing::debug!("✅ {:?} 未选中连接已关闭", protocol),
+                    Ok(()) => tracing::debug!("{:?} 未选中连接已关闭", protocol),
                     Err(e) => tracing::warn!("关闭 {:?} 连接时出错: {}", protocol, e),
                 }
             }
@@ -759,7 +754,7 @@ impl HybridClient {
             error_details.join(", ")
         );
 
-        tracing::error!("❌ {}", error_msg);
+        tracing::error!("{}", error_msg);
         Err(FlareError::connection_failed(error_msg))
     }
 
