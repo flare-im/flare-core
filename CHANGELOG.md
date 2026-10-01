@@ -97,6 +97,9 @@
 
 ### 其他
 
+- 每个示例在 `Cargo.toml` 里声明所需特性（`required-features`）。关掉默认特性构建示例时，
+  缺特性的示例被跳过，不再编译失败；`tcp_client` 的要求补齐为 `client`、`tcp`、
+  `compression-gzip` 与 `encryption-aes-gcm`。
 - 补齐 crate 的 `license` 声明。此前 `Cargo.toml` 里没有该字段，
   SBOM 与合规扫描会把它报成 "unlicensed"。
 - 修正文档中的许可证表述：本 crate 是 **Apache-2.0**，此前部分文档写成 MIT。

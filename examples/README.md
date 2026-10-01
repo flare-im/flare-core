@@ -2,6 +2,10 @@
 
 本目录包含 `flare-core` 库的各种使用示例，展示了不同的构建模式和协议支持。
 
+每个示例在 `Cargo.toml` 里用 `required-features` 声明了它用到的特性。默认特性下除
+`tcp_client` 外都能直接构建（`tcp_client` 需要 `--features tcp`）；关掉默认特性构建时，缺特性的
+示例会被跳过。
+
 ## 示例列表
 
 ### 1. 简单模式（Simple Mode）

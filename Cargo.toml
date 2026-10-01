@@ -131,9 +131,63 @@ wasm = ["client", "websocket", "compression-gzip", "encryption-aes-gcm"]
 compression-gzip = ["dep:flate2"]
 encryption-aes-gcm = ["dep:aes-gcm"]
 
+# 每个示例声明它用到的特性：关掉默认特性构建时（如 `--no-default-features --features server,quic`）
+# 缺特性的示例被跳过，而不是编译失败。
+[[example]]
+name = "custom_extensions_example"
+required-features = ["client", "server", "websocket"]
+
+[[example]]
+name = "flare_chat_client"
+required-features = ["client", "websocket", "quic", "encryption-aes-gcm"]
+
+[[example]]
+name = "flare_chat_server"
+required-features = ["server", "websocket", "quic", "compression-gzip", "encryption-aes-gcm"]
+
+[[example]]
+name = "loadconns"
+required-features = ["client", "websocket"]
+
+[[example]]
+name = "observer_client"
+required-features = ["client", "websocket", "quic"]
+
+[[example]]
+name = "observer_server"
+required-features = ["server", "websocket", "quic"]
+
+[[example]]
+name = "quic_client"
+required-features = ["client", "quic"]
+
+[[example]]
+name = "quic_probe"
+required-features = ["client", "quic"]
+
+[[example]]
+name = "quic_server"
+required-features = ["server", "quic"]
+
+[[example]]
+name = "simple_client"
+required-features = ["client", "websocket"]
+
+[[example]]
+name = "simple_server"
+required-features = ["server", "websocket"]
+
 [[example]]
 name = "tcp_client"
-required-features = ["tcp"]
+required-features = ["client", "tcp", "compression-gzip", "encryption-aes-gcm"]
+
+[[example]]
+name = "websocket_client"
+required-features = ["client", "websocket"]
+
+[[example]]
+name = "websocket_server"
+required-features = ["server", "websocket"]
 
 [[bench]]
 name = "perf_baseline"
