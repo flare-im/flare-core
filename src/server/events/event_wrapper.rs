@@ -572,8 +572,10 @@ impl ServerMessageWrapper {
         connection_id: &str,
         error: &str,
     ) -> crate::common::error::Result<()> {
-        tracing::error!(
-            "[ServerMessageWrapper] ❌ 连接错误: connection_id={}, error={}",
+        // warn 而不是 error：这是单条连接的传输错误（QUIC 对端直接关连接、读流出错、协议错误），
+        // 不是服务端故障，客户端进程被杀、网络切换都会走到这里；连接随后按断开清理。
+        tracing::warn!(
+            "[ServerMessageWrapper] 连接错误: connection_id={}, error={}",
             connection_id,
             error
         );

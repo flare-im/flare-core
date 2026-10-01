@@ -108,12 +108,18 @@ impl ConnectionHandlerObserverAdapter {
             Arc::clone(&manager) as Arc<dyn crate::server::connection::ConnectionManagerTrait>;
         let conn_id_clone = Arc::clone(&conn_id);
         if let Err(e) = manager_trait.update_connection_active(&conn_id_clone).await {
-            // 如果连接不存在，记录警告但不阻塞处理（可能是连接刚被清理）
-            tracing::warn!(
-                "[ConnectionHandlerObserverAdapter] 更新连接活跃时间失败（连接可能不存在）: connection_id={}, error={}",
-                conn_id,
-                e
-            );
+            // 不阻塞处理。连接已不在连接表里是良性竞争，见 active_update_failure_level
+            if active_update_failure_level(&manager, &conn_id) == tracing::Level::DEBUG {
+                debug!(
+                    "[ConnectionHandlerObserverAdapter] 连接已移除，跳过更新活跃时间: connection_id={}",
+                    conn_id
+                );
+            } else {
+                warn!(
+                    "[ConnectionHandlerObserverAdapter] 更新连接活跃时间失败: connection_id={}, error={}",
+                    conn_id, e
+                );
+            }
         }
 
         // 获取连接信息以检查协商状态和获取缓存的 parser/pipeline
@@ -416,15 +422,18 @@ impl ConnectionHandlerObserverAdapter {
             // 鉴权失败、租户不可用这类拒绝是客户端侧的常态（token 过期后带旧 token 重连、
             // 租户停用后重连），用 warn；其余 CONNECT 失败仍是服务端问题，保持 error。
             // 不做区分的话，一个客户端过期就能刷屏并淹掉真故障。
+            // 可重试的拒绝（SERVICE_UNAVAILABLE：认证依赖暂时读不到、认证器出错、业务层登记会话
+            // 时依赖不可用）在 ServerCore 里已按应有级别记过原因，这里不再重复记一条 ERROR。
             if matches!(
                 e.code(),
                 Some(
                     crate::common::error::ErrorCode::AuthenticationFailed
                         | crate::common::error::ErrorCode::PermissionDenied
+                        | crate::common::error::ErrorCode::ServiceUnavailable
                 )
             ) {
                 warn!(
-                    "[ConnectionHandlerObserverAdapter] CONNECT 鉴权失败: connection_id={}, error={}",
+                    "[ConnectionHandlerObserverAdapter] CONNECT 被拒: connection_id={}, error={}",
                     conn_id, e
                 );
             } else {
@@ -520,7 +529,10 @@ impl ConnectionObserver for ConnectionHandlerObserverAdapter {
                 });
             }
             ConnectionEvent::Error(err) => {
-                // 处理错误事件
+                // 传输层的 Error 是终止事件（如 QUIC 读出错、对端直接关掉连接）：传输随后不再上报，
+                // 也不会补一个 Disconnected。先通知业务层出错，再走与 Disconnected 相同的断开路径：
+                // 通知 on_disconnect、移出连接表、清设备。以前只通知 on_error，连接留在连接表里、
+                // 设备也不清，要等心跳超时才被清掉，期间仍计入连接数与用户数、仍在投递路由里。
                 let handler = Arc::clone(&self.handler);
                 let conn_id: Arc<str> = Arc::from(self.connection_id.as_str());
                 let error_msg = err.to_string();
@@ -533,9 +545,32 @@ impl ConnectionObserver for ConnectionHandlerObserverAdapter {
                             conn_id, e
                         );
                     }
+                    use crate::server::ConnectionHandler;
+                    if let Err(e) =
+                        ConnectionHandler::on_disconnect(handler.as_ref(), &conn_id).await
+                    {
+                        warn!(
+                            "[ConnectionHandlerObserverAdapter] 传输出错后处理断开失败: connection_id={}, error={}",
+                            conn_id, e
+                        );
+                    }
                 });
             }
         }
+    }
+}
+
+/// 更新连接活跃时间失败时的日志级别。
+///
+/// 帧在本连接的入站队列里排队时，连接可能已被移出连接表：设备冲突踢线、客户端断开（断开事件
+/// 现在立即移除连接）、CONNECT 被拒。队列里剩下的帧照常出队，此时找不到连接是良性竞争，
+/// 记 debug（W5-S2 每轮 20–38 条 WARN 都是这一类）。连接还在却更新失败（如分片锁中毒）
+/// 才是异常，记 warn。
+fn active_update_failure_level(manager: &ConnectionManager, connection_id: &str) -> tracing::Level {
+    if manager.get_connection(connection_id).is_none() {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
     }
 }
 
@@ -602,5 +637,163 @@ mod ordering_tests {
             Err(tokio::sync::mpsc::error::TrySendError::Full(v)) => assert_eq!(v, 3),
             other => panic!("队列满必须可观测地失败，实际: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_error_tests {
+    use super::*;
+    use crate::common::device::{DeviceConflictStrategy, DeviceInfo, DevicePlatform};
+    use crate::common::error::{FlareError, Result};
+    use crate::server::device::{DeviceManager, DeviceOwner};
+    use crate::server::events::handler::ServerEventHandler;
+    use crate::transport::connection::Connection;
+    use crate::transport::events::ArcObserver;
+    use async_trait::async_trait;
+    use std::time::{Duration, Instant};
+
+    struct IdleConnection;
+
+    #[async_trait]
+    impl Connection for IdleConnection {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+        fn update_active_time(&mut self) {}
+    }
+
+    /// 记下业务层收到的出错与断开通知。
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<String>>);
+
+    impl Recorder {
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ServerEventHandler for Recorder {
+        async fn on_disconnect(&self, connection_id: &str, _reason: Option<&str>) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("disconnect:{connection_id}"));
+            Ok(())
+        }
+
+        async fn on_error(&self, connection_id: &str, _error: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("error:{connection_id}"));
+            Ok(())
+        }
+    }
+
+    fn owner() -> DeviceOwner {
+        DeviceOwner::new(None, "bob")
+    }
+
+    /// 一条已认证、已登记设备的连接，以及挂在它上面的观察者。
+    async fn registered_connection() -> (
+        Arc<ConnectionManager>,
+        Arc<DeviceManager>,
+        Arc<Recorder>,
+        ConnectionHandlerObserverAdapter,
+    ) {
+        let manager = Arc::new(ConnectionManager::new());
+        manager
+            .add_connection(
+                "c1".to_string(),
+                Box::new(IdleConnection),
+                Some("bob".to_string()),
+                true,
+            )
+            .unwrap();
+        let devices = Arc::new(DeviceManager::new(
+            DeviceConflictStrategy::PlatformExclusive,
+        ));
+        devices
+            .add_device(
+                &owner(),
+                "c1".to_string(),
+                DeviceInfo::new("d1".to_string(), DevicePlatform::PC),
+            )
+            .await
+            .unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let wrapper = Arc::new(ServerMessageWrapper::new(
+            recorder.clone(),
+            Some(Arc::clone(&manager)),
+            Some(Arc::clone(&devices)),
+            PRE_NEGOTIATION_PARSER.clone(),
+        ));
+        let adapter = ConnectionHandlerObserverAdapter::new(
+            wrapper,
+            "c1".to_string(),
+            Arc::clone(&manager),
+            None,
+        );
+        (manager, devices, recorder, adapter)
+    }
+
+    async fn cleaned_up(manager: &ConnectionManager, devices: &DeviceManager) -> bool {
+        manager.get_connection("c1").is_none()
+            && manager.get_user_connections(&owner()).is_empty()
+            && devices.get_user_connections(&owner()).await.is_empty()
+    }
+
+    /// 远小于心跳超时：清理不能靠心跳兜底。
+    const CLEANUP_BOUND: Duration = Duration::from_secs(2);
+
+    /// 传输层的终止性 Error（如 QUIC 读出错）与断开一样清理：业务层先收到出错、再收到断开，
+    /// 连接移出连接表（连同用户索引），设备也被清掉。以前只通知 on_error，连接要等心跳超时。
+    #[tokio::test]
+    async fn a_terminal_transport_error_cleans_up_like_a_disconnect() {
+        let (manager, devices, recorder, adapter) = registered_connection().await;
+        assert!(!cleaned_up(&manager, &devices).await);
+
+        adapter.on_event(&ConnectionEvent::Error(FlareError::io(
+            "connection lost: closed by peer",
+        )));
+
+        let started = Instant::now();
+        while !cleaned_up(&manager, &devices).await {
+            assert!(
+                started.elapsed() < CLEANUP_BOUND,
+                "connection still registered after a terminal transport error: events={:?}",
+                recorder.events()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(recorder.events(), ["error:c1", "disconnect:c1"]);
+    }
+
+    /// 帧排队期间连接已被移出连接表是良性竞争，记 debug；连接还在却更新失败才记 warn。
+    #[test]
+    fn a_removed_connection_is_not_worth_a_warning() {
+        let manager = ConnectionManager::new();
+        assert!(manager.update_connection_active("gone").is_err());
+        assert_eq!(
+            active_update_failure_level(&manager, "gone"),
+            tracing::Level::DEBUG
+        );
+
+        manager
+            .add_connection("c1".to_string(), Box::new(IdleConnection), None, true)
+            .unwrap();
+        assert_eq!(
+            active_update_failure_level(&manager, "c1"),
+            tracing::Level::WARN
+        );
     }
 }
