@@ -252,11 +252,22 @@ impl ServerMessageWrapper {
 
                     tokio::spawn(async move {
                         if let Err(e) = (*manager_clone).mark_negotiation_confirmed(&conn_id) {
-                            tracing::error!(
-                                "[ServerMessageWrapper] 标记协商确认失败: connection_id={}, error={}",
-                                conn_id,
-                                e
-                            );
+                            // 都不是服务端故障，不记 ERROR，见 negotiation_confirm_failure_level
+                            if negotiation_confirm_failure_level(&manager_clone, &conn_id)
+                                == tracing::Level::DEBUG
+                            {
+                                tracing::debug!(
+                                    "[ServerMessageWrapper] 连接已移除，忽略协商确认: connection_id={}, error={}",
+                                    conn_id,
+                                    e
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "[ServerMessageWrapper] 标记协商确认失败: connection_id={}, error={}",
+                                    conn_id,
+                                    e
+                                );
+                            }
                         } else {
                             tracing::debug!(
                                 "[ServerMessageWrapper] ✅ 协商已确认: connection_id={}",
@@ -493,6 +504,21 @@ impl ConnectionHandler for ServerMessageWrapper {
         // 通知事件处理器
         let _ = self.event_handler.on_disconnect(connection_id, None).await;
 
+        // 从连接表移除。放在通知之后，业务层处理断开时还能读到这条连接的信息。
+        //
+        // 以前只通知业务层、不移除：客户端自己断开（登出、关页面）的连接留在连接表里，要等心跳
+        // 超时才被清掉，期间仍计入连接数与用户数、仍在用户的投递路由里。设备冲突踢线时旧连接由
+        // 冲突处理同步移除，第二设备随后登出就只剩它自己这条残留，表现为计数一直是 1。
+        // 已经被移除的连接（踢线、写失败隔离、服务端主动断开）这里找不到，属正常。
+        if let Some(manager) = &self.connection_manager
+            && manager.remove_connection(connection_id).is_ok()
+        {
+            tracing::debug!(
+                "[ServerMessageWrapper] 已从连接表移除断开的连接: connection_id={}",
+                connection_id
+            );
+        }
+
         // 清理设备（如果有设备管理器）
         //
         // 按连接 ID 反查设备归属（租户，用户）后精确移除，不依赖连接信息此刻是否还在连接管理器里，
@@ -515,6 +541,22 @@ impl ConnectionHandler for ServerMessageWrapper {
         }
 
         Ok(())
+    }
+}
+
+/// NEGOTIATION_READY 确认失败时的日志级别。
+///
+/// 确认是 spawn 出去执行的，排队期间连接被移除（设备冲突踢线、吊销、对端断开）是常态，
+/// 连接已不在连接管理器里时记 debug。连接还在却确认失败，说明客户端在协商完成前发了
+/// NEGOTIATION_READY，是客户端时序问题，记 warn。两种都不是服务端故障，不记 ERROR。
+fn negotiation_confirm_failure_level(
+    manager: &crate::server::connection::ConnectionManager,
+    connection_id: &str,
+) -> tracing::Level {
+    if manager.get_connection(connection_id).is_none() {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
     }
 }
 
@@ -546,5 +588,52 @@ impl ServerMessageWrapper {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::connection::ConnectionManager;
+    use crate::transport::connection::Connection;
+    use crate::transport::events::ArcObserver;
+
+    struct IdleConnection;
+
+    #[async_trait]
+    impl Connection for IdleConnection {
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> crate::common::error::Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> crate::common::error::Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+        fn update_active_time(&mut self) {}
+    }
+
+    /// NEGOTIATION_READY 确认失败从不记 ERROR：连接已被移除（踢线、断开）是良性竞争，记 debug；
+    /// 连接还在但协商未完成是客户端时序问题，记 warn。
+    #[test]
+    fn negotiation_confirm_failures_are_not_server_errors() {
+        let manager = ConnectionManager::new();
+        assert!(manager.mark_negotiation_confirmed("gone").is_err());
+        assert_eq!(
+            negotiation_confirm_failure_level(&manager, "gone"),
+            tracing::Level::DEBUG
+        );
+
+        manager
+            .add_connection("c1".to_string(), Box::new(IdleConnection), None, true)
+            .unwrap();
+        assert!(manager.mark_negotiation_confirmed("c1").is_err());
+        assert_eq!(
+            negotiation_confirm_failure_level(&manager, "c1"),
+            tracing::Level::WARN
+        );
     }
 }
