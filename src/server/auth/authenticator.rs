@@ -116,7 +116,9 @@ pub trait Authenticator: Send + Sync {
     ///
     /// # 返回
     /// - `Ok(AuthResult)`: 认证结果
-    /// - `Err`: 认证过程出错（非验证失败，而是系统错误）
+    /// - `Err`: 认证过程出错（非验证失败，而是系统错误）。服务端与
+    ///   [`AuthResult::retryable_failure`] 一样以 `SERVICE_UNAVAILABLE` 拒绝 CONNECT，客户端退避
+    ///   重连；对令牌或租户的结论要返回 `Ok(AuthResult::failure(..))`，否则客户端不会换令牌。
     async fn authenticate(
         &self,
         token: &str,

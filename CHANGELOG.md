@@ -94,6 +94,10 @@
   `SERVICE_UNAVAILABLE`（可重试）。此前认证器只能报失败，客户端拿到的不是鉴权失败就是
   `TENANT_UNAVAILABLE`，前者让客户端去换令牌，后者让它终止会话、不再重连，一次数据库
   抖动就会让这段时间里连进来的客户端一直离线。
+- 服务端：认证器返回 `Err`（按 `Authenticator` 的约定是系统错误，例如依赖读不到）时，以
+  `SERVICE_UNAVAILABLE` 拒绝 CONNECT，与 `AuthResult::retryable_failure` 一致，客户端退避
+  重连。此前报成 `AUTHENTICATION_FAILED`，客户端会因此去换一个本来有效的令牌。错误文本只进
+  服务端日志，ERROR 帧的 message 与 metadata `code` 都是 `SERVICE_UNAVAILABLE`。
 
 ### 其他
 

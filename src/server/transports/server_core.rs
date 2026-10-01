@@ -1008,17 +1008,14 @@ impl ServerCore {
         let token = Self::extract_token_from_frame(frame);
 
         let Some(token) = token else {
-            error!(
-                "[ServerCore] ❌ 未提供 token: connection_id={}",
-                connection_id
-            );
+            error!("[ServerCore] 未提供 token: connection_id={}", connection_id);
             return Err(crate::common::error::FlareError::authentication_failed(
                 "未提供 token".to_string(),
             ));
         };
 
         debug!(
-            "[ServerCore] 🔐 开始验证 token: connection_id={}",
+            "[ServerCore] 开始验证 token: connection_id={}",
             connection_id
         );
 
@@ -1043,7 +1040,7 @@ impl ServerCore {
                     // 认证器说通过却没给出用户：这是认证器的实现问题。不能拿客户端在 CONNECT 里自报的
                     // user_id 顶上——那等于不认证，持任意有效令牌就能冒用别人的身份。
                     error!(
-                        "[ServerCore] ❌ 认证器返回已通过但没有 user_id，拒绝连接: connection_id={}",
+                        "[ServerCore] 认证器返回已通过但没有 user_id，拒绝连接: connection_id={}",
                         connection_id
                     );
                     Err(crate::common::error::FlareError::authentication_failed(
@@ -1051,7 +1048,7 @@ impl ServerCore {
                     ))
                 } else if auth_result.authenticated {
                     debug!(
-                        "[ServerCore] ✅ Token 验证成功: connection_id={}, user_id={:?}, tenant_id={:?}",
+                        "[ServerCore] Token 验证成功: connection_id={}, user_id={:?}, tenant_id={:?}",
                         connection_id,
                         auth_result.user_id,
                         auth_result.tenant_id()
@@ -1094,12 +1091,16 @@ impl ServerCore {
                 }
             }
             Err(e) => {
+                // 认证器出错（按 trait 约定是系统错误，如依赖读不到），不是对令牌的结论。与
+                // 暂时性拒绝一样按服务不可用拒绝，客户端退避重连；报成鉴权失败会让客户端去换一个
+                // 本来有效的令牌。错误文本只进服务端日志，下发给客户端的是错误码本身。
                 error!(
-                    "[ServerCore] ❌ Token 验证过程出错: connection_id={}, error={}",
+                    "[ServerCore] 认证过程出错，按可重试拒绝: connection_id={}, error={}",
                     connection_id, e
                 );
-                Err(crate::common::error::FlareError::authentication_failed(
-                    format!("验证过程出错: {}", e),
+                Err(crate::common::error::FlareError::localized(
+                    crate::common::error::ErrorCode::ServiceUnavailable,
+                    format!("认证过程出错: {}", e),
                 ))
             }
         }
@@ -1527,6 +1528,69 @@ mod tests {
                 Some(expected_code.as_str().as_bytes())
             );
         }
+    }
+
+    /// 认证器本身出错（按 trait 约定是系统错误）。
+    struct BrokenAuthenticator;
+
+    #[async_trait]
+    impl Authenticator for BrokenAuthenticator {
+        async fn authenticate(
+            &self,
+            _token: &str,
+            _connection_id: &str,
+            _device_info: Option<&crate::common::device::DeviceInfo>,
+            _metadata: Option<&HashMap<String, Vec<u8>>>,
+        ) -> Result<crate::server::auth::AuthResult> {
+            Err(crate::common::error::FlareError::System(
+                "tenant db pool timed out".to_string(),
+            ))
+        }
+    }
+
+    /// 认证器出错不是对令牌的结论：按可重试的 SERVICE_UNAVAILABLE 拒绝（与暂时性拒绝一致），
+    /// 客户端退避重连。报成 AUTHENTICATION_FAILED 会让客户端去换一个本来有效的令牌。错误文本
+    /// 不下发给客户端。
+    #[tokio::test]
+    async fn authenticator_errors_are_retryable_rejections() {
+        use crate::common::error::ErrorCode;
+        use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+        use crate::common::protocol::flare::core::commands::{command, system_command};
+        let core = ServerCore::new(&ServerConfig::default().enable_auth(), None)
+            .with_authenticator(Some(Arc::new(BrokenAuthenticator)));
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connection: Arc<tokio::sync::Mutex<Box<dyn Connection>>> =
+            Arc::new(tokio::sync::Mutex::new(Box::new(RecordingConnection {
+                sent: sent.clone(),
+                last_active: monotonic_now(),
+            })));
+        let connect = frame_with_system_command(
+            crate::common::protocol::builder::connect(
+                SerializationFormat::Json,
+                HashMap::from([("token".to_string(), b"t".to_vec())]),
+            ),
+            Reliability::AtLeastOnce,
+        );
+
+        let error = core
+            .handle_connect_complete(&connect, "c1", connection)
+            .await
+            .expect_err("CONNECT must be rejected");
+
+        assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+        assert!(ErrorCode::ServiceUnavailable.is_retryable());
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "exactly the rejection frame, no CONNECT_ACK");
+        let frame = PRE_NEGOTIATION_PARSER.parse(&sent[0]).expect("JSON frame");
+        let Some(command::Type::System(system)) = frame.command.and_then(|c| c.r#type) else {
+            panic!("system command expected");
+        };
+        assert_eq!(system.r#type, system_command::Type::Error as i32);
+        assert_eq!(system.message, "SERVICE_UNAVAILABLE");
+        assert_eq!(
+            system.metadata.get("code").map(Vec::as_slice),
+            Some(b"SERVICE_UNAVAILABLE".as_slice())
+        );
     }
 
     /// 认证器说通过却没给出用户（或给了空用户）时拒绝 CONNECT，不拿客户端自报的 user_id 顶上：
