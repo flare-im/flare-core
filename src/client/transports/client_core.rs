@@ -271,6 +271,28 @@ impl ClientCore {
         self.heartbeat_probe_wake = Arc::clone(&shared.heartbeat_probe_wake);
     }
 
+    /// 协议竞速：未选中的连接关闭之前与主 core 脱钩，换回自己的一份状态
+    /// （[`Self::share_race_state_from`] 的反向）。
+    ///
+    /// 不脱钩时，它关闭时的断开、错误事件经共享的观察者列表到上层，看起来像选中的连接出了事；
+    /// 它关闭前置位的「我方已主动断开」也留在共享标记上，选中的连接此后被踢时不通知观察者、
+    /// CONNECT 被拒时不立即结束协商等待。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "websocket", feature = "quic", feature = "tcp")
+    ))]
+    pub(crate) fn detach_race_state(&mut self) {
+        self.observers = Arc::new(StdMutex::new(Vec::new()));
+        self.pending_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        self.disconnect_requested = Arc::new(AtomicBool::new(false));
+        self.negotiation_completed = Arc::new(AtomicBool::new(false));
+        self.negotiation_notify = Arc::new(Notify::new());
+        self.negotiation_failure = Arc::new(StdMutex::new(None));
+        self.server_shutdown = Arc::new(AtomicBool::new(false));
+        self.heartbeat_config = Arc::new(StdRwLock::new(self.config.heartbeat.clone()));
+        self.heartbeat_probe_wake = Arc::new(Notify::new());
+    }
+
     /// 确定初始序列化格式和压缩算法
     fn determine_initial_format(
         config: &ClientConfig,

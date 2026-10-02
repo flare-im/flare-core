@@ -348,6 +348,10 @@ impl Client for QUICClient {
         self.core.set_disconnect_requested(value);
     }
 
+    fn detach_from_race(&mut self) {
+        self.core.detach_race_state();
+    }
+
     async fn disconnect(&mut self) -> Result<()> {
         self.connection_prepared = false;
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await

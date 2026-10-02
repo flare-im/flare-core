@@ -351,6 +351,11 @@ impl Client for WebSocketClient {
         self.core.set_disconnect_requested(value);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn detach_from_race(&mut self) {
+        self.core.detach_race_state();
+    }
+
     async fn disconnect(&mut self) -> Result<()> {
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await
     }

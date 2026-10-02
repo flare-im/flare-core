@@ -346,7 +346,6 @@ impl FlareClientBuilder {
         let observer = Arc::new(FlareObserver {
             pipeline: pipeline.clone(),
             listener: listener.clone(),
-            race_mode: self.base.config.is_race_mode(),
         });
 
         let observer_clone = observer.clone();
@@ -469,11 +468,12 @@ impl FlareClient {
 }
 
 /// Flare 客户端观察者
+///
+/// 协议竞速时，它在竞速结束之后才挂上：未选中的连接在选中连接发 CONNECT 之前就已与共享状态脱钩并
+/// 关闭（见 `HybridClient::connect_with_race`），这里收到的事件都来自选中的连接。
 struct FlareObserver {
     pipeline: Arc<MessagePipeline>,
     listener: Arc<dyn MessageListener>,
-    /// 协议竞速：未选中的连接与选中的连接共用观察者列表，关闭它们时的错误也会到这里。
-    race_mode: bool,
 }
 
 impl ConnectionObserver for FlareObserver {
@@ -503,28 +503,18 @@ impl ConnectionObserver for FlareObserver {
             }
 
             ConnectionEvent::Error(err) => {
-                // 过滤协议竞速时关闭未选中连接导致的错误
-                // 这些错误是正常的，因为协议竞速会选择最快的协议，其他协议会被关闭
+                // 错误是终止事件，一律交给监听器。此前协议竞速时按文本把 WebSocket 协议错误当作关闭
+                // 未选中连接的正常错误吞掉，而未选中的连接根本到不了这里（见结构体说明）：被吞掉的是
+                // 选中连接自己的终止性错误，上层既收不到断开也收不到错误，关掉了发送前重连的上层
+                // （IM SDK）就不再重连。
                 let err_str = format!("{:?}", err);
-                // 协议竞速错误：关闭未选中连接时的正常错误。只在竞速模式下按文本过滤：单协议时
-                // 没有未选中的连接，这样的错误就是当前连接的终止性错误，吞掉它，上层既收不到
-                // 断开也收不到错误，不会重连。
-                let is_race_error = self.race_mode
-                    && (err_str.contains("Connection reset without closing handshake")
-                        || (err_str.contains("ConnectionFailed")
-                            && err_str.contains("WebSocket protocol error")));
 
                 // 连接丢失错误：可能是网络问题或服务器关闭连接
                 let is_connection_lost = err_str.contains("connection lost")
                     || err_str.contains("connection closed")
                     || err_str.contains("Connection reset");
 
-                if is_race_error {
-                    // 协议竞速相关的错误，只记录 debug 级别（不通知 listener）
-                    debug!(
-                        "[FlareClient] 协议竞速：未选中协议连接已关闭（这是正常的，协议竞速会选择最快的协议）"
-                    );
-                } else if is_connection_lost {
+                if is_connection_lost {
                     // 连接丢失错误，记录为 warn 级别并通知 listener
                     // 注意：底层客户端（WebSocketClient/QUICClient）会自动尝试重连
                     warn!("[FlareClient] 连接丢失: {:?}", err);
@@ -701,11 +691,7 @@ mod tests {
                 listener: listener.clone(),
             }))
             .await;
-        let observer = FlareObserver {
-            pipeline,
-            listener,
-            race_mode: false,
-        };
+        let observer = FlareObserver { pipeline, listener };
 
         let slow = FrameBuilder::new()
             .with_message_id("slow-data-response".to_string())
@@ -754,40 +740,30 @@ mod tests {
         }
     }
 
-    fn observer_with(listener: Arc<ErrorRecorder>, race_mode: bool) -> FlareObserver {
+    fn observer_with(listener: Arc<ErrorRecorder>) -> FlareObserver {
         FlareObserver {
             pipeline: Arc::new(MessagePipeline::new(MessageParser::json())),
             listener,
-            race_mode,
         }
     }
 
-    /// 单协议时，当前连接的 WebSocket 协议错误是终止性错误，必须交给监听器：吞掉它，上层既收不到
-    /// 断开也收不到错误，关掉发送前重连的上层就再也不会重连。竞速模式下同样的文本仍按关闭未选中
-    /// 连接的正常错误过滤。
+    /// WebSocket 协议错误是当前连接的终止性错误，必须交给监听器：吞掉它，上层既收不到断开也收不到
+    /// 错误，关掉发送前重连的上层就再也不会重连。协议竞速时也一样：观察者挂上时竞速已经结束，
+    /// 错误只可能来自选中的连接。
     #[tokio::test]
-    async fn websocket_protocol_errors_reach_the_listener_outside_protocol_races() {
+    async fn websocket_protocol_errors_reach_the_listener() {
         let protocol_error = crate::common::error::FlareError::connection_failed(
             "WebSocket protocol error: Encountered invalid opcode: 3".to_string(),
         );
 
         let listener = Arc::new(ErrorRecorder::default());
-        let observer = observer_with(listener.clone(), false);
-        observer.on_event(&ConnectionEvent::Error(protocol_error.clone()));
+        let observer = observer_with(listener.clone());
+        observer.on_event(&ConnectionEvent::Error(protocol_error));
         tokio::time::timeout(std::time::Duration::from_secs(1), listener.seen.notified())
             .await
             .expect("the protocol error must reach the listener");
         let errors = listener.errors.lock().unwrap().clone();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("WebSocket protocol error"), "{errors:?}");
-
-        let listener = Arc::new(ErrorRecorder::default());
-        let observer = observer_with(listener.clone(), true);
-        observer.on_event(&ConnectionEvent::Error(protocol_error));
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            listener.errors.lock().unwrap().is_empty(),
-            "a race loser's close error stays filtered"
-        );
     }
 }

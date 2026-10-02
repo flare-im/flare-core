@@ -23,6 +23,10 @@ pub trait Client: Send + Sync {
         None
     }
     fn set_disconnect_requested(&mut self, _value: bool) {}
+    /// 协议竞速：关掉未选中的客户端之前调用，让它不再与选中的连接共享状态（观察者、主动断开标记、
+    /// 协商与等待响应的状态）。此后它关闭时的事件只到它自己，它置位的主动断开标记也不会留给选中的
+    /// 连接。默认什么都不做。
+    fn detach_from_race(&mut self) {}
 }
 
 pub mod client_core;

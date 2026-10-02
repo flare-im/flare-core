@@ -539,6 +539,8 @@ impl HybridClient {
         for handle in handles {
             match handle.await {
                 Ok((_protocol, _index, Ok(mut client), _elapsed)) => {
+                    // 先脱钩：它关闭时的事件与主动断开标记不能落到选中连接的共享状态上
+                    client.detach_from_race();
                     client.set_disconnect_requested(true);
                     if let Err(e) = client.disconnect().await {
                         tracing::debug!("[HybridClient] race cleanup disconnect: {}", e);
@@ -695,8 +697,10 @@ impl HybridClient {
 
     /// 关闭未选中的连接（客户端主动断开，并等待全部关闭完成）
     ///
-    /// 先对每个未选中 client 置位 set_disconnect_requested(true)，再并行 await 各 disconnect，
-    /// 确保在选中连接发送 CONNECT 之前未选中连接已关闭，避免服务端对未选中连接发 KICK 导致误报「被踢」。
+    /// 先让每个未选中 client 与共享状态脱钩（`detach_from_race`）并置位 set_disconnect_requested(true)，
+    /// 再并行 await 各 disconnect，确保在选中连接发送 CONNECT 之前未选中连接已关闭，避免服务端对未选中
+    /// 连接发 KICK 导致误报「被踢」。脱钩之后，它关闭时的事件不再到选中连接的观察者，主动断开标记也只
+    /// 置在它自己身上。
     async fn disconnect_unselected_clients(clients: Vec<SuccessfulConnection>) {
         if clients.is_empty() {
             return;
@@ -715,6 +719,7 @@ impl HybridClient {
                 index,
                 elapsed
             );
+            client.detach_from_race();
             client.set_disconnect_requested(true);
             let handle = tokio::spawn(async move {
                 let res = client.disconnect().await;
@@ -1094,5 +1099,63 @@ mod hybrid_race_tests {
             "in-flight loser must be disconnected after early win"
         );
         assert!(loser_requested.load(Ordering::SeqCst));
+    }
+
+    /// 记下共享观察者列表收到的事件。
+    #[cfg(feature = "websocket")]
+    #[derive(Default)]
+    struct SharedObserverEvents(StdMutex<Vec<crate::transport::events::ConnectionEvent>>);
+
+    #[cfg(feature = "websocket")]
+    impl crate::transport::events::ConnectionObserver for SharedObserverEvents {
+        fn on_event(&self, event: &crate::transport::events::ConnectionEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    /// 关掉未选中的连接（选出胜者后关掉的、竞速收尾时才建好的）之前先与共享状态脱钩：它关闭时的
+    /// 断开事件不到选中连接的观察者，它置位的主动断开标记也不留在共享标记上。此前两者都落在共享状态上：
+    /// 选中的连接一直带着「我方已主动断开」，被踢时不通知观察者。
+    #[cfg(feature = "websocket")]
+    #[tokio::test]
+    async fn closing_race_losers_leaves_the_shared_state_alone() {
+        let config = ClientConfig::new("ws://127.0.0.1:9/ws".to_string()).websocket();
+        let shared = ClientCore::new(&config);
+        let events = Arc::new(SharedObserverEvents::default());
+        shared.add_observer(events.clone());
+
+        let loser = || {
+            let mut core = ClientCore::new(&config);
+            core.share_race_state_from(&shared);
+            Box::new(WebSocketClient::with_core(config.clone(), core)) as Box<dyn Client>
+        };
+
+        HybridClient::disconnect_unselected_clients(vec![(
+            1,
+            TransportProtocol::WebSocket,
+            loser(),
+            Duration::from_millis(1),
+        )])
+        .await;
+        let late = loser();
+        let handle = tokio::spawn(async move {
+            (
+                TransportProtocol::WebSocket,
+                1,
+                Ok(late),
+                Duration::from_millis(1),
+            )
+        });
+        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
+
+        assert!(
+            !shared.is_disconnect_requested(),
+            "a loser's requested disconnect must not stick to the selected connection"
+        );
+        let seen = events.0.lock().unwrap().clone();
+        assert!(
+            seen.is_empty(),
+            "a loser's close must not reach the selected connection's observers: {seen:?}"
+        );
     }
 }
