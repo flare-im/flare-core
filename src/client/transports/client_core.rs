@@ -14,7 +14,9 @@ use crate::common::protocol::flare::core::commands::payload_command::Type as Pay
 use crate::common::protocol::flare::core::commands::system_command::Type as SystemCommandType;
 use crate::common::{HeartbeatAppState, HeartbeatConfig, MessageParser};
 use crate::transport::connection::Connection;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, deliver_to_observers, observer_snapshot,
+};
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex as StdMutex, RwLock as StdRwLock,
@@ -1234,25 +1236,27 @@ impl ClientCore {
 
     /// 添加观察者
     pub fn add_observer(&self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.push(observer);
-        }
+        self.observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(observer);
     }
 
     /// 移除观察者
     pub fn remove_observer(&self, observer: ArcObserver) {
-        if let Ok(mut observers) = self.observers.lock() {
-            observers.retain(|o| !Arc::ptr_eq(o, &observer));
-        }
+        self.observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|o| !Arc::ptr_eq(o, &observer));
     }
 
-    /// 通知所有观察者
+    /// 通知所有观察者。
+    ///
+    /// 先取列表快照再在锁外回调：观察者在回调里增删观察者不会自锁，一个观察者 panic 也毒化不了
+    /// 列表；它的 panic 被隔离，其余观察者照常收到本次与之后的事件（含踢线原因）。
     fn notify_observers(&self, event: &ConnectionEvent) {
-        if let Ok(observers) = self.observers.lock() {
-            for observer in observers.iter() {
-                observer.on_event(event);
-            }
-        }
+        let observers = observer_snapshot(&self.observers);
+        deliver_to_observers(&observers, event, "client core");
     }
 
     /// 获取消息路由器（如果启用）
@@ -1990,6 +1994,14 @@ mod kick_tests {
         }
     }
 
+    struct PanickingObserver;
+
+    impl crate::transport::events::ConnectionObserver for PanickingObserver {
+        fn on_event(&self, _: &ConnectionEvent) {
+            panic!("observer bug");
+        }
+    }
+
     /// 像真实传输一样：本端关闭时以给定原因（`close()` 为 `Closed by client`）同步上报一次断开，
     /// 已经上报过（对端先关）就不再上报。
     struct LoopbackConnection {
@@ -2135,6 +2147,53 @@ mod kick_tests {
             Some(DEVICE_CONFLICT_REASON)
         );
         assert!(!harness.core.can_send());
+    }
+
+    /// 排在前面的观察者 panic 过，被踢的原因照样送到其余观察者，之后加入的观察者也照常收到通知。
+    /// 原先持着列表锁回调，panic 毒化锁后 `if let Ok` 把此后的通知全部静默丢掉：宿主既收不到
+    /// 被踢，也收不到断开。
+    #[tokio::test]
+    async fn a_panicking_observer_does_not_silence_the_kick_reason() {
+        let harness = Harness::negotiated().await;
+        harness
+            .core
+            .observers
+            .lock()
+            .unwrap()
+            .insert(0, Arc::new(PanickingObserver));
+
+        // 修复前 panic 会穿出通知；在这里接住，只看之后的通知是否还在。
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            harness.core.notify_observers(&ConnectionEvent::Connected)
+        }));
+        assert!(
+            matches!(
+                harness.seen.lock().unwrap().last(),
+                Some(ConnectionEvent::Connected)
+            ),
+            "the observer behind the panicking one still gets the same event"
+        );
+
+        let data = harness
+            .encode(device_conflict_kicked(&DevicePlatform::PC, "new-device"))
+            .await;
+        harness.core.handle_received_message(data, true).await;
+        harness.peer_closes();
+        assert_eq!(harness.disconnects(), vec![DEVICE_CONFLICT_REASON]);
+
+        let late = Arc::new(StdMutex::new(Vec::new()));
+        harness
+            .core
+            .add_observer(Arc::new(RecordingObserver(Arc::clone(&late))));
+        harness.core.set_disconnect_requested(true);
+        harness
+            .core
+            .handle_connection_event(&ConnectionEvent::Disconnected("Client disconnected".into()));
+        assert_eq!(
+            late.lock().unwrap().len(),
+            1,
+            "observer added after the panic"
+        );
     }
 
     /// 读循环里的对端关闭恰好落在被踢处理的中间：被踢处理已经把状态置为断开（对端关闭因此不等

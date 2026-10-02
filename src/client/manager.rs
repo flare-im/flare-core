@@ -11,7 +11,9 @@ use crate::common::MessageParser;
 use crate::common::error::Result;
 use crate::common::platform::sleep;
 use crate::common::protocol::Frame;
-use crate::transport::events::{ArcObserver, ConnectionEvent};
+use crate::transport::events::{
+    ArcObserver, ConnectionEvent, deliver_to_observers, observer_snapshot,
+};
 
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -287,13 +289,12 @@ impl ClientConnectionManager {
                             // 注意：这里简化了，实际应该从 Client 获取 Connection
                         }
 
-                        // 通知观察者
-                        {
-                            let observers_guard = observers.lock().unwrap();
-                            for observer in observers_guard.iter() {
-                                observer.on_event(&ConnectionEvent::Connected);
-                            }
-                        }
+                        // 通知观察者（锁外回调，见 `notify_observers`）
+                        deliver_to_observers(
+                            &observer_snapshot(&observers),
+                            &ConnectionEvent::Connected,
+                            "client connection manager",
+                        );
 
                         // 重连成功，退出重连循环
                         break;
@@ -341,22 +342,27 @@ impl ClientConnectionManager {
 
     /// 添加观察者
     pub fn add_observer(&self, observer: ArcObserver) {
-        let mut observers = self.observers.lock().unwrap();
-        observers.push(observer);
+        self.observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(observer);
     }
 
     /// 移除观察者
     pub fn remove_observer(&self, observer: ArcObserver) {
-        let mut observers = self.observers.lock().unwrap();
-        observers.retain(|o| !Arc::ptr_eq(o, &observer));
+        self.observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|o| !Arc::ptr_eq(o, &observer));
     }
 
-    /// 通知所有观察者
+    /// 通知所有观察者：先取快照再在锁外回调，一个观察者 panic 不毒化列表、不影响其余观察者。
     fn notify_observers(&self, event: &ConnectionEvent) {
-        let observers = self.observers.lock().unwrap();
-        for observer in observers.iter() {
-            observer.on_event(event);
-        }
+        deliver_to_observers(
+            &observer_snapshot(&self.observers),
+            event,
+            "client connection manager",
+        );
     }
 
     /// 检查是否已连接

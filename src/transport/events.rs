@@ -88,6 +88,44 @@ pub trait ConnectionObserver: Send + Sync {
 /// 线程安全的、引用计数的观察者类型别名
 pub type ArcObserver = Arc<dyn ConnectionObserver>;
 
+/// 观察者列表的快照，供锁外逐个回调。
+///
+/// 列表只做 push、retain 与 clone，锁被毒化（别处持锁时 panic）不代表列表不一致，照常取用；
+/// 按毒化丢弃的话，此后所有通知——包括踢线原因——都会被静默丢掉。
+pub(crate) fn observer_snapshot(observers: &Mutex<Vec<ArcObserver>>) -> Vec<ArcObserver> {
+    observers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// 把一个事件逐个交给观察者，调用方不得持有观察者列表的锁。
+///
+/// 某个观察者 panic 时记一条 ERROR 后继续：其余观察者照常收到这次事件，panic 也不会沿调用方
+/// （读循环、重连任务）上抛。
+pub(crate) fn deliver_to_observers(
+    observers: &[ArcObserver],
+    event: &ConnectionEvent,
+    source: &'static str,
+) {
+    for observer in observers {
+        let delivered =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer.on_event(event)));
+        if let Err(panic) = delivered {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic payload");
+            tracing::error!(
+                source,
+                panic = message,
+                "connection observer panicked; the other observers still receive the event"
+            );
+        }
+    }
+}
+
 pub(crate) fn notify_observers(
     observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
     event: &ConnectionEvent,
@@ -284,5 +322,38 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert_eq!(observers.lock().unwrap().len(), 1);
+    }
+
+    struct PanickingObserver;
+
+    impl ConnectionObserver for PanickingObserver {
+        fn on_event(&self, _event: &ConnectionEvent) {
+            panic!("observer bug");
+        }
+    }
+
+    /// 锁被毒化后照样取到快照；排在前面的观察者 panic，后面的照常收到事件，panic 不上抛。
+    #[test]
+    fn snapshot_survives_a_poisoned_lock_and_delivery_isolates_panics() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observers = Arc::new(Mutex::new(Vec::<ArcObserver>::new()));
+        observers.lock().unwrap().push(Arc::new(PanickingObserver));
+        observers.lock().unwrap().push(Arc::new(CountingObserver {
+            calls: Arc::clone(&calls),
+            drops: Arc::new(AtomicUsize::new(0)),
+        }));
+        let poisoner = Arc::clone(&observers);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the observer list");
+        })
+        .join();
+        assert!(observers.is_poisoned());
+
+        let snapshot = observer_snapshot(&observers);
+        assert_eq!(snapshot.len(), 2);
+        deliver_to_observers(&snapshot, &ConnectionEvent::Connected, "test observers");
+        deliver_to_observers(&snapshot, &ConnectionEvent::Connected, "test observers");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
