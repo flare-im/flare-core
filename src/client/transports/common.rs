@@ -58,12 +58,11 @@ impl ConnectionObserver for ClientMessageObserver {
                 if !negotiated {
                     self.record_pre_negotiation_rejection(data);
                 }
-                // 记一帧在途，处理完（WASM 为出队处理完或被丢弃）再记完成
-                core.inbound_frame_read();
                 #[cfg(target_arch = "wasm32")]
                 {
                     // Browser onmessage is sync; queue bytes and drain on the LocalSet task
                     // that is already running `wait_for_negotiation` / `run_async`.
+                    // 入队时记一帧在途，出队处理完或被丢弃时记完成。
                     let _ = negotiated;
                     core.push_wasm_inbound(data_clone);
                     let core_drain = Arc::clone(&core);
@@ -73,9 +72,12 @@ impl ConnectionObserver for ClientMessageObserver {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
+                    // 记一帧在途；守卫随处理任务结束 drop 时记完成——任务 panic、被取消或没跑起来
+                    // 也一样，在途数不会卡住而让之后每次对端关闭都白等 INBOUND_DRAIN_BOUND。
+                    let done = core.inbound_frame_read();
                     crate::client::runtime::spawn_client_task(async move {
+                        let _done = done;
                         core.handle_received_message(data_clone, negotiated).await;
-                        core.inbound_frame_done();
                     });
                 }
             }
@@ -409,6 +411,91 @@ mod tests {
         );
         assert!(!core.can_send());
         assert!(!core.is_negotiation_completed());
+    }
+
+    /// 上层观察者处理入站帧时 panic。
+    struct PanicsOnFrames;
+
+    impl ConnectionObserver for PanicsOnFrames {
+        fn on_event(&self, event: &ConnectionEvent) {
+            if let ConnectionEvent::Message(_) = event {
+                panic!("observer panicked while handling a frame");
+            }
+        }
+    }
+
+    /// 处理入站帧的任务 panic（上层观察者出错）：这帧照样记为处理完。否则在途数卡在 1，此后每次
+    /// 协商完成后的对端关闭都要先白等满 INBOUND_DRAIN_BOUND 才处理。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_frame_whose_handler_panics_does_not_delay_later_closes() {
+        use crate::common::protocol::{Reliability, builder::pong, frame_with_system_command};
+
+        let mut core = ClientCore::new(&ClientConfig::default());
+        core.set_client_connection(Arc::new(Mutex::new(
+            Box::new(ClosedConnection) as Box<dyn Connection>
+        )));
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.update_parser(
+            crate::common::protocol::SerializationFormat::Protobuf,
+            crate::common::compression::CompressionAlgorithm::Gzip,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .await;
+        core.stop_heartbeat();
+        core.add_observer(Arc::new(PanicsOnFrames));
+        let data = core
+            .parser
+            .lock()
+            .await
+            .serialize(&frame_with_system_command(pong(), Reliability::BestEffort))
+            .expect("serialize");
+
+        let observer = ClientMessageObserver::new(Arc::new(core.clone()));
+        observer.on_event(&ConnectionEvent::Message(data));
+        for _ in 0..50 {
+            if !core.has_inbound_in_flight() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !core.has_inbound_in_flight(),
+            "a frame whose handler panicked is still counted as in flight"
+        );
+        assert!(
+            !core.should_defer_close_until_inbound_drained(),
+            "a later peer close would wait INBOUND_DRAIN_BOUND for a frame that is gone"
+        );
+    }
+
+    /// 在途帧的守卫在处理任务被取消、或任务还没跑起来就被丢掉时也记完成。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn an_inbound_frame_counts_as_done_when_its_task_is_cancelled_or_never_runs() {
+        let core = ClientCore::new(&ClientConfig::default());
+
+        let done = core.inbound_frame_read();
+        let cancelled = tokio::spawn(async move {
+            let _done = done;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(core.has_inbound_in_flight());
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        assert!(!core.has_inbound_in_flight());
+
+        let done = core.inbound_frame_read();
+        let never_polled = async move {
+            let _done = done;
+        };
+        drop(never_polled);
+        assert!(!core.has_inbound_in_flight());
+        assert!(
+            core.wait_inbound_drained(std::time::Duration::from_millis(50))
+                .await
+        );
     }
 
     /// 旧版本序列化出的配置没有这个字段：反序列化时取默认值 `true`，行为不变。

@@ -171,7 +171,34 @@ pub struct ClientCore {
     /// WASM: browser WebSocket 回调线程同步入队，由 `wait_for_negotiation`/drain 在 LocalSet 内处理；
     /// 每帧带着入队那一刻的协商状态（见 [`Self::handle_received_message`]）
     #[cfg(target_arch = "wasm32")]
-    wasm_inbound: Arc<StdMutex<Vec<(Vec<u8>, bool)>>>,
+    wasm_inbound: Arc<StdMutex<Vec<WasmInboundFrame>>>,
+}
+
+/// WASM 入站队列里的一帧：数据、入队那一刻的协商状态、在途守卫。
+#[cfg(target_arch = "wasm32")]
+type WasmInboundFrame = (Vec<u8>, bool, InboundFrameDone);
+
+/// 一帧已记为在途的入站数据（见 [`ClientCore::inbound_frame_read`]）：drop 时记这帧处理完。
+///
+/// 处理它的任务 panic、被取消（包括运行时关闭、任务还没跑起来就被丢掉），或这帧被丢弃时，都随 drop
+/// 记完成。否则在途数永远不归零，此后这个 core 上每次协商完成后的对端关闭都要白等满
+/// [`INBOUND_DRAIN_BOUND`] 才上报。
+#[must_use = "dropping the guard marks the inbound frame as handled"]
+pub(crate) struct InboundFrameDone {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    drained: Arc<Notify>,
+}
+
+impl Drop for InboundFrameDone {
+    fn drop(&mut self) {
+        let previous = self
+            .in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .unwrap_or(0);
+        if previous <= 1 {
+            self.drained.notify_waiters();
+        }
+    }
 }
 
 impl ClientCore {
@@ -217,16 +244,18 @@ impl ClientCore {
     #[cfg(target_arch = "wasm32")]
     pub fn push_wasm_inbound(&self, data: Vec<u8>) {
         let negotiated = self.is_negotiation_completed();
+        // 记一帧在途；出队处理完、被丢弃（队满挤掉、排空任务被取消）时随守卫记完成
+        let done = self.inbound_frame_read();
         if let Ok(mut queue) = self.wasm_inbound.lock() {
             if queue.len() >= MAX_WASM_INBOUND_QUEUE {
-                queue.remove(0);
-                self.inbound_frame_done();
+                // 挤掉的帧连同守卫一起 drop，记为处理完
+                drop(queue.remove(0));
                 tracing::warn!(
                     "[ClientCore] wasm inbound queue full (max {}), dropping oldest frame",
                     MAX_WASM_INBOUND_QUEUE
                 );
             }
-            queue.push((data, negotiated));
+            queue.push((data, negotiated, done));
         }
         self.negotiation_notify.notify_waiters();
     }
@@ -234,13 +263,13 @@ impl ClientCore {
     /// WASM: process all queued inbound frames on the current LocalSet task.
     #[cfg(target_arch = "wasm32")]
     pub async fn drain_wasm_inbound(&self) {
-        let batch: Vec<(Vec<u8>, bool)> = match self.wasm_inbound.lock() {
+        let batch: Vec<WasmInboundFrame> = match self.wasm_inbound.lock() {
             Ok(mut queue) if !queue.is_empty() => queue.drain(..).collect(),
             _ => return,
         };
-        for (data, negotiated) in batch {
+        // 每帧的守卫在它处理完时 drop；排空中途被取消时，还没处理的帧随 batch 一起 drop
+        for (data, negotiated, _done) in batch {
             self.handle_received_message(data, negotiated).await;
-            self.inbound_frame_done();
         }
     }
 
@@ -317,19 +346,13 @@ impl ClientCore {
         false
     }
 
-    /// 读循环读出一帧、交给处理任务之前调用；处理完调用 [`Self::inbound_frame_done`]。
-    pub(crate) fn inbound_frame_read(&self) {
+    /// 读循环读出一帧、交给处理任务之前调用：记一帧在途，返回的守卫随这帧处理完（或被丢弃）drop，
+    /// drop 时记完成（见 [`InboundFrameDone`]）。
+    pub(crate) fn inbound_frame_read(&self) -> InboundFrameDone {
         self.inbound_in_flight.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// 一帧入站数据处理完（或被丢弃）。
-    pub(crate) fn inbound_frame_done(&self) {
-        let previous = self
-            .inbound_in_flight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .unwrap_or(0);
-        if previous <= 1 {
-            self.inbound_drained.notify_waiters();
+        InboundFrameDone {
+            in_flight: Arc::clone(&self.inbound_in_flight),
+            drained: Arc::clone(&self.inbound_drained),
         }
     }
 
