@@ -59,6 +59,13 @@ impl BaseServerBuilderConfig {
         self
     }
 
+    /// 设置停机宽限：下发 CLOSE(`SERVER_SHUTDOWN`) 后等客户端自行断开多久（默认 1 s）
+    #[must_use]
+    pub fn with_shutdown_close_grace(mut self, grace: Duration) -> Self {
+        self.config = self.config.with_shutdown_close_grace(grace);
+        self
+    }
+
     /// 设置传输协议
     #[must_use]
     pub fn with_protocol(mut self, protocol: TransportProtocol) -> Self {

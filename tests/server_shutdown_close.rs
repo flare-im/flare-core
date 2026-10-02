@@ -53,13 +53,20 @@ fn free_tcp_port() -> u16 {
 }
 
 async fn start_server(port: u16) -> FlareServer {
+    start_server_with_grace(port, None).await
+}
+
+/// `grace` 为 `None` 时用默认停机宽限。
+async fn start_server_with_grace(port: u16, grace: Option<Duration>) -> FlareServer {
     init_tracing();
     let address = format!("127.0.0.1:{port}");
-    let server = FlareServerBuilder::new(address.clone(), Arc::new(NoopHandler))
+    let mut builder = FlareServerBuilder::new(address.clone(), Arc::new(NoopHandler))
         .with_protocols(vec![TransportProtocol::WebSocket])
-        .with_protocol_address(TransportProtocol::WebSocket, address)
-        .build()
-        .expect("build WebSocket server");
+        .with_protocol_address(TransportProtocol::WebSocket, address);
+    if let Some(grace) = grace {
+        builder = builder.with_shutdown_close_grace(grace);
+    }
+    let server = builder.build().expect("build WebSocket server");
     server.start().await.expect("start WebSocket server");
     server
 }
@@ -271,4 +278,51 @@ async fn clients_that_ignore_close_get_going_away_after_the_grace() {
         "the server waits out the grace for clients that ignore CLOSE: {stop_took:?}"
     );
     assert!(stop_took < SERVER_SHUTDOWN_CLOSE_GRACE + Duration::from_secs(3));
+}
+
+/// 停机宽限可按部署配置：配成 200 ms 时，不理会 CLOSE 的客户端在 200 ms 后就被关闭（1001），
+/// 停机不再固定等满 1 s。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_shutdown_grace_is_configurable() {
+    let grace = Duration::from_millis(200);
+    let port = free_tcp_port();
+    let server = start_server_with_grace(port, Some(grace)).await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("raw WebSocket handshake");
+    wait_until(
+        "server sees the raw client",
+        Duration::from_secs(3),
+        || async { server.connection_count() == 1 },
+    )
+    .await;
+
+    let stop = tokio::spawn(async move {
+        let started = Instant::now();
+        server.stop().await.expect("stop server");
+        started.elapsed()
+    });
+    let close = loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("server must close the raw client")
+        {
+            Some(Ok(Message::Close(frame))) => break frame,
+            Some(Ok(_)) => {}
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    };
+    let close = close.expect("the close frame must carry a status code");
+    assert_eq!(close.code, CloseCode::Away);
+    assert_eq!(close.reason.as_str(), SERVER_SHUTDOWN_REASON);
+
+    let stop_took = stop.await.expect("stop task");
+    assert!(
+        stop_took >= grace.saturating_sub(Duration::from_millis(50)),
+        "the server still waits out the configured grace: {stop_took:?}"
+    );
+    assert!(
+        stop_took < SERVER_SHUTDOWN_CLOSE_GRACE.saturating_sub(Duration::from_millis(200)),
+        "a 200 ms grace must not wait for the 1 s default: {stop_took:?}"
+    );
 }

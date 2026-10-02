@@ -22,7 +22,8 @@ pub const SERVER_SHUTDOWN_REASON: &str = "SERVER_SHUTDOWN";
 /// 停机 CLOSE 帧 metadata `code` 的取值：服务暂不可用，客户端应稍后重连。
 pub const SERVER_SHUTDOWN_CODE: &str = "SERVICE_UNAVAILABLE";
 
-/// 服务端下发停机 CLOSE 后等客户端自行断开的宽限；期满还在的连接由服务端关闭。
+/// 服务端下发停机 CLOSE 后等客户端自行断开的默认宽限；期满还在的连接由服务端关闭。
+/// 按部署调整用 `ServerConfig::shutdown_close_grace`（各服务端构建器的 `with_shutdown_close_grace`）。
 pub const SERVER_SHUTDOWN_CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 /// 服务端停机后，客户端第一次重连前至少等这么久。

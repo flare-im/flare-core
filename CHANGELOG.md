@@ -58,8 +58,9 @@
 - `ConnectionEvent::Error` 明确为终止事件：传输先标记关闭、取走全部观察者再上报，此后不再上报
   任何事件，也不会再补一个 `Disconnected`。内置的三种传输一直是这样做的，此前文档写的是
   「非致命错误」。自定义传输若要上报可恢复的错误，不能用这个事件。
-- `ClientConfig` 新增 `reconnect_on_send`（见下文「新增」）。用结构体字面量构造它的代码需要补上
-  字段或改用 `..Default::default()`；反序列化时缺这个字段取默认值 `true`，行为不变。
+- `ClientConfig` 新增 `reconnect_on_send`，`ServerConfig` 新增 `shutdown_close_grace`（见下文「新增」）。
+  用结构体字面量构造它们的代码需要补上字段或改用 `..Default::default()`；反序列化时缺这两个
+  字段取默认值（`true`、1 s），行为不变。
 
 ### 修复
 
@@ -141,8 +142,8 @@
 
 - 服务端停机的关闭约定（`common::shutdown`）：停止前给每条在线连接下发 CLOSE 系统命令，
   `message` 与 metadata `reason` 为 `SERVER_SHUTDOWN`，metadata `code` 为
-  `SERVICE_UNAVAILABLE`；最多等 `SERVER_SHUTDOWN_CLOSE_GRACE`（1 s）让客户端自行断开，期满
-  还在的连接由服务端关闭：WebSocket 关闭帧为 1001（Going Away）、原因 `SERVER_SHUTDOWN`，
+  `SERVICE_UNAVAILABLE`；最多等停机宽限（默认 `SERVER_SHUTDOWN_CLOSE_GRACE`，1 s）让客户端
+  自行断开，期满还在的连接由服务端关闭：WebSocket 关闭帧为 1001（Going Away）、原因 `SERVER_SHUTDOWN`，
   QUIC 以应用错误码 0 与同一原因关闭连接。此前停机直接关连接，WebSocket 客户端看到的是 1005，
   分不清停机与故障。不认得 CLOSE 的旧客户端把它当作未知系统帧忽略，由服务端在宽限期满后关闭，
   行为与此前相同。新增 `server_shutdown_close`、`server_shutdown_close_frame`、
@@ -155,6 +156,8 @@
 - `Connection::close_going_away`（默认回落到 `close_with_reason`）：WebSocket 关闭帧带 1001
   与原因；`QUICTransport::with_connection` 记下流所在的连接后，以应用错误码 0 与原因关闭整条
   连接。
+- `ServerConfig::shutdown_close_grace` 与各服务端构建器的 `with_shutdown_close_grace`：按部署
+  设置停机宽限（默认 1 s，0 表示下发 CLOSE 后立即关闭）。此前固定为 1 s。
 - `ClientConfig::reconnect_on_send`（默认 `true`）与各客户端构建器的 `with_reconnect_on_send`：
   置为 `false` 时，连接断开后发送直接返回 `NOT_CONNECTED`，客户端不再自己重连（发送前的惰性重连与
   传输客户端发送时的 `try_reconnect` 都不做），重连交给上层。上层自带重连循环时（例如 IM SDK）应

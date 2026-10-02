@@ -317,11 +317,7 @@ impl Server for HybridServer {
             server.lock().await.stop_accepting().await;
         }
         if let Some(core) = &self.core {
-            ServerConnectionHelper::shutdown_connections(
-                core,
-                crate::common::shutdown::SERVER_SHUTDOWN_CLOSE_GRACE,
-            )
-            .await;
+            ServerConnectionHelper::shutdown_connections(core, core.shutdown_close_grace()).await;
         }
 
         // 停止所有服务器

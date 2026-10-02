@@ -46,6 +46,8 @@ pub struct ServerCore {
     auth_enabled: bool,
     /// 认证超时时间（从配置读取）
     auth_timeout: Duration,
+    /// 停机宽限（从配置读取）
+    shutdown_close_grace: Duration,
     /// 默认序列化格式（用于协商）
     default_serialization_format: SerializationFormat,
     /// 默认压缩算法（用于协商）
@@ -187,6 +189,7 @@ impl ServerCore {
             authenticator: None,
             auth_enabled: config.auth_enabled,
             auth_timeout: config.auth_timeout,
+            shutdown_close_grace: config.shutdown_close_grace,
             default_serialization_format: config.default_serialization_format,
             default_compression: config.default_compression.clone(),
             default_encryption: config.default_encryption.clone(),
@@ -310,6 +313,11 @@ impl ServerCore {
     /// 获取认证超时时间
     pub fn auth_timeout(&self) -> Duration {
         self.auth_timeout
+    }
+
+    /// 停机时下发 CLOSE 后等客户端自行断开的宽限（`ServerConfig::shutdown_close_grace`）
+    pub fn shutdown_close_grace(&self) -> Duration {
+        self.shutdown_close_grace
     }
 
     /// 添加中间件（用于消息处理管道）

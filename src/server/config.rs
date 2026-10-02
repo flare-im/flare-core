@@ -49,6 +49,15 @@ pub struct ServerConfig {
     pub auth_enabled: bool,
     /// 认证超时时间（连接建立后，如果在此时间内未完成认证，连接将被关闭）
     pub auth_timeout: Duration,
+    /// 停机时下发 CLOSE(`SERVER_SHUTDOWN`) 后等客户端自行断开的宽限，期满还在的连接由服务端关闭。
+    /// 默认 [`SERVER_SHUTDOWN_CLOSE_GRACE`](crate::common::shutdown::SERVER_SHUTDOWN_CLOSE_GRACE)（1 s）；
+    /// 设为 0 时不等，下发后立即关闭。
+    #[serde(default = "default_shutdown_close_grace")]
+    pub shutdown_close_grace: Duration,
+}
+
+fn default_shutdown_close_grace() -> Duration {
+    crate::common::shutdown::SERVER_SHUTDOWN_CLOSE_GRACE
 }
 
 impl Default for ServerConfig {
@@ -73,6 +82,7 @@ impl Default for ServerConfig {
             device_conflict_strategy: DeviceConflictStrategy::default(),
             auth_enabled: false,                   // 默认不启用认证
             auth_timeout: Duration::from_secs(30), // 默认认证超时 30 秒
+            shutdown_close_grace: default_shutdown_close_grace(),
         }
     }
 }
@@ -246,6 +256,12 @@ impl ServerConfig {
         self.auth_timeout = timeout;
         self
     }
+
+    /// 设置停机宽限（见 [`Self::shutdown_close_grace`]）
+    pub fn with_shutdown_close_grace(mut self, grace: Duration) -> Self {
+        self.shutdown_close_grace = grace;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +290,27 @@ mod tests {
         assert_eq!(config.max_handshake_concurrency, 32);
         assert_eq!(config.write_timeout, Duration::from_secs(2));
         assert_eq!(config.fanout_concurrency, 8);
+    }
+
+    /// 停机宽限默认 1 s、可配置；旧版本序列化出的配置没有这个字段时取默认值。
+    #[test]
+    fn shutdown_close_grace_defaults_to_one_second_and_is_configurable() {
+        let config = ServerConfig::default();
+        assert_eq!(config.shutdown_close_grace, Duration::from_secs(1));
+        assert_eq!(
+            config
+                .with_shutdown_close_grace(Duration::from_millis(250))
+                .shutdown_close_grace,
+            Duration::from_millis(250)
+        );
+
+        let mut value = serde_json::to_value(ServerConfig::default()).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("config object")
+            .remove("shutdown_close_grace");
+        let config: ServerConfig = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(config.shutdown_close_grace, Duration::from_secs(1));
     }
 
     #[test]

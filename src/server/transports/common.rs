@@ -3,9 +3,7 @@
 //! 提供 WebSocket 和 QUIC 服务端共享的逻辑和辅助函数
 
 use crate::common::generate_id;
-use crate::common::shutdown::{
-    SERVER_SHUTDOWN_CLOSE_GRACE, SERVER_SHUTDOWN_REASON, server_shutdown_close_frame,
-};
+use crate::common::shutdown::{SERVER_SHUTDOWN_REASON, server_shutdown_close_frame};
 use crate::server::config::ServerConfig;
 use crate::server::connection::ConnectionManager;
 use crate::server::handle::ServerHandle;
@@ -81,7 +79,7 @@ impl ServerConnectionHelper {
         // 停止心跳检测
         core.stop_heartbeat();
 
-        Self::shutdown_connections(core, SERVER_SHUTDOWN_CLOSE_GRACE).await;
+        Self::shutdown_connections(core, core.shutdown_close_grace()).await;
 
         Ok(())
     }

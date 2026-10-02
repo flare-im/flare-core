@@ -367,6 +367,12 @@ impl ServerBuilder {
         self
     }
 
+    /// 设置停机宽限：下发 CLOSE(`SERVER_SHUTDOWN`) 后等客户端自行断开多久（默认 1 s）
+    pub fn with_shutdown_close_grace(mut self, grace: std::time::Duration) -> Self {
+        self.base = self.base.with_shutdown_close_grace(grace);
+        self
+    }
+
     /// 设置消息处理函数
     ///
     /// # 参数
