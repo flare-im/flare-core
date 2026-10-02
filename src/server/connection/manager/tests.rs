@@ -937,12 +937,14 @@ fn user_index_follows_a_tenant_written_after_the_user() {
     );
 }
 
+#[cfg(feature = "compression-gzip")]
 /// 记下写出的每一帧原始字节。
 struct RecordingConnection {
     last_active: Mutex<Instant>,
     sent: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
+#[cfg(feature = "compression-gzip")]
 #[async_trait]
 impl Connection for RecordingConnection {
     fn add_observer(&mut self, _observer: ArcObserver) {}
@@ -962,6 +964,7 @@ impl Connection for RecordingConnection {
     }
 }
 
+#[cfg(feature = "compression-gzip")]
 async fn wait_for_frames(sent: &Mutex<Vec<Vec<u8>>>, expected: usize) -> Vec<Vec<u8>> {
     tokio::time::timeout(Duration::from_millis(500), async {
         loop {
