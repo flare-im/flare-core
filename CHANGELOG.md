@@ -58,6 +58,8 @@
 - `ConnectionEvent::Error` 明确为终止事件：传输先标记关闭、取走全部观察者再上报，此后不再上报
   任何事件，也不会再补一个 `Disconnected`。内置的三种传输一直是这样做的，此前文档写的是
   「非致命错误」。自定义传输若要上报可恢复的错误，不能用这个事件。
+- `ClientConfig` 新增 `reconnect_on_send`（见下文「新增」）。用结构体字面量构造它的代码需要补上
+  字段或改用 `..Default::default()`；反序列化时缺这个字段取默认值 `true`，行为不变。
 
 ### 修复
 
@@ -127,6 +129,9 @@
   `SERVER_SHUTDOWN`）；协议违例、版本不符、帧长度非法等仍是 `Error`。此前一律报 `Error`，
   客户端把服务端停机、对端重启都当成故障，只监听断开的上层不会重连；服务端业务层对这几类关闭
   只收到 `on_disconnect`，不再先收到 `on_error`。
+- 客户端（`FlareClient`）：单协议时不再按文本把 WebSocket 协议错误当作协议竞速的正常错误吞掉。此前
+  当前连接以这类错误终止时，监听器既收不到断开也收不到错误，只能等下一次发送时的惰性重连。竞速模式下
+  关闭未选中连接的错误照旧过滤。
 - 服务端与客户端日志去掉装饰用的 emoji。
 
 ### 新增
@@ -147,6 +152,11 @@
 - `Connection::close_going_away`（默认回落到 `close_with_reason`）：WebSocket 关闭帧带 1001
   与原因；`QUICTransport::with_connection` 记下流所在的连接后，以应用错误码 0 与原因关闭整条
   连接。
+- `ClientConfig::reconnect_on_send`（默认 `true`）与各客户端构建器的 `with_reconnect_on_send`：
+  置为 `false` 时，连接断开后发送直接返回 `NOT_CONNECTED`，客户端不再自己重连（发送前的惰性重连与
+  传输客户端发送时的 `try_reconnect` 都不做），重连交给上层。上层自带重连循环时（例如 IM SDK）应
+  关掉它：两条路径并行时，旧客户端在下一次发送时自己连上、上层又新建一个客户端，同一用户出现两条
+  连接，旧客户端还带着建连时的令牌。
 - `Server::stop_accepting`（默认什么都不做）：停止接受新连接、保留已建立的连接。WebSocket、
   TCP、QUIC 服务端实现了它，`stop` 也先停止接受新连接；`HybridServer::stop` 先关所有协议的入口，
   再统一通知在线连接。

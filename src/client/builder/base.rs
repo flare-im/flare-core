@@ -143,6 +143,13 @@ impl BaseClientBuilderConfig {
         self
     }
 
+    /// 设置断开后发送时是否由客户端自己重连（见 [`ClientConfig::reconnect_on_send`]）
+    #[must_use]
+    pub fn with_reconnect_on_send(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_reconnect_on_send(enabled);
+        self
+    }
+
     /// 启用消息路由
     #[must_use]
     pub fn enable_router(mut self) -> Self {

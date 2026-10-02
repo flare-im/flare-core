@@ -284,6 +284,13 @@ impl FlareClientBuilder {
         self
     }
 
+    /// 设置断开后发送时是否由客户端自己重连（默认 `true`）。上层自带重连循环时置为 `false`，
+    /// 见 [`crate::client::config::ClientConfig::reconnect_on_send`]。
+    pub fn with_reconnect_on_send(mut self, enabled: bool) -> Self {
+        self.base = self.base.with_reconnect_on_send(enabled);
+        self
+    }
+
     /// 设置 Token（用于认证）
     pub fn with_token(mut self, token: String) -> Self {
         self.base = self.base.with_token(token);
@@ -339,6 +346,7 @@ impl FlareClientBuilder {
         let observer = Arc::new(FlareObserver {
             pipeline: pipeline.clone(),
             listener: listener.clone(),
+            race_mode: self.base.config.is_race_mode(),
         });
 
         let observer_clone = observer.clone();
@@ -464,6 +472,8 @@ impl FlareClient {
 struct FlareObserver {
     pipeline: Arc<MessagePipeline>,
     listener: Arc<dyn MessageListener>,
+    /// 协议竞速：未选中的连接与选中的连接共用观察者列表，关闭它们时的错误也会到这里。
+    race_mode: bool,
 }
 
 impl ConnectionObserver for FlareObserver {
@@ -496,10 +506,13 @@ impl ConnectionObserver for FlareObserver {
                 // 过滤协议竞速时关闭未选中连接导致的错误
                 // 这些错误是正常的，因为协议竞速会选择最快的协议，其他协议会被关闭
                 let err_str = format!("{:?}", err);
-                // 协议竞速错误：关闭未选中连接时的正常错误
-                let is_race_error = err_str.contains("Connection reset without closing handshake")
-                    || (err_str.contains("ConnectionFailed")
-                        && err_str.contains("WebSocket protocol error"));
+                // 协议竞速错误：关闭未选中连接时的正常错误。只在竞速模式下按文本过滤：单协议时
+                // 没有未选中的连接，这样的错误就是当前连接的终止性错误，吞掉它，上层既收不到
+                // 断开也收不到错误，不会重连。
+                let is_race_error = self.race_mode
+                    && (err_str.contains("Connection reset without closing handshake")
+                        || (err_str.contains("ConnectionFailed")
+                            && err_str.contains("WebSocket protocol error")));
 
                 // 连接丢失错误：可能是网络问题或服务器关闭连接
                 let is_connection_lost = err_str.contains("connection lost")
@@ -515,7 +528,7 @@ impl ConnectionObserver for FlareObserver {
                     // 连接丢失错误，记录为 warn 级别并通知 listener
                     // 注意：底层客户端（WebSocketClient/QUICClient）会自动尝试重连
                     warn!("[FlareClient] 连接丢失: {:?}", err);
-                    info!("[FlareClient] 底层客户端将自动尝试重连（如果配置了重连）");
+                    info!("[FlareClient] 下一次发送时底层客户端会尝试重连（除非关掉了发送前重连）");
                     let listener = self.listener.clone();
                     // 使用 Arc<str> 避免 String clone，减少内存分配
                     let err_str_arc: Arc<str> = Arc::from(err_str.as_str());
@@ -688,7 +701,11 @@ mod tests {
                 listener: listener.clone(),
             }))
             .await;
-        let observer = FlareObserver { pipeline, listener };
+        let observer = FlareObserver {
+            pipeline,
+            listener,
+            race_mode: false,
+        };
 
         let slow = FrameBuilder::new()
             .with_message_id("slow-data-response".to_string())
@@ -715,5 +732,62 @@ mod tests {
             .expect("ACK listener should remain alive");
 
         let _ = first_release_tx.send(());
+    }
+
+    /// 记下 `on_error` 收到的错误文本。
+    #[derive(Default)]
+    struct ErrorRecorder {
+        errors: std::sync::Mutex<Vec<String>>,
+        seen: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl MessageListener for ErrorRecorder {
+        async fn on_message(&self, _frame: &Frame) -> Result<Option<Frame>> {
+            Ok(None)
+        }
+
+        async fn on_error(&self, error: &str) -> Result<()> {
+            self.errors.lock().unwrap().push(error.to_string());
+            self.seen.notify_one();
+            Ok(())
+        }
+    }
+
+    fn observer_with(listener: Arc<ErrorRecorder>, race_mode: bool) -> FlareObserver {
+        FlareObserver {
+            pipeline: Arc::new(MessagePipeline::new(MessageParser::json())),
+            listener,
+            race_mode,
+        }
+    }
+
+    /// 单协议时，当前连接的 WebSocket 协议错误是终止性错误，必须交给监听器：吞掉它，上层既收不到
+    /// 断开也收不到错误，关掉发送前重连的上层就再也不会重连。竞速模式下同样的文本仍按关闭未选中
+    /// 连接的正常错误过滤。
+    #[tokio::test]
+    async fn websocket_protocol_errors_reach_the_listener_outside_protocol_races() {
+        let protocol_error = crate::common::error::FlareError::connection_failed(
+            "WebSocket protocol error: Encountered invalid opcode: 3".to_string(),
+        );
+
+        let listener = Arc::new(ErrorRecorder::default());
+        let observer = observer_with(listener.clone(), false);
+        observer.on_event(&ConnectionEvent::Error(protocol_error.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), listener.seen.notified())
+            .await
+            .expect("the protocol error must reach the listener");
+        let errors = listener.errors.lock().unwrap().clone();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("WebSocket protocol error"), "{errors:?}");
+
+        let listener = Arc::new(ErrorRecorder::default());
+        let observer = observer_with(listener.clone(), true);
+        observer.on_event(&ConnectionEvent::Error(protocol_error));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            listener.errors.lock().unwrap().is_empty(),
+            "a race loser's close error stays filtered"
+        );
     }
 }

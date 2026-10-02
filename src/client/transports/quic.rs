@@ -354,11 +354,12 @@ impl Client for QUICClient {
     }
 
     async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        // 如果未连接，尝试重连
-        if !self.is_connected()
-            && !self.core.is_disconnect_requested()
-            && ClientConnectionHelper::can_reconnect(self.config.max_reconnect_attempts)
-        {
+        // 未连接时自己重连（关掉了发送前重连、或我方已主动断开时不重连）
+        if ClientConnectionHelper::should_reconnect_before_send(
+            self.is_connected(),
+            &self.core,
+            &self.config,
+        ) {
             self.try_reconnect().await?;
         }
 

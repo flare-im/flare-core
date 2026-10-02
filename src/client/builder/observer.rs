@@ -153,6 +153,12 @@ impl ObserverClientBuilder {
         self
     }
 
+    /// 设置断开后发送时是否由客户端自己重连（默认 `true`）
+    pub fn with_reconnect_on_send(mut self, enabled: bool) -> Self {
+        self.base = self.base.with_reconnect_on_send(enabled);
+        self
+    }
+
     /// 启用消息路由
     ///
     /// 启用后，可以通过 ClientCore 的 router 方法注册消息处理器

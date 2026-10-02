@@ -152,6 +152,8 @@ ClientBuilder::new("ws://127.0.0.1:8080")
     .with_connect_timeout(Duration::from_secs(10))
     .with_reconnect_interval(Duration::from_secs(3))
     .with_max_reconnect_attempts(Some(5))
+    // 断开后发送前由客户端自己重连（默认）；上层自带重连循环时置 false
+    .with_reconnect_on_send(true)
 
     // TLS 配置（QUIC 需要）
     .with_tls(TlsConfig::default())
@@ -531,6 +533,8 @@ let client = FlareClientBuilder::new("ws://127.0.0.1:8080")
     .with_connect_timeout(Duration::from_secs(10))
     .with_reconnect_interval(Duration::from_secs(3))
     .with_max_reconnect_attempts(Some(5))
+    // 断开后发送前由客户端自己重连（默认）；上层自带重连循环时置 false
+    .with_reconnect_on_send(true)
 
     // TLS 配置（QUIC 需要）
     .with_tls(TlsConfig::default())
@@ -550,7 +554,8 @@ let client = FlareClientBuilder::new("ws://127.0.0.1:8080")
 2. **压缩协商**：自动协商压缩算法（Gzip/Zstd/None）
 3. **加密协商**：自动协商加密方式（AES-256-GCM/None）
 4. **心跳检测**：自动发送心跳并检测连接健康状态
-5. **自动重连**：连接断开时自动重连（如果配置）
+5. **自动重连**：连接断开后，下一次发送前自动重连（如果配置）。上层自带重连循环时用
+   `with_reconnect_on_send(false)` 关掉，未连接时发送直接返回 `NOT_CONNECTED`，重连只走上层一条路径
 6. **消息解析**：根据协商结果自动解析消息
 
 ### 扩展能力

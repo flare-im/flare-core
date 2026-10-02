@@ -220,6 +220,20 @@ impl ClientConnectionHelper {
         max_attempts.map(|n| n > 0).unwrap_or(true)
     }
 
+    /// 发送前是否由传输客户端自己重连：未连接、不是我方主动断开、配置允许发送前重连
+    /// （[`ClientConfig::reconnect_on_send`](crate::client::config::ClientConfig::reconnect_on_send)）
+    /// 且重连次数不为 0。
+    pub fn should_reconnect_before_send(
+        connected: bool,
+        core: &ClientCore,
+        config: &crate::client::config::ClientConfig,
+    ) -> bool {
+        !connected
+            && config.reconnect_on_send
+            && !core.is_disconnect_requested()
+            && Self::can_reconnect(config.max_reconnect_attempts)
+    }
+
     /// 设置连接观察者并发送 CONNECT 消息
     ///
     /// 统一处理连接设置和 CONNECT 消息发送
@@ -241,5 +255,55 @@ impl ClientConnectionHelper {
         core.send_connect_message(Arc::clone(&connection)).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::config::ClientConfig;
+
+    /// 传输客户端发送前自己重连的条件：未连接、允许发送前重连、不是我方主动断开、重连次数不为 0。
+    #[test]
+    fn reconnect_before_send_honours_the_switch() {
+        let config = ClientConfig::default();
+        let core = ClientCore::new(&config);
+        assert!(ClientConnectionHelper::should_reconnect_before_send(
+            false, &core, &config
+        ));
+        assert!(!ClientConnectionHelper::should_reconnect_before_send(
+            true, &core, &config
+        ));
+
+        let off = ClientConfig::default().with_reconnect_on_send(false);
+        let core_off = ClientCore::new(&off);
+        assert!(
+            !ClientConnectionHelper::should_reconnect_before_send(false, &core_off, &off),
+            "reconnect_on_send = false leaves reconnecting to the caller"
+        );
+
+        let no_attempts = ClientConfig::default().with_max_reconnect_attempts(Some(0));
+        assert!(!ClientConnectionHelper::should_reconnect_before_send(
+            false,
+            &ClientCore::new(&no_attempts),
+            &no_attempts
+        ));
+
+        core.set_disconnect_requested(true);
+        assert!(!ClientConnectionHelper::should_reconnect_before_send(
+            false, &core, &config
+        ));
+    }
+
+    /// 旧版本序列化出的配置没有这个字段：反序列化时取默认值 `true`，行为不变。
+    #[test]
+    fn configs_without_the_switch_keep_reconnecting_on_send() {
+        let mut value = serde_json::to_value(ClientConfig::default()).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("config object")
+            .remove("reconnect_on_send");
+        let config: ClientConfig = serde_json::from_value(value).expect("deserialize");
+        assert!(config.reconnect_on_send);
     }
 }

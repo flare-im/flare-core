@@ -36,6 +36,14 @@ pub struct ClientConfig {
     pub reconnect_interval: Duration,
     /// 最大重连次数（None 表示无限重连）
     pub max_reconnect_attempts: Option<u32>,
+    /// 连接断开后，下一次发送是否由客户端自己重连（默认 `true`）。
+    ///
+    /// 上层自带重连循环时（例如 IM SDK 的重连监视器）应置为 `false`：未连接时发送直接返回
+    /// 连接错误，重连只走上层那一条路径。两条路径并行时，旧客户端会在下一次发送时自己连上，
+    /// 上层又新建一个客户端，同一用户出现两条连接（服务端按设备冲突处理），旧客户端还带着
+    /// 建连时的旧令牌，也不经过上层的重连后同步。
+    #[serde(default = "default_reconnect_on_send")]
+    pub reconnect_on_send: bool,
     /// 心跳配置
     pub heartbeat: HeartbeatConfig,
     /// TLS 配置
@@ -54,6 +62,10 @@ pub struct ClientConfig {
     pub token: Option<String>,
 }
 
+fn default_reconnect_on_send() -> bool {
+    true
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -70,6 +82,7 @@ impl Default for ClientConfig {
             connect_timeout: Duration::from_secs(30),
             reconnect_interval: Duration::from_secs(5),
             max_reconnect_attempts: Some(5),
+            reconnect_on_send: default_reconnect_on_send(),
             heartbeat: HeartbeatConfig::default(),
             tls: TlsConfig::none(),
             connection_id: None,
@@ -208,6 +221,12 @@ impl ClientConfig {
     /// 设置最大重连次数（None 表示无限重连）
     pub fn with_max_reconnect_attempts(mut self, max: Option<u32>) -> Self {
         self.max_reconnect_attempts = max;
+        self
+    }
+
+    /// 设置断开后发送时是否由客户端自己重连（见 [`Self::reconnect_on_send`]）
+    pub fn with_reconnect_on_send(mut self, enabled: bool) -> Self {
+        self.reconnect_on_send = enabled;
         self
     }
 
