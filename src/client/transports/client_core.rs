@@ -157,8 +157,10 @@ pub struct ClientCore {
     /// 服务端以结束会话的原因踢线（设备冲突、租户不可用，见 [`crate::common::kick::ends_session`]）：
     /// 记下原因，此后不再自动重连（包括发送前的重连），由应用重新登录后显式建连；新连接建立时清除。
     session_ended_by_server: Arc<StdMutex<Option<String>>>,
-    /// 要报给观察者、还没报出去的被踢原因。处理 KICKED 时登记，关连接带出的同一原因的断开事件把它
-    /// 取走；对端已先关掉连接（关连接事件早于 KICKED 被处理）时，由 KICKED 的处理补报。
+    /// 要报给观察者、还没报出去的被踢原因。处理 KICKED 时登记；此后这条连接上第一个断开或错误事件
+    /// （关连接带出的同一原因的断开，或读循环里并发到达的对端关闭）把它取走、以它上报；对端已先关掉
+    /// 连接、关连接没有带出事件时，由 KICKED 的处理补报。是否上报、以什么原因上报都在这把锁内决定，
+    /// `kick_reported` 也只在锁内改（见 [`Self::close_report`]）。
     pending_kick: Arc<StdMutex<Option<String>>>,
     /// 这条连接的被踢已经报给了观察者：之后同一条连接再报的断开、错误（对端关闭、读出错）不再上报，
     /// 观察者只收到一次被踢原因。新连接建立时清除。
@@ -199,6 +201,16 @@ impl Drop for InboundFrameDone {
             self.drained.notify_waiters();
         }
     }
+}
+
+/// 连接断开或出错时向观察者报什么（见 [`ClientCore::close_report`]）。
+enum CloseReport {
+    /// 照常上报这次事件。
+    AsIs,
+    /// 以被踢原因上报一次断开。
+    Kick(String),
+    /// 这条连接的被踢已经报过，不再上报。
+    AlreadyKicked,
 }
 
 impl ClientCore {
@@ -328,22 +340,36 @@ impl ClientCore {
         }
     }
 
-    fn take_pending_kick(&self) -> Option<String> {
-        self.pending_kick
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.take())
+    /// 取走还没报出去的被踢原因并记为已上报（调用方随即上报它）。
+    fn take_unreported_kick(&self) -> Option<String> {
+        let mut pending = self.pending_kick.lock().ok()?;
+        let reason = pending.take()?;
+        self.kick_reported.store(true, Ordering::SeqCst);
+        Some(reason)
     }
 
-    /// 断开原因正是登记的被踢原因：这次断开就是那次被踢的上报，取走登记并返回 true。
-    fn settle_pending_kick(&self, reason: &str) -> bool {
-        if let Ok(mut pending) = self.pending_kick.lock()
-            && pending.as_deref() == Some(reason)
-        {
-            *pending = None;
-            return true;
+    /// 连接断开或出错时向观察者报什么。在被踢登记的锁内一次决定：读循环里的对端关闭与被踢处理里
+    /// 关连接带出的断开可能在两个线程上并发到达，只有一方上报。
+    ///
+    /// - 有还没报出去的被踢：这次断开就是被踢的结果，以被踢原因上报，不管事件本身带的是什么原因。
+    ///   被踢处理先把状态置为断开再关连接，这期间到达的对端关闭不等入站帧处理完（见
+    ///   [`Self::should_defer_close_until_inbound_drained`]），会先于补报到达；
+    /// - 这条连接的被踢已经报过、且不是我方之后主动断开：不再上报；
+    /// - 否则照常上报这次事件。
+    fn close_report(&self) -> CloseReport {
+        let Ok(mut pending) = self.pending_kick.lock() else {
+            return CloseReport::AsIs;
+        };
+        if let Some(reason) = pending.take() {
+            self.kick_reported.store(true, Ordering::SeqCst);
+            return CloseReport::Kick(reason);
         }
-        false
+        if self.kick_reported.load(Ordering::SeqCst)
+            && !self.disconnect_requested.load(Ordering::SeqCst)
+        {
+            return CloseReport::AlreadyKicked;
+        }
+        CloseReport::AsIs
     }
 
     /// 读循环读出一帧、交给处理任务之前调用：记一帧在途，返回的守卫随这帧处理完（或被丢弃）drop，
@@ -898,12 +924,11 @@ impl ClientCore {
             return;
         }
         // 关连接没有带出断开事件（对端已先关掉了连接）：补报被踢
-        if let Some(reason) = self.take_pending_kick() {
+        if let Some(reason) = self.take_unreported_kick() {
             tracing::debug!(
                 reason = %reason,
                 "[ClientCore] the peer closed the connection before the KICKED was handled; reporting the kick"
             );
-            self.kick_reported.store(true, Ordering::SeqCst);
             self.notify_observers(&ConnectionEvent::Disconnected(reason));
         }
         tracing::info!("[ClientCore] 连接已断开（被踢）: {}", kick_reason);
@@ -1090,13 +1115,9 @@ impl ClientCore {
 
     /// 处理连接事件
     pub fn handle_connection_event(&self, event: &ConnectionEvent) {
-        // 这条连接的被踢已经报给了观察者：随后同一条连接的对端关闭、读出错只做状态清理，不再上报。
-        // 我方之后主动断开（disconnect）带来的断开照常上报。
-        let mut after_reported_kick = false;
-        let kick_already_reported = || {
-            self.kick_reported.load(Ordering::SeqCst)
-                && !self.disconnect_requested.load(Ordering::SeqCst)
-        };
+        // 断开、错误报什么（见 `close_report`）：正在被踢时以被踢原因上报；被踢已经报过时，随后同一条
+        // 连接的对端关闭、读出错只做状态清理，不再上报；我方之后主动断开（disconnect）照常上报。
+        let mut report = CloseReport::AsIs;
 
         // 通知事件处理器
         if let Some(ref handler) = self.event_handler {
@@ -1126,8 +1147,8 @@ impl ClientCore {
                     }
                     if let Ok(mut pending) = self.pending_kick.lock() {
                         *pending = None;
+                        self.kick_reported.store(false, Ordering::SeqCst);
                     }
-                    self.kick_reported.store(false, Ordering::SeqCst);
                 }
             }
             ConnectionEvent::Disconnected(reason) => {
@@ -1138,12 +1159,7 @@ impl ClientCore {
                 if crate::common::shutdown::is_server_shutdown_reason(reason) {
                     self.server_shutdown.store(true, Ordering::SeqCst);
                 }
-                // 被踢时以被踢原因关闭连接：这次断开就是被踢的上报
-                if self.settle_pending_kick(reason) {
-                    self.kick_reported.store(true, Ordering::SeqCst);
-                } else {
-                    after_reported_kick = kick_already_reported();
-                }
+                report = self.close_report();
                 self.state_manager.set_disconnected();
                 self.negotiation_completed.store(false, Ordering::SeqCst);
                 // 心跳绑在这条连接上：留着它，它会在死连接上继续发 PING，失败时再关一次连接并误报，
@@ -1165,7 +1181,7 @@ impl ClientCore {
                 });
             }
             ConnectionEvent::Error(error) => {
-                after_reported_kick = kick_already_reported();
+                report = self.close_report();
                 let closed_during_negotiation = self.closed_during_negotiation();
                 self.state_manager.set_failed();
                 self.negotiation_completed.store(false, Ordering::SeqCst);
@@ -1190,14 +1206,16 @@ impl ClientCore {
             }
         }
 
-        if after_reported_kick {
-            tracing::debug!(
+        match report {
+            CloseReport::AsIs => self.notify_observers(event),
+            CloseReport::Kick(reason) => {
+                self.notify_observers(&ConnectionEvent::Disconnected(reason));
+            }
+            CloseReport::AlreadyKicked => tracing::debug!(
                 ?event,
                 "[ClientCore] connection already reported as kicked; not reporting the close again"
-            );
-            return;
+            ),
         }
-        self.notify_observers(event);
     }
 
     /// 读循环里到达的断开、错误是否要等已读出的帧处理完再处理：连接协商完成且仍在线、不是我方
@@ -2117,6 +2135,123 @@ mod kick_tests {
             Some(DEVICE_CONFLICT_REASON)
         );
         assert!(!harness.core.can_send());
+    }
+
+    /// 读循环里的对端关闭恰好落在被踢处理的中间：被踢处理已经把状态置为断开（对端关闭因此不等
+    /// 入站帧处理完），关连接时传输已被对端关掉，不再带出事件。观察者仍只收到一次 DEVICE_CONFLICT，
+    /// 没有前面那次对端关闭（QUIC 回环上约 1/40 的概率出现过 `["Stream closed by peer",
+    /// "DEVICE_CONFLICT"]`）；之后的读出错也不再上报。
+    #[tokio::test]
+    async fn a_peer_close_racing_the_kick_is_reported_as_the_kick() {
+        /// 关连接时对端已经先关：读循环的对端关闭先到，本端关闭不再带出事件。
+        struct PeerClosesFirst {
+            core: ClientCore,
+            closed: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl Connection for PeerClosesFirst {
+            fn add_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+            fn remove_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+            async fn send(&mut self, _data: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            async fn close(&mut self) -> Result<()> {
+                self.close_with_reason("Closed by client").await
+            }
+            async fn close_with_reason(&mut self, _reason: &str) -> Result<()> {
+                if !self.closed.swap(true, Ordering::SeqCst) {
+                    self.core
+                        .handle_connection_event(&ConnectionEvent::Disconnected(
+                            "Stream closed by peer".into(),
+                        ));
+                }
+                Ok(())
+            }
+            fn last_active_time(&self) -> crate::common::platform::MonotonicInstant {
+                crate::common::platform::monotonic_now()
+            }
+            fn update_active_time(&mut self) {}
+        }
+
+        let mut harness = Harness::negotiated().await;
+        let core = harness.core.clone();
+        harness
+            .core
+            .set_client_connection(Arc::new(Mutex::new(Box::new(PeerClosesFirst {
+                core,
+                closed: Arc::clone(&harness.transport_closed),
+            }) as Box<dyn Connection>)));
+        let data = harness
+            .encode(device_conflict_kicked(&DevicePlatform::PC, "new-device"))
+            .await;
+
+        harness.core.handle_received_message(data, true).await;
+        harness
+            .core
+            .handle_connection_event(&ConnectionEvent::Error(FlareError::io("connection lost")));
+
+        assert_eq!(harness.disconnects(), vec![DEVICE_CONFLICT_REASON]);
+        assert!(
+            !harness
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, ConnectionEvent::Error(_))),
+            "a read error after the kick is not reported again"
+        );
+        assert_eq!(
+            harness.core.session_ended_by_server().as_deref(),
+            Some(DEVICE_CONFLICT_REASON)
+        );
+    }
+
+    /// 被踢处理关连接带出的断开与读循环的对端关闭在两个线程上同时到达：不论先后，观察者只收到
+    /// 一次 DEVICE_CONFLICT。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_closes_after_a_kick_are_reported_once() {
+        for round in 0..200 {
+            let harness = Harness::negotiated().await;
+            // 被踢处理关连接之前的状态：登记了被踢原因，状态已置为断开
+            harness.core.set_pending_kick(DEVICE_CONFLICT_REASON);
+            harness.core.state_manager.set_disconnected();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let ours = {
+                let core = harness.core.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    core.handle_connection_event(&ConnectionEvent::Disconnected(
+                        DEVICE_CONFLICT_REASON.into(),
+                    ));
+                })
+            };
+            let peer = {
+                let core = harness.core.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    core.handle_connection_event(&ConnectionEvent::Disconnected(
+                        "Stream closed by peer".into(),
+                    ));
+                })
+            };
+            ours.await.unwrap();
+            peer.await.unwrap();
+            // 被踢处理随后的补报：已经报过，不再报
+            if let Some(reason) = harness.core.take_unreported_kick() {
+                harness
+                    .core
+                    .notify_observers(&ConnectionEvent::Disconnected(reason));
+            }
+
+            assert_eq!(
+                harness.disconnects(),
+                vec![DEVICE_CONFLICT_REASON],
+                "round {round}"
+            );
+        }
     }
 
     /// 关连接先被处理（服务端发完 KICKED 紧接着关连接，读循环同步处理关闭）：协商标志已被复位，
