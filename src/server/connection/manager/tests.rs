@@ -936,3 +936,146 @@ fn user_index_follows_a_tenant_written_after_the_user() {
             .is_empty()
     );
 }
+
+/// 记下写出的每一帧原始字节。
+struct RecordingConnection {
+    last_active: Mutex<Instant>,
+    sent: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+#[async_trait]
+impl Connection for RecordingConnection {
+    fn add_observer(&mut self, _observer: ArcObserver) {}
+    fn remove_observer(&mut self, _observer: ArcObserver) {}
+    async fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.sent.lock().unwrap().push(data.to_vec());
+        Ok(())
+    }
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn last_active_time(&self) -> Instant {
+        *self.last_active.lock().unwrap()
+    }
+    fn update_active_time(&mut self) {
+        *self.last_active.lock().unwrap() = Instant::now();
+    }
+}
+
+async fn wait_for_frames(sent: &Mutex<Vec<Vec<u8>>>, expected: usize) -> Vec<Vec<u8>> {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if sent.lock().unwrap().len() >= expected {
+                return sent.lock().unwrap().clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} frames"))
+}
+
+/// 协商还没完成（CONNECT 已解析、CONNECT_ACK 还没发出）的连接，服务端发给它的帧（例如停机
+/// CLOSE）按协商前的格式编码：客户端此时只认 JSON、不压缩，按协商出的 gzip 编码它解不开。
+/// 协商完成后照常按协商结果编码。
+#[cfg(feature = "compression-gzip")]
+#[tokio::test]
+async fn frames_to_a_connection_still_negotiating_use_the_pre_negotiation_encoding() {
+    use crate::common::compression::CompressionAlgorithm;
+    use crate::common::encryption::EncryptionAlgorithm;
+    use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
+    use crate::common::protocol::SerializationFormat;
+    use crate::common::shutdown::{is_server_shutdown_close, server_shutdown_close_frame};
+
+    fn is_shutdown_close(frame: &crate::common::protocol::Frame) -> bool {
+        use crate::common::protocol::flare::core::commands::command::Type as CommandType;
+        matches!(
+            frame.command.as_ref().and_then(|c| c.r#type.as_ref()),
+            Some(CommandType::System(command)) if is_server_shutdown_close(command)
+        )
+    }
+    fn is_gzip(data: &[u8]) -> bool {
+        data.starts_with(&[0x1f, 0x8b])
+    }
+
+    let manager = ConnectionManager::new();
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    manager
+        .add_connection(
+            "negotiating".to_string(),
+            Box::new(RecordingConnection {
+                last_active: Mutex::new(Instant::now()),
+                sent: Arc::clone(&sent),
+            }),
+            None,
+            false,
+        )
+        .unwrap();
+    // CONNECT 已解析：协商结果写进连接信息，但还没标记协商完成。
+    manager
+        .update_connection_negotiation(
+            "negotiating",
+            None,
+            SerializationFormat::Protobuf,
+            CompressionAlgorithm::Gzip,
+            EncryptionAlgorithm::None,
+            Some("u1".to_string()),
+            None,
+        )
+        .unwrap();
+
+    let frame = server_shutdown_close_frame();
+    ConnectionManagerTrait::broadcast_frame(&manager, &frame, None)
+        .await
+        .unwrap();
+    ConnectionManagerTrait::send_frame_to_connections(
+        &manager,
+        &["negotiating".to_string()],
+        &frame,
+    )
+    .await;
+    let frames = wait_for_frames(&sent, 2).await;
+    for data in &frames {
+        assert!(
+            !is_gzip(data),
+            "frame to a negotiating connection was compressed"
+        );
+        let parsed = PRE_NEGOTIATION_PARSER
+            .parse(data)
+            .expect("a client still negotiating must be able to parse the frame");
+        assert!(is_shutdown_close(&parsed));
+    }
+
+    // CONNECT_ACK 发出后协商完成：按协商结果（protobuf + gzip）编码。
+    let negotiated = crate::common::MessageParser::new(
+        SerializationFormat::Protobuf,
+        CompressionAlgorithm::Gzip,
+        EncryptionAlgorithm::None,
+    );
+    manager
+        .update_connection_negotiation_with_pipeline(
+            "negotiating",
+            None,
+            SerializationFormat::Protobuf,
+            CompressionAlgorithm::Gzip,
+            EncryptionAlgorithm::None,
+            Some("u1".to_string()),
+            negotiated.clone(),
+            None,
+        )
+        .unwrap();
+    ConnectionManagerTrait::broadcast_frame(&manager, &frame, None)
+        .await
+        .unwrap();
+    ConnectionManagerTrait::send_frame_to_connections(
+        &manager,
+        &["negotiating".to_string()],
+        &frame,
+    )
+    .await;
+    let frames = wait_for_frames(&sent, 4).await;
+    for data in &frames[2..] {
+        assert!(is_gzip(data), "negotiated gzip was not applied");
+        assert!(is_shutdown_close(&negotiated.parse(data).unwrap()));
+    }
+}

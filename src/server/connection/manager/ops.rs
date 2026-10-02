@@ -162,7 +162,16 @@ impl ConnectionManager {
         let mut encrypted: Vec<ConnectionSnapshot> = Vec::new();
         for snapshot in snapshots {
             let info = &snapshot.2;
-            if info.encryption == crate::common::encryption::EncryptionAlgorithm::None {
+            if !info.negotiation_completed {
+                // 协商还没完成：按协商前的格式编码，见 `serialize_frame_for_connection`。
+                plain_groups
+                    .entry((
+                        crate::common::protocol::SerializationFormat::Json,
+                        crate::common::compression::CompressionAlgorithm::None,
+                    ))
+                    .or_default()
+                    .push(snapshot);
+            } else if info.encryption == crate::common::encryption::EncryptionAlgorithm::None {
                 plain_groups
                     .entry((info.serialization_format, info.compression.clone()))
                     .or_default()
@@ -530,6 +539,13 @@ impl ConnectionManager {
 
         if let Some(parser) = parser {
             return parser.serialize(frame);
+        }
+
+        // 协商还没完成（CONNECT_ACK 还没发出）：客户端仍按协商前的格式（JSON、不压缩、不加密）
+        // 解析，按协商结果编码的帧（例如 gzip）它解不开。协商前编码的帧，已切到协商格式的客户端
+        // 照样能解（解析时对未压缩、未加密的数据容错）。
+        if !info.negotiation_completed {
+            return crate::common::message::parser::PRE_NEGOTIATION_PARSER.serialize(frame);
         }
 
         if let Some(parser) = &info.cached_parser {

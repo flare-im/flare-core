@@ -178,11 +178,14 @@ pub trait ConnectionManagerTrait: Send + Sync + std::any::Any {
 
         let data = if let Some(p) = parser {
             p.serialize(frame)?
-        } else if let Some((_, info)) = connection_info {
+        } else if let Some((_, info)) =
+            connection_info.filter(|(_, info)| info.negotiation_completed)
+        {
             let connection_parser =
                 MessageParser::new(info.serialization_format, info.compression, info.encryption);
             connection_parser.serialize(frame)?
         } else {
+            // 协商还没完成：客户端仍按协商前的格式解析。
             use crate::common::message::parser::PRE_NEGOTIATION_PARSER;
             PRE_NEGOTIATION_PARSER.serialize(frame)?
         };
