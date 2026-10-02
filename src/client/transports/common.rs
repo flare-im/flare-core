@@ -58,6 +58,8 @@ impl ConnectionObserver for ClientMessageObserver {
                 if !negotiated {
                     self.record_pre_negotiation_rejection(data);
                 }
+                // 记一帧在途，处理完（WASM 为出队处理完或被丢弃）再记完成
+                core.inbound_frame_read();
                 #[cfg(target_arch = "wasm32")]
                 {
                     // Browser onmessage is sync; queue bytes and drain on the LocalSet task
@@ -73,8 +75,29 @@ impl ConnectionObserver for ClientMessageObserver {
                 {
                     crate::client::runtime::spawn_client_task(async move {
                         core.handle_received_message(data_clone, negotiated).await;
+                        core.inbound_frame_done();
                     });
                 }
+            }
+            ConnectionEvent::Disconnected(_) | ConnectionEvent::Error(_)
+                if self.core.should_defer_close_until_inbound_drained() =>
+            {
+                // 协商完成后对端关了连接，而读出的帧还没处理完（典型：服务端发完 KICKED 紧接着关连接）。
+                // 等它们处理完再处理断开：被踢先报给观察者，随后的对端关闭不再重复上报。最多等
+                // INBOUND_DRAIN_BOUND，处理卡住时照常上报断开。
+                let core = Arc::clone(&self.core);
+                let event = event.clone();
+                crate::client::runtime::spawn_client_task(async move {
+                    if !core
+                        .wait_inbound_drained(super::client_core::INBOUND_DRAIN_BOUND)
+                        .await
+                    {
+                        tracing::debug!(
+                            "[ClientCore] inbound frames still in flight after the close; reporting the close anyway"
+                        );
+                    }
+                    core.handle_connection_event(&event);
+                });
             }
             ConnectionEvent::Connected
             | ConnectionEvent::Disconnected(_)
@@ -220,7 +243,8 @@ impl ClientConnectionHelper {
         max_attempts.map(|n| n > 0).unwrap_or(true)
     }
 
-    /// 发送前是否由传输客户端自己重连：未连接、不是我方主动断开、配置允许发送前重连
+    /// 发送前是否由传输客户端自己重连：未连接、不是我方主动断开、没有被服务端以结束会话的原因踢掉
+    /// （[`ClientCore::session_ended_by_server`]）、配置允许发送前重连
     /// （[`ClientConfig::reconnect_on_send`](crate::client::config::ClientConfig::reconnect_on_send)）
     /// 且重连次数不为 0。
     pub fn should_reconnect_before_send(
@@ -231,6 +255,7 @@ impl ClientConnectionHelper {
         !connected
             && config.reconnect_on_send
             && !core.is_disconnect_requested()
+            && core.session_ended_by_server().is_none()
             && Self::can_reconnect(config.max_reconnect_attempts)
     }
 
@@ -263,7 +288,8 @@ mod tests {
     use super::*;
     use crate::client::config::ClientConfig;
 
-    /// 传输客户端发送前自己重连的条件：未连接、允许发送前重连、不是我方主动断开、重连次数不为 0。
+    /// 传输客户端发送前自己重连的条件：未连接、允许发送前重连、不是我方主动断开、没有被服务端
+    /// 以结束会话的原因踢掉、重连次数不为 0。
     #[test]
     fn reconnect_before_send_honours_the_switch() {
         let config = ClientConfig::default();
@@ -293,6 +319,96 @@ mod tests {
         assert!(!ClientConnectionHelper::should_reconnect_before_send(
             false, &core, &config
         ));
+
+        // 被服务端以结束会话的原因踢掉（设备冲突、租户不可用）：不再自己重连
+        let kicked = ClientCore::new(&config);
+        kicked.end_session_by_server(crate::common::kick::DEVICE_CONFLICT_REASON);
+        assert!(!ClientConnectionHelper::should_reconnect_before_send(
+            false, &kicked, &config
+        ));
+    }
+
+    struct RecordingObserver(std::sync::Mutex<Vec<String>>);
+
+    impl ConnectionObserver for RecordingObserver {
+        fn on_event(&self, event: &ConnectionEvent) {
+            if let ConnectionEvent::Disconnected(reason) = event {
+                self.0.lock().unwrap().push(reason.clone());
+            }
+        }
+    }
+
+    /// 对端已关闭的连接：本端再关不上报任何事件。
+    struct ClosedConnection;
+
+    #[async_trait::async_trait]
+    impl Connection for ClosedConnection {
+        fn add_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        fn remove_observer(&mut self, _observer: crate::transport::events::ArcObserver) {}
+        async fn send(&mut self, _data: &[u8]) -> Result<()> {
+            Err(FlareError::connection_closed("closed".to_string()))
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn last_active_time(&self) -> crate::common::platform::MonotonicInstant {
+            crate::common::platform::monotonic_now()
+        }
+        fn update_active_time(&mut self) {}
+    }
+
+    /// 服务端发完 KICKED 紧接着关连接：读循环先读出 KICKED（交给处理任务），随即同步收到对端关闭。
+    /// 断开要等 KICKED 处理完再处理：观察者只收到一次 DEVICE_CONFLICT，前面没有对端关闭。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_close_right_after_a_kick_is_reported_as_the_kick_only() {
+        use crate::common::kick::{DEVICE_CONFLICT_REASON, device_conflict_kicked};
+        use crate::common::protocol::{Reliability, frame_with_system_command};
+
+        let mut core = ClientCore::new(&ClientConfig::default());
+        core.set_client_connection(Arc::new(Mutex::new(
+            Box::new(ClosedConnection) as Box<dyn Connection>
+        )));
+        core.handle_connection_event(&ConnectionEvent::Connected);
+        core.update_parser(
+            crate::common::protocol::SerializationFormat::Protobuf,
+            crate::common::compression::CompressionAlgorithm::Gzip,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .await;
+        core.stop_heartbeat();
+        let recorder = Arc::new(RecordingObserver(std::sync::Mutex::new(Vec::new())));
+        core.add_observer(recorder.clone());
+        let kicked = frame_with_system_command(
+            device_conflict_kicked(&crate::common::device::DevicePlatform::PC, "new-device"),
+            Reliability::AtLeastOnce,
+        );
+        let data = core
+            .parser
+            .lock()
+            .await
+            .serialize(&kicked)
+            .expect("serialize");
+
+        let observer = ClientMessageObserver::new(Arc::new(core.clone()));
+        observer.on_event(&ConnectionEvent::Message(data));
+        observer.on_event(&ConnectionEvent::Disconnected(
+            "Stream closed by peer".to_string(),
+        ));
+
+        for _ in 0..100 {
+            if !recorder.0.lock().unwrap().is_empty() && !core.has_inbound_in_flight() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![DEVICE_CONFLICT_REASON.to_string()]
+        );
+        assert!(!core.can_send());
+        assert!(!core.is_negotiation_completed());
     }
 
     /// 旧版本序列化出的配置没有这个字段：反序列化时取默认值 `true`，行为不变。

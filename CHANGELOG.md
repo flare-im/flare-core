@@ -69,9 +69,25 @@
   本版本的客户端会自动声明；旧客户端连到默认压缩为 gzip 的新服务端时改为不压缩。
   `NegotiationResult` 新增 `accepted_compressions` 字段，用结构体字面量构造它的代码需要补上
   这个字段或改用 `..Default::default()`。
+- 设备冲突踢线的 KICKED 改为类型化原因：`message` 与 metadata `reason` 都是 `DEVICE_CONFLICT`，
+  metadata 仍带 `platform` 与 `new_device_id`，不再带用户 ID。此前 `message` 是含用户 ID 的中文说明、
+  metadata `reason` 是小写的 `device_conflict`。客户端上报给观察者的断开原因随之为 `DEVICE_CONFLICT`
+  （此前为 `设备冲突：<说明>`）。本版本的客户端照样认得旧服务端的写法；旧客户端读新服务端的帧时以
+  `DEVICE_CONFLICT` 为原因，按子串（不分大小写）找 `device_conflict` 的逻辑不受影响。
+- 客户端被以结束会话的原因（`DEVICE_CONFLICT`、`TENANT_UNAVAILABLE`，见 `common::kick::ends_session`）
+  踢下线后进入终态：不再自动重连，`reconnect_on_send` 为 `true` 时发送前也不重连，发送返回
+  `NOT_CONNECTED`，错误文本以踢线原因开头；应用重新登录后显式建连（新连接建立）才解除。此前被同平台
+  新设备顶下的客户端在下一次发送时自己连回去，又把新设备顶下线，两台设备来回互踢。其他原因的踢线
+  （如运维踢线 `DEVICE_KICKED`）照旧。
 
 ### 修复
 
+- 客户端：被服务端踢线时，观察者恰好收到一次断开，原因就是 KICKED 的类型化原因。此前服务端发完
+  KICKED 紧接着关连接，同一次踢线随处理顺序有两种结果：KICKED 先被处理时客户端以 `Closed by client`
+  关闭连接，上层当成主动断开，既不知道被踢也不重连；关连接先被处理时协商标志已被复位，被踢不再通知，
+  上层只看到一次对端关闭。现在被踢时以被踢原因关闭连接；按 KICKED 读出那一刻（而不是处理时）的
+  协商状态决定是否通知；协商完成后对端关连接、而读出的帧还没处理完时，断开最多等 1 s 让它们先处理，
+  被踢先上报，随后同一条连接的对端关闭与读出错不再重复上报。
 - 客户端（QUIC）：被服务端踢下线或移除之后，下一次发送不再复用旧连接。此前惰性重连把
   CONNECT 发在服务端已经不读的旧流上，传输层照样报 Connected，客户端却等不到 CONNECT_ACK，
   要等心跳在旧连接上失败（约 24 s）才真正重连。TCP 客户端有同样的问题，一并修复。
@@ -164,6 +180,10 @@
 
 ### 新增
 
+- 踢线的类型化原因约定（`common::kick`）：`DEVICE_CONFLICT_REASON`、`TENANT_UNAVAILABLE_REASON`
+  （原 `client::transports::client_core::TENANT_UNAVAILABLE_REASON` 保留为它的重导出）、
+  `device_conflict_kicked`、`is_device_conflict_kick`、`kick_reason`、`is_device_conflict_reason`、
+  `ends_session`；`ClientCore::session_ended_by_server` 返回结束会话的踢线原因。
 - 服务端停机的关闭约定（`common::shutdown`）：停止前给每条在线连接下发 CLOSE 系统命令，
   `message` 与 metadata `reason` 为 `SERVER_SHUTDOWN`，metadata `code` 为
   `SERVICE_UNAVAILABLE`；最多等停机宽限（默认 `SERVER_SHUTDOWN_CLOSE_GRACE`，1 s）让客户端

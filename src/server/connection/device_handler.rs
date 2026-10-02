@@ -5,7 +5,8 @@
 use crate::common::MessageParser;
 use crate::common::device::{DeviceInfo, DevicePlatform};
 use crate::common::error::Result;
-use crate::common::protocol::{Reliability, builder::kicked, frame_with_system_command};
+use crate::common::kick::{DEVICE_CONFLICT_REASON, device_conflict_kicked};
+use crate::common::protocol::{Reliability, frame_with_system_command};
 use crate::server::connection::ConnectionManagerTrait;
 use crate::server::device::{DeviceManager, DeviceOwner};
 use std::sync::Arc;
@@ -124,24 +125,12 @@ pub async fn handle_device_conflict(
                     "[DeviceHandler] 找到冲突连接: connection_id={}, user_id={:?}, format={:?}",
                     conflict_conn_id, conn_info.user_id, conn_info.serialization_format
                 );
-                // 2. 创建被踢消息（使用连接的协商格式）
+                // 2. 创建被踢消息：类型化原因 DEVICE_CONFLICT（使用连接的协商格式）。客户端据此结束
+                //    会话、不再自动重连（「已在别处登录」），见 `crate::common::kick`。
                 let reason = format!(
-                    "设备冲突：同一用户 ({}) 的同一平台 ({:?}) 已有其他设备在线，当前设备将被踢下线",
-                    user_id, platform
+                    "{DEVICE_CONFLICT_REASON}: 同一用户 ({user_id}) 的同一平台 ({platform:?}) 有新设备登录"
                 );
-
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("reason".to_string(), "device_conflict".as_bytes().to_vec());
-                metadata.insert(
-                    "platform".to_string(),
-                    format!("{:?}", platform).as_bytes().to_vec(),
-                );
-                metadata.insert(
-                    "new_device_id".to_string(),
-                    device_info.device_id.as_bytes().to_vec(),
-                );
-
-                let kick_cmd = kicked(reason.clone(), Some(metadata));
+                let kick_cmd = device_conflict_kicked(platform, &device_info.device_id);
                 let kick_frame = frame_with_system_command(kick_cmd, Reliability::AtLeastOnce);
 
                 // 3. 使用连接的协商格式序列化并发送被踢消息
@@ -481,5 +470,83 @@ mod tests {
             device_mgr.get_user_connections(&tenant_a).await,
             vec!["a-android-2".to_string()]
         );
+    }
+
+    /// 被顶下的旧连接收到带类型化原因 DEVICE_CONFLICT 的 KICKED（客户端据此结束会话、不再自动重连），
+    /// 帧里不带用户 ID。
+    #[tokio::test]
+    async fn device_conflict_kick_carries_the_typed_reason() {
+        use crate::common::kick::{DEVICE_CONFLICT_REASON, is_device_conflict_kick, kick_reason};
+        use crate::common::protocol::flare::core::commands::command::Type as CommandType;
+
+        let manager = Arc::new(ConnectionManager::new());
+        let device_mgr = Arc::new(DeviceManager::new(
+            DeviceConflictStrategy::PlatformExclusive,
+        ));
+        let owner = DeviceOwner::new(Some("tenant-a"), "user-secret-id");
+        let old_sent = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "old-conn".to_string(),
+                Box::new(RecordingConn {
+                    sent: old_sent.clone(),
+                    last_active: Mutex::new(Instant::now()),
+                }),
+                Some("user-secret-id".to_string()),
+                true,
+            )
+            .unwrap();
+        device_mgr
+            .add_device(
+                &owner,
+                "old-conn".to_string(),
+                DeviceInfo::new("dev-a".to_string(), DevicePlatform::PC),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_connection(
+                "new-conn".to_string(),
+                Box::new(MockConn::new()),
+                Some("user-secret-id".to_string()),
+                true,
+            )
+            .unwrap();
+
+        let mgr_dyn: Arc<dyn ConnectionManagerTrait> = manager.clone();
+        handle_device_conflict(
+            Some(device_mgr),
+            &owner,
+            "new-conn",
+            &DevicePlatform::PC,
+            &DeviceInfo::new("dev-b".to_string(), DevicePlatform::PC),
+            mgr_dyn,
+        )
+        .await
+        .unwrap();
+
+        let sent = old_sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "exactly one KICKED");
+        let frame = MessageParser::new(
+            crate::common::protocol::SerializationFormat::Json,
+            crate::common::compression::CompressionAlgorithm::None,
+            crate::common::encryption::EncryptionAlgorithm::None,
+        )
+        .parse(&sent[0])
+        .expect("KICKED in the connection's format");
+        let Some(CommandType::System(command)) =
+            frame.command.as_ref().and_then(|c| c.r#type.as_ref())
+        else {
+            panic!("KICKED must be a system command");
+        };
+        assert!(is_device_conflict_kick(command));
+        assert_eq!(command.message, DEVICE_CONFLICT_REASON);
+        assert_eq!(kick_reason(command), DEVICE_CONFLICT_REASON);
+        assert_eq!(
+            command.metadata.get("new_device_id").map(Vec::as_slice),
+            Some("dev-b".as_bytes())
+        );
+        let text = String::from_utf8_lossy(&sent[0]);
+        assert!(!text.contains("user-secret-id"), "{text}");
     }
 }

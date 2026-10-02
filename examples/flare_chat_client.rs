@@ -523,7 +523,8 @@ impl MessageListener for ChatListener {
 
     async fn on_disconnect(&self, reason: Option<&str>) -> Result<()> {
         if let Some(reason) = reason {
-            if reason.contains("设备冲突") || reason.contains("被踢") {
+            // 设备冲突的断开原因就是类型化原因 DEVICE_CONFLICT；会话已结束，客户端不会自动重连
+            if flare_core::common::kick::is_device_conflict_reason(reason) {
                 error!("❌ 连接被踢下线: {}", reason);
                 info!("💡 提示：同一用户同一平台只能有一个设备在线");
                 info!("   请关闭当前客户端，或使用不同平台登录");

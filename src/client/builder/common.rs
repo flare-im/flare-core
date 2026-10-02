@@ -22,6 +22,15 @@ fn not_connected_reconnect_left_to_caller() -> crate::common::error::FlareError 
     )
 }
 
+/// 服务端以结束会话的原因（设备冲突、租户不可用）踢掉这个客户端之后，发送返回的错误：
+/// 不是可重试的连接错误，恢复要由应用重新登录后显式建连。
+fn session_ended_by_server_error(reason: &str) -> crate::common::error::FlareError {
+    crate::common::error::FlareError::localized(
+        crate::common::error::ErrorCode::NotConnected,
+        format!("{reason}: the server ended this session; not reconnecting"),
+    )
+}
+
 /// 客户端包装器 — native 使用 HybridClient，WASM 使用 WebSocketClient。
 #[derive(Clone)]
 pub struct ClientWrapper {
@@ -76,12 +85,18 @@ impl ClientWrapper {
             return Ok(());
         }
 
+        // 被服务端以结束会话的原因踢掉（设备冲突、租户不可用）：不自动重连，报出踢线原因。
         // 关掉了发送前重连（`ClientConfig::reconnect_on_send`）：未连接就立即报错，重连只走上层自己
         // 那一条路径。不进单飞门、不等停机抖动，发送方马上知道连接不可用。
         {
             let client = self.client.lock().await;
-            if !client.is_connected() && !client.core().config.reconnect_on_send {
-                return Err(not_connected_reconnect_left_to_caller());
+            if !client.is_connected() {
+                if let Some(reason) = client.core().session_ended_by_server() {
+                    return Err(session_ended_by_server_error(&reason));
+                }
+                if !client.core().config.reconnect_on_send {
+                    return Err(not_connected_reconnect_left_to_caller());
+                }
             }
         }
 
@@ -114,6 +129,9 @@ impl ClientWrapper {
                 // 等单飞门或停机抖动期间连接断了：同样不由这里重连。
                 if !client.core().config.reconnect_on_send {
                     return Err(not_connected_reconnect_left_to_caller());
+                }
+                if let Some(reason) = client.core().session_ended_by_server() {
+                    return Err(session_ended_by_server_error(&reason));
                 }
                 // 主动断开过的客户端不自动复活：否则登出/换号后，旧会话里还在路上的一次发送
                 // 会带着旧 token 重连出一条上层状态机不知道的连接（服务端还会判成设备冲突）。

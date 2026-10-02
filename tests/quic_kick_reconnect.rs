@@ -1,12 +1,12 @@
-//! QUIC 客户端被服务端踢下线之后的恢复，以及 CONNECT 被拒时客户端拿到的错误。
+//! QUIC 客户端被服务端踢下线之后的行为，以及 CONNECT 被拒时客户端拿到的错误。
 //!
 //! 本机回环起一个真实的 flare-core QUIC 服务端（平台互斥的设备管理器），客户端走
 //! `FlareClientBuilder` + 单协议 QUIC，与 SDK 在 `race_order=[QUIC]` 下的建连路径相同。
 //!
-//! 被踢那条用例复现的是 p0e2e 全量 E2E 里 `relation.block_prevents_im_single_chat` 的前置失败：
-//! 同平台第二设备登录把主客户端踢掉、随后登出；主客户端下一次发送走惰性重连，传输层报了
-//! Connected，却把 CONNECT 写进了已被服务端关掉的旧流，拿不到 CONNECT_ACK，
-//! 要等到心跳失败（约 24 s）才真正重连，还被报成 token 被拒。
+//! 服务端关连接后的那条用例源自 p0e2e 全量 E2E 里 `relation.block_prevents_im_single_chat` 的
+//! 前置失败（W4-D）：主客户端被踢之后下一次发送走惰性重连，传输层报了 Connected，却把 CONNECT
+//! 写进了已被服务端关掉的旧流，拿不到 CONNECT_ACK，要等到心跳失败（约 24 s）才真正重连，
+//! 还被报成 token 被拒。设备冲突的踢线现在结束会话、不再重连（见第一条用例）。
 
 #![cfg(all(
     feature = "client",
@@ -157,6 +157,30 @@ fn client_builder(port: u16, device_id: &str, listener: Arc<AckCounter>) -> Flar
         .with_reconnect_interval(RECONNECT_INTERVAL)
 }
 
+/// 与 [`client_builder`] 相同，监听器换成记录断开原因的 [`CloseRecorder`]。
+fn recorder_client_builder(
+    port: u16,
+    device_id: &str,
+    listener: Arc<CloseRecorder>,
+) -> FlareClientBuilder {
+    let tls = TlsConfig {
+        ca_cert_data: Some(server_identity().clone()),
+        ..TlsConfig::none()
+    };
+    let url = format!("quic://127.0.0.1:{port}");
+    FlareClientBuilder::new(url.clone())
+        .with_protocol_url(TransportProtocol::QUIC, url)
+        .with_protocol_race(vec![TransportProtocol::QUIC])
+        .with_user_id("bob".to_string())
+        .with_token("test-token".to_string())
+        .with_listener(listener)
+        .with_device_info(DeviceInfo::new(device_id.to_string(), DevicePlatform::PC))
+        .with_format(SerializationFormat::Protobuf)
+        .with_tls(tls)
+        .with_connect_timeout(Duration::from_secs(5))
+        .with_reconnect_interval(RECONNECT_INTERVAL)
+}
+
 /// 客户端的重连间隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 /// 被踢之后下一次发送重新拿到 CONNECT_ACK 的时限：必须直接新建连接完成握手，
@@ -182,19 +206,25 @@ fn ping_frame() -> Frame {
     frame_with_system_command(ping(), Reliability::AtLeastOnce)
 }
 
-/// 被同平台第二设备踢掉、第二设备随后登出之后，主客户端的下一次发送必须在有界时间内
-/// 走完一次新的 CONNECT → CONNECT_ACK，而不是把 CONNECT 写进已被服务端关掉的旧流。
+/// 被同平台第二设备踢掉（设备冲突）：QUIC 下同样只报一次 `DEVICE_CONFLICT`，会话就此结束——
+/// 第二设备登出之后，主客户端的下一次发送立即以这个原因失败，不发新的 CONNECT，不把自己连回去。
+///
+/// 以前这里断言的是「下一次发送在有界时间内重新 CONNECT」（W4-D）；按设备冲突的产品语义
+/// （被顶下的一端终止会话、由应用重新登录），被踢的客户端不再自动重连。被踢后新建连接不复用
+/// 旧流的约束由下一条用例（非终止原因的踢线）继续守。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn kicked_quic_client_reconnects_with_a_fresh_connect() {
+async fn device_conflict_kick_ends_the_quic_session() {
+    use flare_core::common::kick::DEVICE_CONFLICT_REASON;
+
     let (server, port) = start_server(None).await;
 
-    let owner_acks = Arc::new(AckCounter::default());
-    let owner: FlareClient = client_builder(port, "owner-device", owner_acks.clone())
+    let recorder = Arc::new(CloseRecorder::default());
+    let owner: FlareClient = recorder_client_builder(port, "owner-device", recorder.clone())
         .build_with_race()
         .await
         .expect("owner connects");
     wait_until("owner CONNECT_ACK", Duration::from_secs(5), || async {
-        owner_acks.acks() == 1
+        recorder.acks.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -203,31 +233,40 @@ async fn kicked_quic_client_reconnects_with_a_fresh_connect() {
         .build_with_race()
         .await
         .expect("second device connects");
-    wait_until("owner kicked", Duration::from_secs(5), || async {
-        !owner.is_connected_async().await
+    wait_until("owner reports the kick", Duration::from_secs(5), || async {
+        !recorder.disconnects.lock().unwrap().is_empty()
     })
     .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        *recorder.disconnects.lock().unwrap(),
+        vec![DEVICE_CONFLICT_REASON.to_string()],
+        "the kick is the one and only disconnect"
+    );
+    assert!(!owner.is_connected_async().await);
     second.disconnect().await.expect("second device logs out");
 
-    // 主客户端下一次发送走惰性重连：必须在有界时间内重新 CONNECT 并拿到 CONNECT_ACK。
-    let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(5), owner.send_frame(&ping_frame()))
+    let error = tokio::time::timeout(Duration::from_secs(2), owner.send_frame(&ping_frame()))
         .await
-        .expect("send after the kick must not wait for a heartbeat failure")
-        .expect("send after the kick re-CONNECTs");
-    let recovered_in = started.elapsed();
-    wait_until(
-        "owner second CONNECT_ACK",
-        Duration::from_secs(2),
-        || async { owner_acks.acks() == 2 },
-    )
-    .await;
+        .expect("send after the kick must fail at once")
+        .expect_err("a kicked session must not reconnect on send");
+    assert_eq!(error.code(), Some(ErrorCode::NotConnected), "{error}");
     assert!(
-        recovered_in < RECOVERY_BOUND,
-        "re-CONNECT took {recovered_in:?}"
+        error.to_string().contains(DEVICE_CONFLICT_REASON),
+        "{error}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        recorder.acks.load(Ordering::SeqCst),
+        1,
+        "no new CONNECT_ACK"
+    );
+    assert_eq!(
+        server.connection_count(),
+        0,
+        "the kicked client stays offline"
     );
 
-    owner.disconnect().await.expect("owner disconnects");
     server.stop().await.expect("stop server");
 }
 
