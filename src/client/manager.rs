@@ -18,6 +18,40 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+/// 自动重连退避的上限（与 IM SDK 的重连循环一致）。
+pub const AUTO_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// 自动重连退避名义值的下限：`reconnect_interval` 配得再小，两次尝试之间也至少隔这么久。
+const AUTO_RECONNECT_MIN_NOMINAL: Duration = Duration::from_secs(1);
+
+/// 第 `attempt` 次（从 1 起）自动重连前等待的区间（毫秒级，含两端）。
+///
+/// 名义值从 `base` 起每次翻倍（最多翻 4 次），夹在 1 s 与 [`AUTO_RECONNECT_MAX_DELAY`] 之间；
+/// 区间是名义值的 80%–120%，上界不超过 [`AUTO_RECONNECT_MAX_DELAY`]。
+pub fn auto_reconnect_delay_bounds(base: Duration, attempt: u32) -> (Duration, Duration) {
+    let shift = attempt.saturating_sub(1).min(4);
+    let cap_ms = AUTO_RECONNECT_MAX_DELAY.as_millis() as u64;
+    let nominal_ms = (base.as_millis() as u64)
+        .saturating_mul(1_u64 << shift)
+        .clamp(AUTO_RECONNECT_MIN_NOMINAL.as_millis() as u64, cap_ms);
+    let min_ms = nominal_ms.saturating_mul(80).div_ceil(100);
+    let max_ms = nominal_ms
+        .saturating_mul(120)
+        .div_ceil(100)
+        .clamp(min_ms, cap_ms);
+    (Duration::from_millis(min_ms), Duration::from_millis(max_ms))
+}
+
+/// 第 `attempt` 次自动重连前的等待：在 [`auto_reconnect_delay_bounds`] 的区间里按毫秒均匀取值。
+/// 抖动让同一刻断开的一批客户端错开重连，不在服务端恢复的瞬间一起涌上来。
+pub fn auto_reconnect_delay(base: Duration, attempt: u32) -> Duration {
+    use rand::Rng;
+    let (min, max) = auto_reconnect_delay_bounds(base, attempt);
+    Duration::from_millis(
+        rand::thread_rng().gen_range(min.as_millis() as u64..=max.as_millis() as u64),
+    )
+}
+
 /// 客户端连接管理器
 ///
 /// 管理客户端连接的生命周期，包括：
@@ -183,6 +217,11 @@ impl ClientConnectionManager {
     }
 
     /// 启动自动重连
+    ///
+    /// 断开后按 [`auto_reconnect_delay`] 退避重连：从 `reconnect_interval` 起每次翻倍、封顶 30 s、
+    /// 上下浮动 20%（按毫秒取值），与 IM SDK 的重连循环一致；每次尝试前先等，不立即重试。
+    /// `max_reconnect_attempts` 为 `Some(n)` 时连续失败 n 次即停止（`None` 不限次数）。
+    /// 重连成功后循环结束，计数随之清零。
     pub async fn start_auto_reconnect(&self) {
         let mut is_reconnecting = self.is_reconnecting.lock().await;
         if *is_reconnecting {
@@ -201,32 +240,36 @@ impl ClientConnectionManager {
         let is_reconnecting_flag = Arc::clone(&self.is_reconnecting);
 
         let handle = tokio::spawn(async move {
+            // 本轮断开后已经尝试的次数
+            let mut attempt: u32 = 0;
             loop {
-                // 检查连接状态
-                let should_reconnect = {
-                    let client_guard = client.lock().await;
-                    !client_guard.is_connected()
-                        && matches!(
-                            state_mgr.get_state(),
-                            crate::client::connection::ConnectionState::Disconnected
-                        )
-                };
-
-                if !should_reconnect {
-                    // 检查是否超过最大重连次数
-                    // 这里简化处理，实际应该在连接失败时触发
+                if !Self::needs_reconnect(&client, &state_mgr).await {
+                    // 还连着（或别处已经连上）：等它断开
+                    attempt = 0;
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 }
 
-                // 检查重连次数限制
-                // 注意：这里简化了，实际应该在连接失败时计数
-                // 这里我们假设只要状态是断开就重连
+                if let Some(max) = config.max_reconnect_attempts
+                    && attempt >= max
+                {
+                    warn!(
+                        attempts = attempt,
+                        "auto reconnect attempts exhausted, giving up"
+                    );
+                    break;
+                }
+                attempt += 1;
 
-                info!("Attempting to reconnect...");
+                let wait = auto_reconnect_delay(config.reconnect_interval, attempt);
+                info!(attempt, ?wait, "reconnecting after backoff");
+                sleep(wait).await;
+                // 等待期间可能已被别处连上
+                if !Self::needs_reconnect(&client, &state_mgr).await {
+                    continue;
+                }
+
                 state_mgr.set_state(crate::client::connection::ConnectionState::Connecting);
-
-                // 尝试重连
                 let reconnect_result = {
                     let mut client_guard = client.lock().await;
                     client_guard.connect().await
@@ -234,7 +277,7 @@ impl ClientConnectionManager {
 
                 match reconnect_result {
                     Ok(()) => {
-                        info!("Reconnected successfully");
+                        info!(attempt, "reconnected");
                         state_mgr.set_state(crate::client::connection::ConnectionState::Connected);
 
                         // 重新启动心跳
@@ -253,21 +296,17 @@ impl ClientConnectionManager {
                         }
 
                         // 重连成功，退出重连循环
-                        *is_reconnecting_flag.lock().await = false;
                         break;
                     }
                     Err(e) => {
-                        warn!(
-                            "Reconnect failed: {}, retrying in {:?}",
-                            e, config.reconnect_interval
-                        );
+                        warn!(attempt, error = %e, "reconnect failed");
                         state_mgr
                             .set_state(crate::client::connection::ConnectionState::Disconnected);
-                        sleep(config.reconnect_interval).await;
                     }
                 }
             }
 
+            *is_reconnecting_flag.lock().await = false;
             // 清理句柄
             let mut handle_guard = reconnect_handle.lock().await;
             *handle_guard = None;
@@ -275,6 +314,19 @@ impl ClientConnectionManager {
 
         let mut handle_guard = self.reconnect_handle.lock().await;
         *handle_guard = Some(handle);
+    }
+
+    /// 客户端未连接且状态为断开：需要重连。
+    async fn needs_reconnect(
+        client: &Arc<Mutex<Box<dyn Client>>>,
+        state_mgr: &Arc<ConnectionStateManager>,
+    ) -> bool {
+        let client_guard = client.lock().await;
+        !client_guard.is_connected()
+            && matches!(
+                state_mgr.get_state(),
+                crate::client::connection::ConnectionState::Disconnected
+            )
     }
 
     /// 停止自动重连
@@ -322,5 +374,158 @@ impl ClientConnectionManager {
     /// 获取连接状态
     pub fn state(&self) -> crate::client::connection::ConnectionState {
         self.state_manager.get_state()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 前 `failures` 次建连失败、之后成功的客户端，记下每次建连的（虚拟）时刻。
+    struct FlakyClient {
+        failures: usize,
+        attempts: Arc<StdMutex<Vec<tokio::time::Instant>>>,
+        connected: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Client for FlakyClient {
+        async fn connect(&mut self) -> Result<()> {
+            let attempt = {
+                let mut attempts = self.attempts.lock().unwrap();
+                attempts.push(tokio::time::Instant::now());
+                attempts.len()
+            };
+            if attempt <= self.failures {
+                return Err(crate::common::error::FlareError::connection_failed(
+                    "server unavailable".to_string(),
+                ));
+            }
+            self.connected.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            self.connected.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_frame(&mut self, _frame: &Frame) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            self.connected.load(Ordering::SeqCst)
+        }
+
+        fn add_observer(&mut self, _observer: ArcObserver) {}
+
+        fn remove_observer(&mut self, _observer: ArcObserver) {}
+    }
+
+    fn manager(
+        failures: usize,
+        max_attempts: Option<u32>,
+    ) -> (
+        ClientConnectionManager,
+        Arc<StdMutex<Vec<tokio::time::Instant>>>,
+    ) {
+        let attempts = Arc::new(StdMutex::new(Vec::new()));
+        let client = FlakyClient {
+            failures,
+            attempts: attempts.clone(),
+            connected: AtomicBool::new(false),
+        };
+        let config = ClientConfig::default()
+            .with_reconnect_interval(Duration::from_secs(5))
+            .with_max_reconnect_attempts(max_attempts);
+        (
+            ClientConnectionManager::new(Box::new(client), config),
+            attempts,
+        )
+    }
+
+    /// 退避区间：从配置的间隔起翻倍、封顶 30 s、±20%，名义值至少 1 s。
+    #[test]
+    fn backoff_doubles_with_jitter_and_is_capped() {
+        let secs = |s: u64| Duration::from_secs(s);
+        let base = secs(5);
+        assert_eq!(auto_reconnect_delay_bounds(base, 1), (secs(4), secs(6)));
+        assert_eq!(auto_reconnect_delay_bounds(base, 2), (secs(8), secs(12)));
+        assert_eq!(auto_reconnect_delay_bounds(base, 3), (secs(16), secs(24)));
+        for attempt in [4, 5, 10, u32::MAX] {
+            assert_eq!(
+                auto_reconnect_delay_bounds(base, attempt),
+                (secs(24), secs(30)),
+                "attempt {attempt}"
+            );
+        }
+        assert_eq!(
+            auto_reconnect_delay_bounds(Duration::ZERO, 1),
+            (Duration::from_millis(800), Duration::from_millis(1_200)),
+            "a zero interval still waits about a second"
+        );
+
+        let samples: std::collections::HashSet<Duration> =
+            (0..200).map(|_| auto_reconnect_delay(base, 1)).collect();
+        assert!(samples.iter().all(|d| (secs(4)..=secs(6)).contains(d)));
+        assert!(
+            samples.len() > 20,
+            "jitter is drawn per millisecond, got {} distinct values",
+            samples.len()
+        );
+    }
+
+    /// 断开后每次重连前先按退避等：第一次不立即重试，间隔逐次翻倍、到 30 s 封顶；成功后停止。
+    #[tokio::test(start_paused = true)]
+    async fn auto_reconnect_backs_off_exponentially_up_to_the_cap() {
+        let (manager, attempts) = manager(6, None);
+        let started = tokio::time::Instant::now();
+        manager.start_auto_reconnect().await;
+
+        let deadline = started + Duration::from_secs(600);
+        while attempts.lock().unwrap().len() < 7 {
+            assert!(tokio::time::Instant::now() < deadline, "seven attempts");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+
+        let attempts = attempts.lock().unwrap().clone();
+        assert_eq!(attempts.len(), 7, "the loop stops once reconnected");
+        let mut previous = started;
+        for (index, at) in attempts.iter().enumerate() {
+            let attempt = index as u32 + 1;
+            let gap = at.duration_since(previous);
+            let (min, max) = auto_reconnect_delay_bounds(Duration::from_secs(5), attempt);
+            assert!(
+                gap >= min && gap <= max,
+                "attempt {attempt} waited {gap:?}, expected {min:?}..={max:?}"
+            );
+            previous = *at;
+        }
+        assert_eq!(
+            manager.state(),
+            crate::client::connection::ConnectionState::Connected
+        );
+    }
+
+    /// `max_reconnect_attempts` 有值时连续失败到这个次数就停止，不再无限重试。
+    #[tokio::test(start_paused = true)]
+    async fn auto_reconnect_stops_after_max_attempts() {
+        let (manager, attempts) = manager(usize::MAX, Some(3));
+        manager.start_auto_reconnect().await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+
+        assert_eq!(attempts.lock().unwrap().len(), 3);
+        assert_eq!(
+            manager.state(),
+            crate::client::connection::ConnectionState::Disconnected
+        );
+        assert!(
+            !*manager.is_reconnecting.lock().await,
+            "an exhausted loop can be started again"
+        );
     }
 }

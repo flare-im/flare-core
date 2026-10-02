@@ -61,6 +61,8 @@
 - `ClientConfig` 新增 `reconnect_on_send`，`ServerConfig` 新增 `shutdown_close_grace`（见下文「新增」）。
   用结构体字面量构造它们的代码需要补上字段或改用 `..Default::default()`；反序列化时缺这两个
   字段取默认值（`true`、1 s），行为不变。
+- `ClientConnectionManager::start_auto_reconnect` 遵守 `max_reconnect_attempts`：为 `Some(n)` 时连续
+  失败 n 次即停止（`ClientConfig` 的默认值是 `Some(5)`）。此前忽略这一项，一直重试。
 
 ### 修复
 
@@ -136,6 +138,9 @@
 - 客户端（`FlareClient`）：单协议时不再按文本把 WebSocket 协议错误当作协议竞速的正常错误吞掉。此前
   当前连接以这类错误终止时，监听器既收不到断开也收不到错误，只能等下一次发送时的惰性重连。竞速模式下
   关闭未选中连接的错误照旧过滤。
+- `ClientConnectionManager::start_auto_reconnect` 断开后按退避重连：从 `reconnect_interval` 起每次
+  翻倍、封顶 30 s、上下浮动 20%（按毫秒取值），每次尝试前先等，与 IM SDK 的重连循环一致。此前断开
+  后立即重连，失败后按固定间隔重试，同一刻断开的一批客户端会同时重连。
 - 服务端与客户端日志去掉装饰用的 emoji。
 
 ### 新增
@@ -163,6 +168,8 @@
   传输客户端发送时的 `try_reconnect` 都不做），重连交给上层。上层自带重连循环时（例如 IM SDK）应
   关掉它：两条路径并行时，旧客户端在下一次发送时自己连上、上层又新建一个客户端，同一用户出现两条
   连接，旧客户端还带着建连时的令牌。
+- `client::manager::auto_reconnect_delay_bounds`、`auto_reconnect_delay` 与
+  `AUTO_RECONNECT_MAX_DELAY`：自动重连的退避区间与取值。
 - `Server::stop_accepting`（默认什么都不做）：停止接受新连接、保留已建立的连接。WebSocket、
   TCP、QUIC 服务端实现了它，`stop` 也先停止接受新连接；`HybridServer::stop` 先关所有协议的入口，
   再统一通知在线连接。

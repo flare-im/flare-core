@@ -96,6 +96,10 @@ web-sys = { version = "0.3", features = [
 # 属性测试：给处理不可信网络字节的解析路径做随机输入覆盖。
 proptest = "1"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# 虚拟时钟（`start_paused`）：重连退避这类用例不必真等几十秒。
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = [
     "client",
