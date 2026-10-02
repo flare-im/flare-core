@@ -373,6 +373,44 @@ mod tests {
         );
     }
 
+    /// 收到帧时 panic 的观察者。
+    struct PanicOnMessage;
+
+    impl ConnectionObserver for PanicOnMessage {
+        fn on_event(&self, event: &ConnectionEvent) {
+            if event.is_message() {
+                panic!("observer bug while handling a frame");
+            }
+        }
+    }
+
+    /// 一个观察者处理帧时 panic：读循环不随之结束，其余观察者照常收到这一帧与之后的帧。
+    /// 原先 panic 沿读循环上抛，读任务结束，后面的帧没人读，对端断开也不再上报。
+    #[tokio::test]
+    async fn a_panicking_observer_does_not_end_the_read_loop() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let mut client = TCPTransport::new(TcpStream::connect(addr).await.expect("connect"));
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut server = TCPTransport::new(stream);
+        let observer = Arc::new(RecordingObserver::default());
+        server.add_observer(Arc::new(PanicOnMessage));
+        server.add_observer(observer.clone());
+
+        client.send(b"frame-1").await.expect("client send");
+        client.send(b"frame-2").await.expect("client send");
+        wait_for("both frames reach the other observer", || {
+            observer.messages() == vec![b"frame-1".to_vec(), b"frame-2".to_vec()]
+        })
+        .await;
+        client.close().await.expect("client close");
+        wait_for("the peer close is still reported", || {
+            observer.disconnected()
+        })
+        .await;
+    }
+
     /// 本端关闭之后再挂的观察者只收到 Disconnected，不会被告知 Connected。
     #[tokio::test]
     async fn observer_added_after_local_close_sees_only_disconnected() {

@@ -126,40 +126,30 @@ pub(crate) fn deliver_to_observers(
     }
 }
 
+/// 传输读循环、重连任务上报一个事件：按快照在锁外逐个回调，观察者 panic 被隔离（见
+/// [`deliver_to_observers`]）。原先直接回调，一个观察者 panic 会沿读循环上抛：读任务就此结束，
+/// 排在它后面的观察者收不到这次事件，之后的帧也不再有人读、连连接断开都不会再上报。
 pub(crate) fn notify_observers(
     observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
     event: &ConnectionEvent,
-    lock_name: &str,
+    source: &'static str,
 ) {
-    let observers = match observers_arc.lock() {
-        Ok(observers) => observers.clone(),
-        Err(e) => {
-            tracing::warn!("{lock_name} lock poisoned: {e}");
-            return;
-        }
-    };
-
-    for observer in observers {
-        observer.on_event(event);
-    }
+    let observers = observer_snapshot(observers_arc);
+    deliver_to_observers(&observers, event, source);
 }
 
+/// 终止事件：取走全部观察者（锁被毒化也照常取走）再逐个回调，观察者 panic 同样被隔离。
 pub(crate) fn notify_observers_and_clear(
     observers_arc: &Arc<Mutex<Vec<ArcObserver>>>,
     event: &ConnectionEvent,
-    lock_name: &str,
+    source: &'static str,
 ) {
-    let observers = match observers_arc.lock() {
-        Ok(mut observers) => std::mem::take(&mut *observers),
-        Err(e) => {
-            tracing::warn!("{lock_name} lock poisoned: {e}");
-            return;
-        }
-    };
-
-    for observer in observers {
-        observer.on_event(event);
-    }
+    let observers = std::mem::take(
+        &mut *observers_arc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    deliver_to_observers(&observers, event, source);
 }
 
 // ============================================================================
@@ -355,5 +345,46 @@ mod tests {
         deliver_to_observers(&snapshot, &ConnectionEvent::Connected, "test observers");
         deliver_to_observers(&snapshot, &ConnectionEvent::Connected, "test observers");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// 传输读循环用的两个通知入口同样隔离观察者 panic：排在后面的观察者照常收到，panic 不沿
+    /// 读循环上抛；终止通知在锁被毒化时也照常取走全部观察者。
+    #[test]
+    fn transport_notifications_isolate_a_panicking_observer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observers = Arc::new(Mutex::new(Vec::<ArcObserver>::new()));
+        observers.lock().unwrap().push(Arc::new(PanickingObserver));
+        observers.lock().unwrap().push(Arc::new(CountingObserver {
+            calls: Arc::clone(&calls),
+            drops: Arc::new(AtomicUsize::new(0)),
+        }));
+
+        notify_observers(
+            &observers,
+            &ConnectionEvent::Message(b"frame".to_vec()),
+            "test observers",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observers.lock().unwrap().len(), 2);
+
+        let poisoner = Arc::clone(&observers);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the observer list");
+        })
+        .join();
+        assert!(observers.is_poisoned());
+        notify_observers_and_clear(
+            &observers,
+            &ConnectionEvent::Disconnected("peer closed".to_string()),
+            "test observers",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            observers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 }
