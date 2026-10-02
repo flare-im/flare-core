@@ -28,11 +28,31 @@ pub struct QUICTransport {
 
 /// 读流失败的两类结局。
 enum ReadFailure {
-    /// 对端在连接层面结束了连接（应用关闭、传输层关闭、空闲超时、无状态重置）、本端已关闭连接，
-    /// 或对端重置了这条流：这是断开，带上可读的原因。
+    /// 对端在连接层面结束了连接（应用关闭、不带协议错误的传输层关闭、空闲超时、无状态重置）、
+    /// 本端已关闭连接，或对端重置了这条流：这是断开，带上可读的原因。
     Closed(String),
-    /// 真正的错误：协议违例、版本不符、帧长度非法、读到一半流就结束等。
+    /// 真正的错误：本端或对端检测到的协议违例、版本不符、帧长度非法、读到一半流就结束等。
     Error(FlareError),
+}
+
+/// 对端以传输层 CONNECTION_CLOSE 结束连接时，这个错误码是否只是断开。
+///
+/// 正常关闭（`NO_ERROR`）、对端拒绝或自身故障（`CONNECTION_REFUSED`、`INTERNAL_ERROR`）、握手期间的
+/// 应用关闭（`APPLICATION_ERROR`）、密钥用量到顶（`AEAD_LIMIT_REACHED`）与没有可用路径
+/// （`NO_VIABLE_PATH`）都是断开，重连即可。其余错误码是对端判定我方违反协议（协议违例、帧编码、
+/// 流量控制、流状态、传输参数、令牌、密钥更新）或 TLS 告警（`0x100`–`0x1ff`），按错误上报：
+/// 重连多半还会撞上同一个问题，应当被看到。
+fn peer_transport_close_is_disconnect(code: quinn::TransportErrorCode) -> bool {
+    use quinn::TransportErrorCode as Code;
+    [
+        Code::NO_ERROR,
+        Code::INTERNAL_ERROR,
+        Code::CONNECTION_REFUSED,
+        Code::APPLICATION_ERROR,
+        Code::AEAD_LIMIT_REACHED,
+        Code::NO_VIABLE_PATH,
+    ]
+    .contains(&code)
 }
 
 impl QUICTransport {
@@ -248,7 +268,8 @@ impl QUICTransport {
     /// 区分连接级关闭与真正的读错误。
     ///
     /// 对端以应用错误关闭连接时，原因是非空 UTF-8 就原样作为断开原因（例如服务端停机时的
-    /// `SERVER_SHUTDOWN`），上层据此识别类型化原因。
+    /// `SERVER_SHUTDOWN`），上层据此识别类型化原因。对端以传输层错误关闭连接时按错误码区分，
+    /// 见 [`peer_transport_close_is_disconnect`]。
     fn classify_read_error(error: quinn::ReadError) -> ReadFailure {
         use quinn::{ConnectionError, ReadError};
         match &error {
@@ -265,9 +286,17 @@ impl QUICTransport {
                     ),
                 })
             }
+            ReadError::ConnectionLost(ConnectionError::ConnectionClosed(close)) => {
+                if peer_transport_close_is_disconnect(close.error_code) {
+                    ReadFailure::Closed(format!("QUIC connection closed by peer: {close}"))
+                } else {
+                    ReadFailure::Error(FlareError::protocol_error(format!(
+                        "QUIC connection closed by peer with a protocol error: {close}"
+                    )))
+                }
+            }
             ReadError::ConnectionLost(
-                lost @ (ConnectionError::ConnectionClosed(_)
-                | ConnectionError::TimedOut
+                lost @ (ConnectionError::TimedOut
                 | ConnectionError::Reset
                 | ConnectionError::LocallyClosed),
             ) => ReadFailure::Closed(format!("QUIC connection closed: {lost}")),
@@ -423,7 +452,17 @@ impl Drop for QUICTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quinn::{ApplicationClose, ConnectionError, ReadError, VarInt};
+    use quinn::{
+        ApplicationClose, ConnectionClose, ConnectionError, ReadError, TransportErrorCode, VarInt,
+    };
+
+    fn peer_transport_close(code: TransportErrorCode) -> ReadError {
+        ReadError::ConnectionLost(ConnectionError::ConnectionClosed(ConnectionClose {
+            error_code: code,
+            frame_type: None,
+            reason: bytes::Bytes::from_static(b"peer detail"),
+        }))
+    }
 
     fn closed(failure: ReadFailure) -> Option<String> {
         match failure {
@@ -457,7 +496,8 @@ mod tests {
         );
     }
 
-    /// 空闲超时、无状态重置、本端已关闭、对端重置流都是断开，不是错误。
+    /// 空闲超时、无状态重置、本端已关闭、对端重置流，以及对端不带协议错误的传输层关闭都是断开，
+    /// 不是错误。
     #[test]
     fn connection_level_closes_are_disconnects() {
         for error in [
@@ -465,6 +505,12 @@ mod tests {
             ReadError::ConnectionLost(ConnectionError::Reset),
             ReadError::ConnectionLost(ConnectionError::LocallyClosed),
             ReadError::Reset(VarInt::from_u32(3)),
+            peer_transport_close(TransportErrorCode::NO_ERROR),
+            peer_transport_close(TransportErrorCode::INTERNAL_ERROR),
+            peer_transport_close(TransportErrorCode::CONNECTION_REFUSED),
+            peer_transport_close(TransportErrorCode::APPLICATION_ERROR),
+            peer_transport_close(TransportErrorCode::AEAD_LIMIT_REACHED),
+            peer_transport_close(TransportErrorCode::NO_VIABLE_PATH),
         ] {
             let description = error.to_string();
             assert!(
@@ -474,7 +520,7 @@ mod tests {
         }
     }
 
-    /// 协议违例、版本不符、流状态错误仍是错误。
+    /// 协议违例、版本不符、流状态错误仍是错误；对端以协议类错误码或 TLS 告警关闭连接也是错误。
     #[test]
     fn protocol_failures_stay_errors() {
         for error in [
@@ -482,6 +528,13 @@ mod tests {
             ReadError::ConnectionLost(ConnectionError::CidsExhausted),
             ReadError::ClosedStream,
             ReadError::IllegalOrderedRead,
+            peer_transport_close(TransportErrorCode::PROTOCOL_VIOLATION),
+            peer_transport_close(TransportErrorCode::FRAME_ENCODING_ERROR),
+            peer_transport_close(TransportErrorCode::FLOW_CONTROL_ERROR),
+            peer_transport_close(TransportErrorCode::STREAM_STATE_ERROR),
+            peer_transport_close(TransportErrorCode::TRANSPORT_PARAMETER_ERROR),
+            peer_transport_close(TransportErrorCode::KEY_UPDATE_ERROR),
+            peer_transport_close(TransportErrorCode::crypto(0x2a)),
         ] {
             let description = error.to_string();
             assert!(
