@@ -14,7 +14,7 @@ pub struct ClientConfig {
     /// 传输协议（单个）
     pub transport: TransportProtocol,
     /// 传输协议列表（用于竞速，如果设置了此列表，transport 将被忽略）
-    /// 列表顺序就是优先级顺序，前面的优先级更高
+    /// 各协议同时建连，先建好网络连接的胜出；列表顺序是发起顺序与日志、错误信息里的编号
     pub transports: Option<Vec<TransportProtocol>>,
     /// 每个协议的独立地址配置（协议 -> 地址映射）
     /// 如果设置了此映射，每个协议将使用对应的地址
@@ -148,8 +148,10 @@ impl ClientConfig {
 
     /// 启用多协议竞速
     ///
-    /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
-    /// 例如：with_protocol_race(vec![QUIC, WebSocket]) 表示 QUIC 优先级高于 WebSocket
+    /// 各协议同时建立网络连接，第一个建好的胜出并在它上面发 CONNECT，不等其余协议（包括排在前面、
+    /// 还没建好的协议），未选中的在后台中止或关闭。协议列表的顺序是发起顺序，也是日志与全部失败时
+    /// 错误信息里的编号。例如 UDP 被静默丢弃时，`with_protocol_race(vec![QUIC, WebSocket])` 经
+    /// WebSocket 连上，不等 QUIC 握手超时。整个竞速（含 CONNECT）受 [`Self::with_race_timeout`] 约束。
     pub fn with_protocol_race(mut self, protocols: Vec<TransportProtocol>) -> Self {
         self.transports = Some(protocols);
         self

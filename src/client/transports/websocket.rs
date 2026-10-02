@@ -29,6 +29,9 @@ use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 pub struct WebSocketClient {
     config: ClientConfig,
     connection: Option<Arc<Mutex<Box<dyn Connection>>>>,
+    /// `connection` 是协议竞速刚建好、还没发过 CONNECT 的网络连接（见 QUIC 客户端同名字段）。
+    /// 只有这时 `connect()` 才直接复用它，不再重新拨号。
+    connection_prepared: bool,
     connection_id: String,
     core: ClientCore,
     reconnect_attempts: u32,
@@ -43,6 +46,7 @@ impl WebSocketClient {
         Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -62,6 +66,7 @@ impl WebSocketClient {
         Self {
             config,
             connection: None,
+            connection_prepared: false,
             connection_id,
             core,
             reconnect_attempts: 0,
@@ -78,13 +83,22 @@ impl WebSocketClient {
         let connection_arc = Arc::new(Mutex::new(connection));
         // 保存连接，以便后续 connect() 时使用
         self.connection = Some(Arc::clone(&connection_arc));
+        self.connection_prepared = true;
         Ok(connection_arc)
     }
 
     /// 内部连接实现
     async fn internal_connect(&mut self) -> Result<()> {
-        // 建立 WebSocket 连接
-        let connection_arc = self.establish_network_connection().await?;
+        // 协议竞速刚建好的网络连接直接发 CONNECT；其余情况照旧新建 WebSocket 连接。
+        // 此前竞速胜出的 WebSocket 在这里再拨号一次，竞速建好的那条被直接丢掉。
+        let connection_arc = match self.connection.as_ref() {
+            Some(prepared) if std::mem::take(&mut self.connection_prepared) => Arc::clone(prepared),
+            _ => {
+                let connection = self.establish_network_connection().await?;
+                self.connection_prepared = false;
+                connection
+            }
+        };
 
         // 设置连接和观察者（会发送 CONNECT 消息）
         self.setup_connection_with_observer(connection_arc.clone())
@@ -189,6 +203,7 @@ impl WebSocketClient {
         sleep(self.core.reconnect_delay(self.config.reconnect_interval)).await;
 
         // 关闭旧连接
+        self.connection_prepared = false;
         if let Some(conn) = self.connection.take() {
             let mut c = conn.lock().await;
             let _ = c.close().await;
@@ -357,6 +372,7 @@ impl Client for WebSocketClient {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        self.connection_prepared = false;
         ClientConnectionHelper::disconnect_internal(self.connection.take(), &mut self.core).await
     }
 

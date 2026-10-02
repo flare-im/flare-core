@@ -80,7 +80,8 @@ impl ObserverClientBuilder {
 
     /// 启用多协议竞速
     ///
-    /// 协议列表的顺序就是优先级顺序，前面的协议优先级更高
+    /// 第一个建好网络连接的协议胜出，不等其余协议；列表顺序是发起顺序
+    /// （见 [`crate::client::config::ClientConfig::with_protocol_race`]）
     pub fn with_protocol_race(
         mut self,
         protocols: Vec<crate::common::config_types::TransportProtocol>,

@@ -8,6 +8,11 @@
 //!   吞掉，关掉了发送前重连的上层（IM SDK）收不到断开也收不到错误，停在一条死连接上。
 //! - 两个协议都可达：竞速收尾时关掉的那条连接把「我方已主动断开」置在了共享标记上，选中的连接此后
 //!   一直带着它，被服务端断开后发送前不再重连（"client was disconnected on request"）。
+//! - UDP 被静默丢弃（QUIC 端口是只收不回的黑洞）、WebSocket 正常：WebSocket 一建好就胜出，竞速不等
+//!   还在握手的 QUIC。此前竞速要等 QUIC 握手到连接超时（默认 30 s）才收尾，在竞速时限（默认 5 s）处
+//!   整体失败，已经连上的 WebSocket 也一起丢掉；胜出的 WebSocket 还会在发 CONNECT 前重新拨号一次。
+//! - 两个协议都连不上（QUIC 黑洞，WebSocket 端口只接受不应答）：竞速在竞速时限处失败，不等握手到
+//!   连接超时。
 
 #![cfg(all(
     feature = "client",
@@ -177,6 +182,8 @@ where
 /// 只绑 127.0.0.1 的 TCP 中继，一次只转发一条连接；客户端方向的写端留着，用来注入字节。
 struct Relay {
     address: String,
+    /// 客户端拨进来的连接数
+    accepted: Arc<AtomicUsize>,
     to_client: Arc<tokio::sync::Mutex<Option<OwnedWriteHalf>>>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     accept_loop: JoinHandle<()>,
@@ -188,14 +195,17 @@ impl Relay {
             .await
             .expect("bind relay listener");
         let address = listener.local_addr().expect("relay address").to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
         let to_client: Arc<tokio::sync::Mutex<Option<OwnedWriteHalf>>> =
             Arc::new(tokio::sync::Mutex::new(None));
         let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let accept_loop = tokio::spawn({
+            let accepted = accepted.clone();
             let to_client = to_client.clone();
             let tasks = tasks.clone();
             async move {
                 while let Ok((client, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
                     let Ok(server) = TcpStream::connect(&target).await else {
                         continue;
                     };
@@ -228,10 +238,15 @@ impl Relay {
         });
         Self {
             address,
+            accepted,
             to_client,
             tasks,
             accept_loop,
         }
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
     }
 
     /// 选中的 WebSocket 连接以协议错误终止：停止转发，向客户端注入一个保留操作码的帧
@@ -258,7 +273,7 @@ impl Relay {
     }
 }
 
-/// QUIC 不可达（UDP 端口上没有服务，握手到连接超时为止），WebSocket 胜出。选中的 WebSocket 连接
+/// QUIC 不可达（UDP 端口上没有服务），WebSocket 胜出。选中的 WebSocket 连接
 /// 以协议错误终止时，监听器收到这个错误；此前竞速模式下它被当作未选中连接的关闭错误吞掉。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_protocol_error_on_the_selected_websocket_connection_reaches_the_listener() {
@@ -271,8 +286,6 @@ async fn a_protocol_error_on_the_selected_websocket_connection_reaches_the_liste
         format!("quic://127.0.0.1:{}", free_udp_port()),
         recorder.clone(),
     )
-    // 比竞速时限（默认 5 s）短：QUIC 握手到这里超时，竞速随即结束
-    .with_connect_timeout(Duration::from_secs(1))
     .with_reconnect_on_send(false)
     .build_with_race()
     .await
@@ -356,4 +369,159 @@ async fn closing_the_race_loser_does_not_mark_the_selected_connection_as_closed_
 
     let _ = client.disconnect().await;
     server.stop().await.expect("stop server");
+}
+
+/// 只绑 127.0.0.1 的 UDP 黑洞：收下所有数据报、一个也不回，模拟 UDP 被防火墙静默丢弃。
+/// 端口上有套接字，所以也不会回 ICMP 端口不可达，QUIC 握手只能等到连接超时。
+struct UdpBlackhole {
+    address: String,
+    received: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
+}
+
+impl UdpBlackhole {
+    async fn start() -> Self {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind the UDP blackhole");
+        let address = socket.local_addr().expect("blackhole address").to_string();
+        let received = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let received = received.clone();
+            async move {
+                let mut buffer = vec![0u8; 2048];
+                while socket.recv_from(&mut buffer).await.is_ok() {
+                    received.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            address,
+            received,
+            task,
+        }
+    }
+
+    fn stop(self) {
+        self.task.abort();
+    }
+}
+
+/// 只绑 127.0.0.1 的 TCP 端口：接受连接、一个字节也不回（WebSocket 升级握手停在这里）。
+struct SilentTcp {
+    address: String,
+    task: JoinHandle<()>,
+}
+
+impl SilentTcp {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the silent TCP listener");
+        let address = listener.local_addr().expect("listener address").to_string();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        Self { address, task }
+    }
+
+    fn stop(self) {
+        self.task.abort();
+    }
+}
+
+/// UDP 被静默丢弃（QUIC 端口是黑洞）、WebSocket 正常，连接超时与竞速时限都用默认值（30 s、5 s）：
+/// WebSocket 一建好就胜出，竞速在有界时间内经 WebSocket 连上，不等还在握手的 QUIC；竞速建好的那条
+/// WebSocket 连接直接用来发 CONNECT，不重新拨号。
+///
+/// 此前竞速等 QUIC 握手到连接超时才收尾，在竞速时限处以「Protocol race timed out after 5s」整体失败，
+/// 已经连上的 WebSocket 也一起丢掉；原生端与 Tauri 在屏蔽 UDP 的网络里一直连不上。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_race_connects_over_websocket_at_once_when_udp_is_silently_dropped() {
+    let ws_port = free_tcp_port();
+    let server = start_server(ws_port, None).await;
+    let relay = Relay::start(format!("127.0.0.1:{ws_port}")).await;
+    let blackhole = UdpBlackhole::start().await;
+    let recorder = Arc::new(Recorder::default());
+
+    let started = Instant::now();
+    let client: FlareClient = race_builder(
+        format!("ws://{}", relay.address),
+        format!("quic://{}", blackhole.address),
+        recorder.clone(),
+    )
+    .build_with_race()
+    .await
+    .expect("the race selects WebSocket while QUIC is still handshaking");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the race must not wait for the unselected QUIC handshake: took {elapsed:?}"
+    );
+    assert_eq!(client.active_protocol(), TransportProtocol::WebSocket);
+    wait_until("CONNECT_ACK", Duration::from_secs(3), || async {
+        recorder.acks() == 1
+    })
+    .await;
+    assert_eq!(
+        relay.accepted(),
+        1,
+        "CONNECT goes over the WebSocket connection the race established, without dialling again"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        client.send_frame(&frame_with_system_command(ping(), Reliability::AtLeastOnce)),
+    )
+    .await
+    .expect("send must not hang")
+    .expect("the selected WebSocket connection is usable");
+    assert_eq!(relay.accepted(), 1);
+    eprintln!(
+        "race over a UDP blackhole: selected WebSocket after {elapsed:?}; the blackhole saw {} datagram(s)",
+        blackhole.received.load(Ordering::SeqCst)
+    );
+
+    let _ = client.disconnect().await;
+    blackhole.stop();
+    relay.stop();
+    server.stop().await.expect("stop server");
+}
+
+/// 两个协议都连不上（QUIC 端口是黑洞，WebSocket 端口只接受不应答），连接超时 10 s、竞速时限 1 s：
+/// 竞速在竞速时限处失败，不等还在握手的连接收尾到连接超时。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_race_without_a_reachable_protocol_fails_at_the_race_timeout() {
+    let blackhole = UdpBlackhole::start().await;
+    let silent = SilentTcp::start().await;
+    let recorder = Arc::new(Recorder::default());
+
+    let started = Instant::now();
+    let result = race_builder(
+        format!("ws://{}", silent.address),
+        format!("quic://{}", blackhole.address),
+        recorder,
+    )
+    .with_connect_timeout(Duration::from_secs(10))
+    .with_race_timeout(Duration::from_secs(1))
+    .build_with_race()
+    .await;
+    let elapsed = started.elapsed();
+    let error = match result {
+        Ok(_) => panic!("neither protocol is reachable"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("Protocol race timed out"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(2_500),
+        "the race must fail at its own timeout, not after the handshakes time out: took {elapsed:?}"
+    );
+
+    blackhole.stop();
+    silent.stop();
 }

@@ -11,8 +11,7 @@ use crate::common::platform::{MonotonicInstant, monotonic_now, timeout as platfo
 use crate::common::protocol::Frame;
 use crate::transport::events::ArcObserver;
 use async_trait::async_trait;
-use futures_util::future::select_all;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -46,7 +45,10 @@ type ConnectionResult = Result<Box<dyn Client>>;
 
 /// 连接任务结果
 type ConnectionTaskResult = (TransportProtocol, usize, ConnectionResult, Duration);
-type RaceInflight = Arc<StdMutex<Vec<tokio::task::JoinHandle<ConnectionTaskResult>>>>;
+
+/// 竞速中各协议的建连任务。`JoinSet` 被丢弃时中止其中全部任务：竞速超时（整个竞速 future
+/// 被丢弃）时，还在握手的连接随之中止，不在后台拖到连接超时。
+type RaceTasks = tokio::task::JoinSet<ConnectionTaskResult>;
 
 /// 成功的连接信息
 type SuccessfulConnection = (usize, TransportProtocol, Box<dyn Client>, Duration);
@@ -167,31 +169,25 @@ impl HybridClient {
 
     /// 协议竞速连接
     ///
-    /// 并行连接多个协议，选择最快成功的连接
-    /// 如果多个连接几乎同时成功（时间差 < 100ms），则使用优先级最高的
-    /// 协议列表的顺序就是优先级顺序（index 越小优先级越高）
+    /// 并行为每个协议建立网络连接，第一个建好的协议胜出，立即在它上面发 CONNECT：不等其余协议，
+    /// 也不等排在前面、还没建好的协议。未选中的协议交给后台收尾
+    /// （[`Self::close_race_losers_in_background`]）。
+    ///
+    /// 此前竞速要等所有未选中的连接收尾：UDP 被静默丢弃时 QUIC 握手要等到连接超时（默认 30 s），
+    /// 整个竞速在竞速时限（默认 5 s）处失败，已经连上的 WebSocket 也一起丢掉。
     async fn race_connect(
         config: ClientConfig,
         shared_core: ClientCore,
-        inflight: RaceInflight,
     ) -> Result<(Box<dyn Client>, TransportProtocol)> {
         let protocols = config.get_protocols();
         let race_start = monotonic_now();
 
-        Self::spawn_connection_tasks(config, &protocols, &shared_core, Arc::clone(&inflight));
+        let mut tasks = Self::spawn_connection_tasks(config, &protocols, &shared_core);
+        let (winner, errors) = Self::wait_for_first_connection(&mut tasks).await;
+        Self::close_race_losers_in_background(tasks);
 
-        let (first_success, successful_clients, errors) =
-            Self::wait_for_connections(inflight).await;
-
-        // 处理连接结果（选择最快协议，然后发送 CONNECT）
-        Self::process_race_results(
-            first_success,
-            successful_clients,
-            errors,
-            shared_core,
-            race_start,
-        )
-        .await
+        // 在胜出的连接上发送 CONNECT
+        Self::process_race_results(winner, errors, shared_core, race_start).await
     }
 
     /// 为所有协议创建连接任务
@@ -199,8 +195,8 @@ impl HybridClient {
         config: ClientConfig,
         protocols: &[TransportProtocol],
         shared_core: &ClientCore,
-        inflight: RaceInflight,
-    ) {
+    ) -> RaceTasks {
+        let mut tasks = RaceTasks::new();
         for (index, protocol) in protocols.iter().enumerate() {
             let protocol_url = config.get_protocol_url(protocol);
             tracing::debug!(
@@ -224,10 +220,10 @@ impl HybridClient {
             let protocol_clone = *protocol;
             let protocol_index = index;
 
-            let handle = tokio::spawn(async move {
+            tasks.spawn(async move {
                 let start_time = monotonic_now();
                 tracing::debug!(
-                    "开始建立网络连接: {:?} (优先级: {}, 地址: {})",
+                    "开始建立网络连接: {:?} (编号: {}, 地址: {})",
                     protocol_clone,
                     protocol_index,
                     protocol_url
@@ -249,11 +245,8 @@ impl HybridClient {
 
                 (protocol_clone, protocol_index, client_result, elapsed)
             });
-
-            if let Ok(mut guard) = inflight.lock() {
-                guard.push(handle);
-            }
         }
+        tasks
     }
 
     /// 仅建立网络连接（不发送 CONNECT，用于协议竞速）
@@ -414,112 +407,38 @@ impl HybridClient {
         Ok((client, elapsed))
     }
 
-    /// 竞速超时或失败时关闭仍在进行/已建立但未选中的连接。
-    async fn cleanup_inflight(inflight: &RaceInflight) {
-        let handles = inflight
-            .lock()
-            .ok()
-            .map(|mut guard| std::mem::take(&mut *guard))
-            .unwrap_or_default();
-        if !handles.is_empty() {
-            Self::cleanup_remaining_race_handles(handles).await;
-        }
-    }
-
-    /// 等待所有连接任务完成，收集结果
-    async fn wait_for_connections(
-        inflight: RaceInflight,
-    ) -> (
-        Option<SuccessfulConnection>,
-        Vec<SuccessfulConnection>,
-        Vec<FailedConnection>,
-    ) {
-        const TIME_THRESHOLD: Duration = Duration::from_millis(100);
-
-        let mut first_success: Option<SuccessfulConnection> = None;
-        let mut successful_clients = Vec::new();
+    /// 等第一个建好网络连接的协议：它一建好就胜出、立即返回，不再等还在建连的其余协议。
+    ///
+    /// 返回胜出的连接（全部失败时为 `None`）与此前已经失败的协议；还没结束的任务留在 `tasks` 里，
+    /// 由调用方交给 [`Self::close_race_losers_in_background`]。
+    async fn wait_for_first_connection(
+        tasks: &mut RaceTasks,
+    ) -> (Option<SuccessfulConnection>, Vec<FailedConnection>) {
         let mut errors = Vec::new();
 
-        loop {
-            let batch = inflight
-                .lock()
-                .ok()
-                .map(|mut guard| std::mem::take(&mut *guard))
-                .unwrap_or_default();
-            if batch.is_empty() {
-                break;
-            }
-
-            let total_protocols = batch.len();
-            tracing::debug!("协议竞速 select 批次: {} 个任务", total_protocols);
-
-            let (result, _index, remaining) = select_all(batch).await;
-            if let Ok(mut guard) = inflight.lock() {
-                guard.extend(remaining);
-            }
-
-            match result {
-                Ok((protocol, protocol_index, client_result, elapsed)) => {
-                    match client_result {
-                        Ok(client) => {
-                            if first_success.is_none() {
-                                // 第一个成功的连接，立即返回
-                                first_success = Some((protocol_index, protocol, client, elapsed));
-                                let ms = elapsed.as_secs_f64() * 1000.0;
-                                tracing::info!(
-                                    "第一个成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
-                                    protocol,
-                                    protocol_index,
-                                    ms
-                                );
-                                tracing::debug!("第一个连接成功，立即返回，不再等待其他连接");
-                                break;
-                            } else if let Some((_, _, _, first_elapsed)) = &first_success {
-                                // 检查是否在时间阈值内（几乎同时成功）
-                                if elapsed <= *first_elapsed + TIME_THRESHOLD {
-                                    successful_clients.push((
-                                        protocol_index,
-                                        protocol,
-                                        client,
-                                        elapsed,
-                                    ));
-                                    let ms = elapsed.as_secs_f64() * 1000.0;
-                                    tracing::debug!(
-                                        "几乎同时成功的连接: {:?} (优先级: {}, 耗时: {:.3}ms)",
-                                        protocol,
-                                        protocol_index,
-                                        ms
-                                    );
-                                } else {
-                                    // 连接太慢，关闭它
-                                    let ms = elapsed.as_secs_f64() * 1000.0;
-                                    tracing::debug!(
-                                        "连接太慢，关闭: {:?} (优先级: {}, 耗时: {:.3}ms)",
-                                        protocol,
-                                        protocol_index,
-                                        ms
-                                    );
-                                    Self::disconnect_client_async(
-                                        protocol,
-                                        protocol_index,
-                                        elapsed,
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            errors.push((protocol_index, protocol, e, elapsed));
-                            let ms = elapsed.as_secs_f64() * 1000.0;
-                            tracing::warn!(
-                                "连接失败: {:?} (优先级: {}, 耗时: {:.3}ms): {}",
-                                protocol,
-                                protocol_index,
-                                ms,
-                                error_msg
-                            );
-                        }
-                    }
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((protocol, protocol_index, Ok(client), elapsed)) => {
+                    let ms = elapsed.as_secs_f64() * 1000.0;
+                    tracing::info!(
+                        "第一个建好的连接: {:?} (编号: {}, 耗时: {:.3}ms)，不再等其余 {} 个协议",
+                        protocol,
+                        protocol_index,
+                        ms,
+                        tasks.len()
+                    );
+                    return (Some((protocol_index, protocol, client, elapsed)), errors);
+                }
+                Ok((protocol, protocol_index, Err(e), elapsed)) => {
+                    let ms = elapsed.as_secs_f64() * 1000.0;
+                    tracing::warn!(
+                        "连接失败: {:?} (编号: {}, 耗时: {:.3}ms): {}",
+                        protocol,
+                        protocol_index,
+                        ms,
+                        e
+                    );
+                    errors.push((protocol_index, protocol, e, elapsed));
                 }
                 Err(join_err) => {
                     tracing::error!("Task join error: {:?}", join_err);
@@ -527,158 +446,132 @@ impl HybridClient {
             }
         }
 
-        Self::cleanup_inflight(&inflight).await;
-
-        (first_success, successful_clients, errors)
+        (None, errors)
     }
 
-    /// 竞速提前结束或全部完成后，关闭仍在进行/已建立但未选中的连接，避免泄漏。
-    async fn cleanup_remaining_race_handles(
-        handles: Vec<tokio::task::JoinHandle<ConnectionTaskResult>>,
-    ) {
-        for handle in handles {
-            match handle.await {
-                Ok((_protocol, _index, Ok(mut client), _elapsed)) => {
-                    // 先脱钩：它关闭时的事件与主动断开标记不能落到选中连接的共享状态上
-                    client.detach_from_race();
-                    client.set_disconnect_requested(true);
-                    if let Err(e) = client.disconnect().await {
-                        tracing::debug!("[HybridClient] race cleanup disconnect: {}", e);
+    /// 在后台收尾未选中的协议，不占竞速的时间：还在建连的任务中止（丢弃时连同半建好的连接一起释放），
+    /// 已经建好的连接与共享状态脱钩后关闭（[`Self::close_race_loser`]）。
+    ///
+    /// 未选中的连接没发过 CONNECT（服务端不会按设备冲突踢它），也没有挂消息观察者，与选中连接上的
+    /// CONNECT 并行关闭不会产生上层可见的事件。
+    fn close_race_losers_in_background(mut tasks: RaceTasks) {
+        if tasks.is_empty() {
+            return;
+        }
+        tasks.abort_all();
+        tokio::spawn(async move {
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok((protocol, protocol_index, Ok(client), _elapsed)) => {
+                        tracing::debug!(
+                            "关闭未选中的连接: {:?} (编号: {})",
+                            protocol,
+                            protocol_index
+                        );
+                        Self::close_race_loser(client).await;
+                    }
+                    Ok((_protocol, _index, Err(_), _elapsed)) => {}
+                    Err(join_err) if join_err.is_cancelled() => {}
+                    Err(join_err) => {
+                        tracing::debug!("[HybridClient] race task join error: {:?}", join_err);
                     }
                 }
-                Ok((_protocol, _index, Err(_), _elapsed)) => {}
-                Err(join_err) => {
-                    tracing::debug!("[HybridClient] race task join error: {:?}", join_err);
-                }
             }
+        });
+    }
+
+    /// 关闭一个未选中、已经建好网络连接的客户端（客户端主动断开）。
+    ///
+    /// 先与共享状态脱钩（`detach_from_race`）再置位主动断开、关闭：它关闭时的事件只到它自己的观察者，
+    /// 主动断开标记也只置在它自己身上，不会让选中的连接此后被踢时不通知观察者、发送前不再重连。
+    async fn close_race_loser(mut client: Box<dyn Client>) {
+        client.detach_from_race();
+        client.set_disconnect_requested(true);
+        if let Err(e) = client.disconnect().await {
+            tracing::debug!("[HybridClient] race cleanup disconnect: {}", e);
         }
     }
 
-    /// 异步关闭客户端（不阻塞）
-    fn disconnect_client_async(protocol: TransportProtocol, priority: usize, elapsed: Duration) {
-        tracing::debug!(
-            "连接太慢，关闭: {:?} (优先级: {}, 耗时: {:?})",
-            protocol,
-            priority,
-            elapsed
-        );
-        // 注意：这里无法获取 client，因为它在 Result 中
-        // 实际关闭会在 process_race_results 中处理
-    }
-
-    /// 处理竞速结果，选择最佳连接，然后发送 CONNECT 消息
+    /// 处理竞速结果：在胜出的连接上发送 CONNECT；全部失败时汇总各协议的错误。
     async fn process_race_results(
-        first_success: Option<SuccessfulConnection>,
-        mut successful_clients: Vec<SuccessfulConnection>,
+        winner: Option<SuccessfulConnection>,
         errors: Vec<FailedConnection>,
         shared_core: ClientCore,
         race_start: MonotonicInstant,
     ) -> Result<(Box<dyn Client>, TransportProtocol)> {
-        // 打印所有协议的耗时信息
-        Self::log_protocol_timings(&first_success, &successful_clients, &errors);
+        // 打印已结束协议的耗时信息
+        Self::log_protocol_timings(&winner, &errors);
 
-        if let Some((first_index, first_protocol, first_client, first_elapsed)) = first_success {
-            // 合并所有成功的连接，选择优先级最高的
-            successful_clients.push((first_index, first_protocol, first_client, first_elapsed));
-            successful_clients.sort_by_key(|(index, _protocol, _client, _elapsed)| *index);
-
-            // 选择优先级最高的（index 最小的）
-            let (selected_index, selected_protocol, mut selected_client, selected_elapsed) =
-                successful_clients.remove(0);
-
-            let selected_ms = selected_elapsed.as_secs_f64() * 1000.0;
-            let total_ms = race_start.elapsed().as_secs_f64() * 1000.0;
-            tracing::info!(
-                "协议竞速成功: {:?} (优先级: {}, 网络连接耗时: {:.3}ms, 总竞速时间: {:.3}ms)",
-                selected_protocol,
-                selected_index,
-                selected_ms,
-                total_ms
-            );
-
-            // 先由客户端主动断开所有未选中连接（await 完成），再在选中连接上发 CONNECT，
-            // 避免未选中连接仍在线时服务端对其发 KICK 导致误报「被踢」和前端断连
-            Self::disconnect_unselected_clients(successful_clients).await;
-
-            // 现在发送 CONNECT 消息（网络连接已建立）
-            tracing::debug!(
-                "发送 CONNECT 消息: {:?} (优先级: {})",
-                selected_protocol,
-                selected_index
-            );
-            selected_client.connect().await?;
-
-            // 同步连接状态到共享的 core
-            shared_core.state_manager.set_connected();
-
-            Ok((selected_client, selected_protocol))
-        } else {
+        let Some((selected_index, selected_protocol, mut selected_client, selected_elapsed)) =
+            winner
+        else {
             // 所有协议都失败了
-            Self::build_all_failed_error(errors)
-        }
+            return Self::build_all_failed_error(errors);
+        };
+
+        let selected_ms = selected_elapsed.as_secs_f64() * 1000.0;
+        let total_ms = race_start.elapsed().as_secs_f64() * 1000.0;
+        tracing::info!(
+            "协议竞速成功: {:?} (编号: {}, 网络连接耗时: {:.3}ms, 总竞速时间: {:.3}ms)",
+            selected_protocol,
+            selected_index,
+            selected_ms,
+            total_ms
+        );
+
+        // 发送 CONNECT（复用竞速建好的网络连接）
+        tracing::debug!(
+            "发送 CONNECT 消息: {:?} (编号: {})",
+            selected_protocol,
+            selected_index
+        );
+        selected_client.connect().await?;
+
+        // 同步连接状态到共享的 core
+        shared_core.state_manager.set_connected();
+
+        Ok((selected_client, selected_protocol))
     }
 
-    /// 打印所有协议的耗时信息
-    fn log_protocol_timings(
-        first_success: &Option<SuccessfulConnection>,
-        successful_clients: &[SuccessfulConnection],
-        errors: &[FailedConnection],
-    ) {
+    /// 打印已结束协议的耗时信息（胜出时还在建连、已被中止的协议不在其中）
+    fn log_protocol_timings(winner: &Option<SuccessfulConnection>, errors: &[FailedConnection]) {
         tracing::info!("协议竞速耗时统计：");
 
-        // 收集所有协议的结果（成功 + 失败）
-        let mut all_results: Vec<(usize, TransportProtocol, Option<Duration>, Option<String>)> =
-            Vec::new();
+        // 收集已结束协议的结果（胜出 + 失败）
+        let mut all_results: Vec<(usize, TransportProtocol, Duration, Option<String>)> = Vec::new();
 
-        // 添加成功的连接
-        if let Some((index, protocol, _, elapsed)) = first_success {
-            all_results.push((*index, *protocol, Some(*elapsed), None));
+        if let Some((index, protocol, _, elapsed)) = winner {
+            all_results.push((*index, *protocol, *elapsed, None));
         }
 
-        for (index, protocol, _, elapsed) in successful_clients {
-            all_results.push((*index, *protocol, Some(*elapsed), None));
-        }
-
-        // 添加失败的连接
         for (index, protocol, error, elapsed) in errors {
-            all_results.push((*index, *protocol, Some(*elapsed), Some(error.to_string())));
+            all_results.push((*index, *protocol, *elapsed, Some(error.to_string())));
         }
 
-        // 按优先级排序
+        // 按编号排序
         all_results.sort_by_key(|(index, _, _, _)| *index);
 
-        // 打印每个协议的耗时
-        for (index, protocol, elapsed_opt, error_opt) in all_results {
+        for (index, protocol, elapsed, error_opt) in all_results {
             let protocol_name = match protocol {
                 TransportProtocol::WebSocket => "WebSocket",
                 TransportProtocol::QUIC => "QUIC",
                 TransportProtocol::TCP => "TCP",
             };
+            let ms = elapsed.as_secs_f64() * 1000.0;
 
-            match (elapsed_opt, error_opt) {
-                (Some(elapsed), None) => {
-                    let ms = elapsed.as_secs_f64() * 1000.0;
-                    // 检查是否是第一个成功的（会被选中）
-                    let is_first = first_success
-                        .as_ref()
-                        .map(|(idx, _, _, _)| *idx == index)
-                        .unwrap_or(false);
-                    if is_first {
-                        tracing::info!(
-                            "  [{:2}] {:12} 成功 - {:.3}ms (已选中)",
-                            index,
-                            protocol_name,
-                            ms
-                        );
-                    } else {
-                        tracing::info!("  [{:2}] {:12} 成功 - {:.3}ms", index, protocol_name, ms);
-                    }
+            match error_opt {
+                None => {
+                    tracing::info!(
+                        "  [{:2}] {:12} 成功 - {:.3}ms (已选中)",
+                        index,
+                        protocol_name,
+                        ms
+                    );
                 }
-                (Some(elapsed), Some(err)) => {
-                    let ms = elapsed.as_secs_f64() * 1000.0;
+                Some(err) => {
                     // 截断错误信息，避免日志过长
-                    let err_short = if err.len() > 50 {
-                        format!("{}...", &err[..50])
+                    let err_short = if err.chars().count() > 50 {
+                        format!("{}...", err.chars().take(50).collect::<String>())
                     } else {
                         err
                     };
@@ -690,54 +583,8 @@ impl HybridClient {
                         err_short
                     );
                 }
-                _ => {}
             }
         }
-    }
-
-    /// 关闭未选中的连接（客户端主动断开，并等待全部关闭完成）
-    ///
-    /// 先让每个未选中 client 与共享状态脱钩（`detach_from_race`）并置位 set_disconnect_requested(true)，
-    /// 再并行 await 各 disconnect，确保在选中连接发送 CONNECT 之前未选中连接已关闭，避免服务端对未选中
-    /// 连接发 KICK 导致误报「被踢」。脱钩之后，它关闭时的事件不再到选中连接的观察者，主动断开标记也只
-    /// 置在它自己身上。
-    async fn disconnect_unselected_clients(clients: Vec<SuccessfulConnection>) {
-        if clients.is_empty() {
-            return;
-        }
-
-        tracing::info!(
-            "正在主动关闭 {} 个未选中的连接（客户端先断）...",
-            clients.len()
-        );
-
-        let mut handles = Vec::with_capacity(clients.len());
-        for (index, protocol, mut client, elapsed) in clients {
-            tracing::debug!(
-                "关闭未选中的连接: {:?} (优先级: {}, 耗时: {:?})",
-                protocol,
-                index,
-                elapsed
-            );
-            client.detach_from_race();
-            client.set_disconnect_requested(true);
-            let handle = tokio::spawn(async move {
-                let res = client.disconnect().await;
-                (protocol, res)
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            if let Ok((protocol, res)) = handle.await {
-                match res {
-                    Ok(()) => tracing::debug!("{:?} 未选中连接已关闭", protocol),
-                    Err(e) => tracing::warn!("关闭 {:?} 连接时出错: {}", protocol, e),
-                }
-            }
-        }
-
-        tracing::info!("所有未选中的连接已主动关闭");
     }
 
     /// 构建所有协议都失败的错误信息
@@ -930,19 +777,14 @@ impl HybridClient {
 
         let core = ClientCore::new(&config);
         let race_timeout = config.race_timeout.unwrap_or(Duration::from_secs(5));
-        let inflight: RaceInflight = Arc::new(StdMutex::new(Vec::new()));
-        let inflight_cleanup = Arc::clone(&inflight);
 
-        let race_result = platform_timeout(
-            race_timeout,
-            Self::race_connect(config, core.clone(), inflight),
-        )
-        .await;
+        // 超时时整个竞速 future 被丢弃：还在建连的任务随 `RaceTasks` 一起中止，不等它们收尾。
+        let race_result =
+            platform_timeout(race_timeout, Self::race_connect(config, core.clone())).await;
 
         let (client, protocol) = match race_result {
             Ok(result) => result?,
             Err(_) => {
-                Self::cleanup_inflight(&inflight_cleanup).await;
                 return Err(FlareError::connection_failed(format!(
                     "Protocol race timed out after {:?}",
                     race_timeout
@@ -962,6 +804,8 @@ impl HybridClient {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod hybrid_race_tests {
     use super::*;
+    #[cfg(feature = "websocket")]
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct TrackedRaceClient {
@@ -1013,92 +857,181 @@ mod hybrid_race_tests {
         Box::new(TrackedRaceClient::new(disconnected, disconnect_requested))
     }
 
-    #[tokio::test]
-    async fn cleanup_remaining_race_handles_disconnects_successful_clients() {
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let disconnect_requested = Arc::new(AtomicBool::new(false));
-        let client = ok_client(Arc::clone(&disconnected), Arc::clone(&disconnect_requested));
+    /// 任务的 future 被丢弃（中止，或正常结束）时置位。
+    struct DropFlag(Arc<AtomicBool>);
 
-        let handle = tokio::spawn(async move {
-            (
-                TransportProtocol::QUIC,
-                1,
-                Ok(client),
-                Duration::from_millis(1),
-            )
-        });
-
-        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
-
-        assert!(disconnected.load(Ordering::SeqCst));
-        assert!(disconnect_requested.load(Ordering::SeqCst));
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
-    #[tokio::test]
-    async fn cleanup_remaining_race_handles_ignores_failed_clients() {
-        let handle = tokio::spawn(async move {
-            (
-                TransportProtocol::QUIC,
-                0,
-                Err(FlareError::connection_failed("mock failure".to_string())),
-                Duration::ZERO,
-            )
-        });
-
-        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
+    async fn wait_for_flag(flag: &AtomicBool, what: &str) {
+        let started = std::time::Instant::now();
+        while !flag.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{what} not observed within 2s"
+            );
+            crate::common::platform::sleep(Duration::from_millis(5)).await;
+        }
     }
 
+    /// 第一个建好的连接一建好就胜出：不等还在建连的协议（这里要 30 s 才结束，相当于 UDP 被静默丢弃时
+    /// QUIC 握手到连接超时），之后那个任务在后台被中止。此前竞速等所有未选中的连接收尾，在竞速时限
+    /// 处整体失败。
     #[tokio::test]
-    async fn wait_for_connections_cleans_up_inflight_losers_after_early_win() {
+    async fn the_first_connection_wins_without_waiting_for_the_others() {
         let winner_disconnected = Arc::new(AtomicBool::new(false));
         let winner_requested = Arc::new(AtomicBool::new(false));
-        let loser_disconnected = Arc::new(AtomicBool::new(false));
-        let loser_requested = Arc::new(AtomicBool::new(false));
+        let handshake_dropped = Arc::new(AtomicBool::new(false));
 
-        let fast = tokio::spawn({
+        let mut tasks = RaceTasks::new();
+        tasks.spawn({
+            let handshake_dropped = Arc::clone(&handshake_dropped);
+            async move {
+                let _dropped = DropFlag(handshake_dropped);
+                crate::common::platform::sleep(Duration::from_secs(30)).await;
+                (
+                    TransportProtocol::QUIC,
+                    0,
+                    Err(FlareError::connection_timeout("Connection timeout")),
+                    Duration::from_secs(30),
+                )
+            }
+        });
+        tasks.spawn({
             let winner_disconnected = Arc::clone(&winner_disconnected);
             let winner_requested = Arc::clone(&winner_requested);
             async move {
                 crate::common::platform::sleep(Duration::from_millis(5)).await;
                 (
                     TransportProtocol::WebSocket,
-                    0,
+                    1,
                     Ok(ok_client(winner_disconnected, winner_requested)),
                     Duration::from_millis(5),
                 )
             }
         });
 
-        let slow = tokio::spawn({
+        let started = std::time::Instant::now();
+        let (winner, errors) = HybridClient::wait_for_first_connection(&mut tasks).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the race must not wait for the slower protocol: {:?}",
+            started.elapsed()
+        );
+        let (index, protocol, _client, _elapsed) = winner.expect("WebSocket wins");
+        assert_eq!((index, protocol), (1, TransportProtocol::WebSocket));
+        assert!(errors.is_empty());
+        assert_eq!(tasks.len(), 1, "the QUIC handshake is still in flight");
+
+        HybridClient::close_race_losers_in_background(tasks);
+        wait_for_flag(&handshake_dropped, "the in-flight handshake being aborted").await;
+        assert!(
+            !winner_disconnected.load(Ordering::SeqCst),
+            "closing the losers must not touch the winner"
+        );
+        assert!(!winner_requested.load(Ordering::SeqCst));
+    }
+
+    /// 失败的协议不影响后来建好的协议胜出，失败原因随结果带回；全部失败时没有胜出者。
+    #[tokio::test]
+    async fn failures_before_the_first_connection_are_collected() {
+        let mut tasks = RaceTasks::new();
+        tasks.spawn(async {
+            (
+                TransportProtocol::QUIC,
+                0,
+                Err(FlareError::connection_failed("refused")),
+                Duration::from_millis(1),
+            )
+        });
+        tasks.spawn(async {
+            crate::common::platform::sleep(Duration::from_millis(50)).await;
+            (
+                TransportProtocol::WebSocket,
+                1,
+                Ok(ok_client(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                )),
+                Duration::from_millis(50),
+            )
+        });
+        let (winner, errors) = HybridClient::wait_for_first_connection(&mut tasks).await;
+        assert_eq!(winner.map(|w| w.1), Some(TransportProtocol::WebSocket));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, TransportProtocol::QUIC);
+
+        let mut all_failed = RaceTasks::new();
+        for (index, protocol) in [TransportProtocol::QUIC, TransportProtocol::WebSocket]
+            .into_iter()
+            .enumerate()
+        {
+            all_failed.spawn(async move {
+                (
+                    protocol,
+                    index,
+                    Err(FlareError::connection_failed("refused")),
+                    Duration::ZERO,
+                )
+            });
+        }
+        let (winner, errors) = HybridClient::wait_for_first_connection(&mut all_failed).await;
+        assert!(winner.is_none());
+        assert_eq!(errors.len(), 2);
+    }
+
+    /// 胜出时已经建好、还没取走结果的未选中连接：在后台以「我方主动断开」关闭。失败的任务直接忽略。
+    #[tokio::test]
+    async fn established_losers_are_closed_in_the_background() {
+        let loser_disconnected = Arc::new(AtomicBool::new(false));
+        let loser_requested = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let mut tasks = RaceTasks::new();
+        tasks.spawn({
             let loser_disconnected = Arc::clone(&loser_disconnected);
             let loser_requested = Arc::clone(&loser_requested);
+            let finished = Arc::clone(&finished);
             async move {
-                crate::common::platform::sleep(Duration::from_millis(200)).await;
+                let _finished = DropFlag(finished);
                 (
                     TransportProtocol::QUIC,
-                    1,
+                    0,
                     Ok(ok_client(loser_disconnected, loser_requested)),
-                    Duration::from_millis(200),
+                    Duration::from_millis(1),
                 )
             }
         });
+        tasks.spawn(async {
+            (
+                TransportProtocol::WebSocket,
+                1,
+                Err(FlareError::connection_failed("mock failure")),
+                Duration::ZERO,
+            )
+        });
+        // 让建好的那个任务先跑完：中止只对还没结束的任务生效
+        wait_for_flag(&finished, "the loser task finishing").await;
 
-        let (first, _also_fast, errors) = {
-            let inflight: RaceInflight = Arc::new(StdMutex::new(vec![fast, slow]));
-            HybridClient::wait_for_connections(inflight).await
-        };
-
-        assert!(first.is_some());
-        assert!(errors.is_empty());
-        assert!(
-            !winner_disconnected.load(Ordering::SeqCst),
-            "winner must not be disconnected during race cleanup"
-        );
-        assert!(
-            loser_disconnected.load(Ordering::SeqCst),
-            "in-flight loser must be disconnected after early win"
-        );
+        HybridClient::close_race_losers_in_background(tasks);
+        wait_for_flag(&loser_disconnected, "the established loser being closed").await;
         assert!(loser_requested.load(Ordering::SeqCst));
+    }
+
+    /// 竞速耗时日志按字符截断错误信息：截断处落在多字节字符中间时不能 panic。这里第 50 个字节
+    /// 落在一个汉字中间（「错误 [CONNECTION_FAILED] 」占 27 字节，之后每个汉字 3 字节）。
+    #[test]
+    fn race_timing_log_truncates_non_ascii_errors_on_a_char_boundary() {
+        let error =
+            FlareError::connection_failed("读取证书失败读取证书失败读取证书失败读取证书失败");
+        assert!(!error.to_string().is_char_boundary(50));
+        HybridClient::log_protocol_timings(
+            &None,
+            &[(0, TransportProtocol::QUIC, error, Duration::from_millis(1))],
+        );
     }
 
     /// 记下共享观察者列表收到的事件。
@@ -1113,9 +1046,9 @@ mod hybrid_race_tests {
         }
     }
 
-    /// 关掉未选中的连接（选出胜者后关掉的、竞速收尾时才建好的）之前先与共享状态脱钩：它关闭时的
-    /// 断开事件不到选中连接的观察者，它置位的主动断开标记也不留在共享标记上。此前两者都落在共享状态上：
-    /// 选中的连接一直带着「我方已主动断开」，被踢时不通知观察者。
+    /// 关掉未选中的连接之前先与共享状态脱钩：它关闭时的断开事件不到选中连接的观察者，它置位的主动
+    /// 断开标记也不留在共享标记上。此前两者都落在共享状态上：选中的连接一直带着「我方已主动断开」，
+    /// 被踢时不通知观察者。
     #[cfg(feature = "websocket")]
     #[tokio::test]
     async fn closing_race_losers_leaves_the_shared_state_alone() {
@@ -1130,23 +1063,27 @@ mod hybrid_race_tests {
             Box::new(WebSocketClient::with_core(config.clone(), core)) as Box<dyn Client>
         };
 
-        HybridClient::disconnect_unselected_clients(vec![(
-            1,
-            TransportProtocol::WebSocket,
-            loser(),
-            Duration::from_millis(1),
-        )])
-        .await;
+        HybridClient::close_race_loser(loser()).await;
+
         let late = loser();
-        let handle = tokio::spawn(async move {
-            (
-                TransportProtocol::WebSocket,
-                1,
-                Ok(late),
-                Duration::from_millis(1),
-            )
+        let finished = Arc::new(AtomicBool::new(false));
+        let mut tasks = RaceTasks::new();
+        tasks.spawn({
+            let finished = Arc::clone(&finished);
+            async move {
+                let _finished = DropFlag(finished);
+                (
+                    TransportProtocol::WebSocket,
+                    1,
+                    Ok(late),
+                    Duration::from_millis(1),
+                )
+            }
         });
-        HybridClient::cleanup_remaining_race_handles(vec![handle]).await;
+        wait_for_flag(&finished, "the late loser task finishing").await;
+        HybridClient::close_race_losers_in_background(tasks);
+        // 后台收尾没有可等的句柄：给它一点时间跑完
+        crate::common::platform::sleep(Duration::from_millis(100)).await;
 
         assert!(
             !shared.is_disconnect_requested(),

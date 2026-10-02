@@ -259,7 +259,9 @@ impl ConnectionObserver for MyObserver {
 .with_protocol_url(TransportProtocol::QUIC, "quic://127.0.0.1:8081".to_string())
 ```
 
-协议列表的顺序就是优先级顺序，QUIC 在前表示 QUIC 优先级更高。
+第一个建好网络连接的协议胜出，立即在它上面发 CONNECT，不等其余协议（包括排在前面、还没建好的协议）；
+未选中的协议在后台中止或关闭。协议列表的顺序是发起顺序，也是日志与全部失败时错误信息里的编号。
+例如 UDP 被静默丢弃时经 WebSocket 连上，不等 QUIC 握手到连接超时。
 
 ### 3. 消息解析
 
