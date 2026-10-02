@@ -54,6 +54,15 @@ impl ClientCore {
             metadata.insert("compression".to_string(), compression.as_str().into_bytes());
         }
 
+        // 声明本端能解的压缩：没指定压缩时，服务端只会从这里面选它的默认压缩。
+        let accepted = Self::accepted_compressions();
+        if !accepted.is_empty() {
+            metadata.insert(
+                crate::common::constants::metadata_keys::ACCEPT_COMPRESSION.to_string(),
+                accepted.join(",").into_bytes(),
+            );
+        }
+
         if self.config.is_force_format() {
             metadata.insert("force_format".to_string(), b"true".to_vec());
         }
@@ -74,6 +83,18 @@ impl ClientCore {
         }
 
         metadata
+    }
+
+    /// 本端注册了解压器的内置压缩（`gzip` 需要 `compression-gzip` 特性）。
+    fn accepted_compressions() -> Vec<String> {
+        [
+            crate::common::compression::CompressionAlgorithm::Gzip,
+            crate::common::compression::CompressionAlgorithm::Zstd,
+        ]
+        .iter()
+        .map(|algorithm| algorithm.as_str())
+        .filter(|name| crate::common::compression::CompressionUtil::is_registered(name))
+        .collect()
     }
 
     fn determine_connect_format(
@@ -314,6 +335,21 @@ mod tests {
         let core = ClientCore::new(&sample_config("u1", "tok"));
         let frame = frame_with_system_command(ping(), Reliability::AtLeastOnce);
         assert!(core.handle_connect_ack(&frame).is_err());
+    }
+
+    /// 客户端在 CONNECT 里声明能解的压缩；没指定压缩时不发 `compression`，由服务端在声明范围内
+    /// 选它的默认压缩。
+    #[cfg(feature = "compression-gzip")]
+    #[test]
+    fn build_connect_metadata_declares_the_compressions_it_can_decode() {
+        let core = ClientCore::new(&sample_config("alice", "secret-token"));
+        let metadata = core.build_connect_metadata();
+        assert!(!metadata.contains_key("compression"));
+        let accepted = String::from_utf8(
+            metadata[crate::common::constants::metadata_keys::ACCEPT_COMPRESSION].clone(),
+        )
+        .unwrap();
+        assert!(accepted.split(',').any(|name| name == "gzip"), "{accepted}");
     }
 
     #[test]

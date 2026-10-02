@@ -150,7 +150,8 @@ impl BaseServerBuilderConfig {
         self
     }
 
-    /// 设置默认压缩算法（用于协商，默认 None）
+    /// 设置默认压缩算法（用于协商，默认 None）。客户端没指定压缩时，只有客户端声明能解它
+    /// （CONNECT metadata `accept_compression`）才采用，见 [`ServerConfig::default_compression`]。
     #[must_use]
     pub fn with_default_compression(mut self, compression: CompressionAlgorithm) -> Self {
         self.config = self.config.with_compression(compression);

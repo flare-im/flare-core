@@ -63,6 +63,12 @@
   字段取默认值（`true`、1 s），行为不变。
 - `ClientConnectionManager::start_auto_reconnect` 遵守 `max_reconnect_attempts`：为 `Some(n)` 时连续
   失败 n 次即停止（`ClientConfig` 的默认值是 `Some(5)`）。此前忽略这一项，一直重试。
+- 压缩协商：客户端在 CONNECT 里没有指定压缩时，服务端默认压缩只在客户端声明能解它（metadata
+  `accept_compression`，见下文「新增」）时才采用，否则不压缩。此前没指定就用服务端默认压缩，
+  不带对应解压器的客户端（例如编译时没开 `compression-gzip`）解不开此后的帧，包括停机 CLOSE。
+  本版本的客户端会自动声明；旧客户端连到默认压缩为 gzip 的新服务端时改为不压缩。
+  `NegotiationResult` 新增 `accepted_compressions` 字段，用结构体字面量构造它的代码需要补上
+  这个字段或改用 `..Default::default()`。
 
 ### 修复
 
@@ -180,6 +186,9 @@
 - `Server::stop_accepting`（默认什么都不做）：停止接受新连接、保留已建立的连接。WebSocket、
   TCP、QUIC 服务端实现了它，`stop` 也先停止接受新连接；`HybridServer::stop` 先关所有协议的入口，
   再统一通知在线连接。
+- 客户端在 CONNECT 元数据 `accept_compression`（`metadata_keys::ACCEPT_COMPRESSION`，逗号分隔）里
+  声明本端注册了解压器的内置压缩（开了 `compression-gzip` 时为 `gzip`）；服务端只在客户端没指定
+  压缩时从中选它的默认压缩。
 
 ### 其他
 

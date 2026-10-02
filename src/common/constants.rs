@@ -43,6 +43,8 @@ pub mod metadata_keys {
     pub const USER_ID: &str = "user_id";
     /// 压缩算法
     pub const COMPRESSION: &str = "compression";
+    /// 客户端能解的压缩（CONNECT 元数据，逗号分隔）
+    pub const ACCEPT_COMPRESSION: &str = "accept_compression";
     /// 序列化格式
     pub const FORMAT: &str = "format";
     /// 优先级

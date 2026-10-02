@@ -13,6 +13,8 @@ use crate::common::protocol::{Frame, SystemCommand};
 use std::collections::HashMap;
 
 const METADATA_COMPRESSION: &str = "compression";
+const METADATA_ACCEPT_COMPRESSION: &str =
+    crate::common::constants::metadata_keys::ACCEPT_COMPRESSION;
 const METADATA_FORMAT: &str = "format";
 const METADATA_ENCRYPTION: &str = "encryption";
 const METADATA_DEVICE_ID: &str = "device_id";
@@ -26,6 +28,7 @@ const METADATA_FORCE_FORMAT: &str = "force_format";
 
 const DEVICE_RESERVED_METADATA_KEYS: &[&str] = &[
     METADATA_COMPRESSION,
+    METADATA_ACCEPT_COMPRESSION,
     METADATA_FORMAT,
     METADATA_ENCRYPTION,
     METADATA_DEVICE_ID,
@@ -47,6 +50,9 @@ pub struct NegotiationResult {
     pub serialization_format_specified: bool,
     /// 压缩算法（客户端请求的压缩方式）
     pub compression: CompressionAlgorithm,
+    /// 客户端声明能解的压缩（metadata `accept_compression`，逗号分隔，不含 `none`）。服务端只在
+    /// 客户端没有指定压缩时，从这里面取自己的默认压缩。
+    pub accepted_compressions: Vec<CompressionAlgorithm>,
     /// 加密方式
     pub encryption: EncryptionAlgorithm,
     /// 是否强制指定格式（客户端强制模式，服务端必须使用客户端指定的格式）
@@ -68,6 +74,7 @@ impl Default for NegotiationResult {
             serialization_format: SerializationFormat::Json,
             serialization_format_specified: false,
             compression: CompressionAlgorithm::None,
+            accepted_compressions: Vec::new(),
             encryption: EncryptionAlgorithm::None,
             is_forced: false,
             device_info: None,
@@ -100,6 +107,7 @@ pub fn parse_connect_message(frame: &Frame) -> Result<NegotiationResult> {
         serialization_format,
         serialization_format_specified,
         compression: parse_compression(metadata),
+        accepted_compressions: parse_accepted_compressions(metadata),
         encryption: parse_encryption(metadata),
         is_forced: metadata_string(metadata, METADATA_FORCE_FORMAT).is_some_and(|v| v == "true"),
         device_info: parse_device_info(metadata),
@@ -137,6 +145,24 @@ fn parse_compression(metadata: &HashMap<String, Vec<u8>>) -> CompressionAlgorith
     metadata_string(metadata, METADATA_COMPRESSION)
         .and_then(|value| CompressionAlgorithm::from_str(&value))
         .unwrap_or(CompressionAlgorithm::None)
+}
+
+fn parse_accepted_compressions(metadata: &HashMap<String, Vec<u8>>) -> Vec<CompressionAlgorithm> {
+    let Some(value) = metadata_string(metadata, METADATA_ACCEPT_COMPRESSION) else {
+        return Vec::new();
+    };
+    let mut accepted = Vec::new();
+    for algorithm in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(CompressionAlgorithm::from_str)
+    {
+        if algorithm != CompressionAlgorithm::None && !accepted.contains(&algorithm) {
+            accepted.push(algorithm);
+        }
+    }
+    accepted
 }
 
 fn parse_encryption(metadata: &HashMap<String, Vec<u8>>) -> EncryptionAlgorithm {
@@ -309,6 +335,32 @@ mod tests {
             !device.metadata.contains_key(METADATA_TENANT_ID),
             "租户是连接身份的一部分，不应混进设备元数据"
         );
+    }
+
+    /// `accept_compression` 是客户端能解的压缩列表：去重、去掉 `none`，不进设备元数据。
+    #[test]
+    fn parses_accepted_compressions_and_keeps_them_out_of_device_metadata() {
+        let metadata = HashMap::from([
+            (
+                METADATA_ACCEPT_COMPRESSION.to_string(),
+                b" gzip, zstd,none,,gzip".to_vec(),
+            ),
+            (METADATA_DEVICE_ID.to_string(), b"device-1".to_vec()),
+        ]);
+        let frame = frame_with_system_command(
+            connect(SerializationFormat::Json, metadata),
+            Reliability::AtLeastOnce,
+        );
+
+        let result = parse_connect_message(&frame).expect("parse connect");
+
+        assert_eq!(result.compression, CompressionAlgorithm::None);
+        assert_eq!(
+            result.accepted_compressions,
+            vec![CompressionAlgorithm::Gzip, CompressionAlgorithm::Zstd]
+        );
+        let device = result.device_info.expect("device info");
+        assert!(!device.metadata.contains_key(METADATA_ACCEPT_COMPRESSION));
     }
 
     #[test]

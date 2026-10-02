@@ -853,11 +853,20 @@ impl ServerCore {
             self.default_serialization_format
         };
 
+        // 压缩只用客户端解得开的：客户端指定了（或强制）就用它的；没指定时，服务端默认压缩须在
+        // 客户端声明能解的压缩（`accept_compression`）之内，否则不压缩。以前没指定就用服务端默认，
+        // 不带对应解压器的客户端（例如编译时没开 gzip）解不开此后的帧，包括停机 CLOSE。
         let final_compression =
             if negotiation.is_forced || negotiation.compression != CompressionAlgorithm::None {
                 negotiation.compression.clone()
-            } else {
+            } else if self.default_compression != CompressionAlgorithm::None
+                && negotiation
+                    .accepted_compressions
+                    .contains(&self.default_compression)
+            {
                 self.default_compression.clone()
+            } else {
+                CompressionAlgorithm::None
             };
 
         // 加密方式
@@ -1360,6 +1369,43 @@ mod tests {
         assert_eq!(format, SerializationFormat::Protobuf);
         assert_eq!(compression, config.default_compression);
         assert_eq!(encryption, config.default_encryption);
+    }
+
+    /// 客户端没指定压缩时，服务端默认压缩只在客户端声明能解时才用；客户端指定的压缩照用。
+    /// 以前没指定就用服务端默认（网关是 gzip），不带 gzip 解压器的客户端解不开此后的帧。
+    #[test]
+    fn server_default_compression_needs_the_clients_declared_support() {
+        let config = ServerConfig::default().with_compression(CompressionAlgorithm::Gzip);
+        let core = ServerCore::new(&config, None);
+
+        let undeclared = negotiation::NegotiationResult::default();
+        let (_, compression, _) = core.determine_negotiation_result(&undeclared);
+        assert_eq!(compression, CompressionAlgorithm::None);
+
+        let accepts_gzip = negotiation::NegotiationResult {
+            accepted_compressions: vec![CompressionAlgorithm::Gzip],
+            ..Default::default()
+        };
+        let (_, compression, _) = core.determine_negotiation_result(&accepts_gzip);
+        assert_eq!(compression, CompressionAlgorithm::Gzip);
+
+        let accepts_other = negotiation::NegotiationResult {
+            accepted_compressions: vec![CompressionAlgorithm::Zstd],
+            ..Default::default()
+        };
+        let (_, compression, _) = core.determine_negotiation_result(&accepts_other);
+        assert_eq!(compression, CompressionAlgorithm::None);
+
+        let no_server_default = ServerCore::new(&ServerConfig::default(), None);
+        let (_, compression, _) = no_server_default.determine_negotiation_result(&accepts_gzip);
+        assert_eq!(compression, CompressionAlgorithm::None);
+
+        let requests_gzip = negotiation::NegotiationResult {
+            compression: CompressionAlgorithm::Gzip,
+            ..Default::default()
+        };
+        let (_, compression, _) = no_server_default.determine_negotiation_result(&requests_gzip);
+        assert_eq!(compression, CompressionAlgorithm::Gzip);
     }
 
     #[test]

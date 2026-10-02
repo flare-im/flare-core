@@ -21,7 +21,8 @@ pub struct ServerConfig {
     pub protocol_addresses: Option<std::collections::HashMap<TransportProtocol, String>>,
     /// 序列化格式（默认格式）
     pub default_serialization_format: SerializationFormat,
-    /// 压缩算法（默认）
+    /// 默认压缩算法。客户端在 CONNECT 里没有指定压缩时，只有它出现在客户端声明能解的压缩
+    /// （metadata `accept_compression`）里才采用，否则不压缩；客户端指定了压缩就用客户端的。
     pub default_compression: CompressionAlgorithm,
     /// 加密算法（默认）
     pub default_encryption: EncryptionAlgorithm,
