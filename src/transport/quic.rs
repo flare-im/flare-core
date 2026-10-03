@@ -1,7 +1,7 @@
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
 use crate::transport::events::{
-    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    ArcObserver, ConnectionEvent, attach_observer, notify_observers as notify_connection_observers,
     notify_observers_and_clear as notify_connection_observers_and_clear,
 };
 use async_trait::async_trait;
@@ -329,29 +329,16 @@ impl QUICTransport {
 #[async_trait]
 impl Connection for QUICTransport {
     fn add_observer(&mut self, observer: ArcObserver) {
-        // 已经关闭的流不能再报 Connected：否则上层会在一条死流上发 CONNECT 并干等 CONNECT_ACK。
-        if self.is_closed.load(Ordering::SeqCst) {
-            observer.on_event(&ConnectionEvent::Disconnected(
-                STREAM_CLOSED_REASON.to_string(),
-            ));
-            return;
-        }
-        observer.on_event(&ConnectionEvent::Connected);
-        // 与读任务的「先标记关闭、再取走观察者」配对：持锁时仍未关闭，读任务之后一定会通知到它；
-        // 已经关闭，就由这里补一次 Disconnected。
-        let registered = match self.observers.lock() {
-            Ok(mut observers) if !self.is_closed.load(Ordering::SeqCst) => {
-                observers.push(Arc::clone(&observer));
-                true
-            }
-            _ => false,
-        };
-        if registered {
+        // 已经关闭的流只报 Disconnected，否则先报 Connected 再挂上；
+        // 两种回调都隔离观察者 panic（见 `attach_observer`）。
+        if attach_observer(
+            &self.observers,
+            &self.is_closed,
+            observer,
+            STREAM_CLOSED_REASON,
+            "quic add_observer",
+        ) {
             self.reader_gate.notify_one();
-        } else {
-            observer.on_event(&ConnectionEvent::Disconnected(
-                STREAM_CLOSED_REASON.to_string(),
-            ));
         }
     }
 

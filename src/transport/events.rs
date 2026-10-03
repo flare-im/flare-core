@@ -109,21 +109,72 @@ pub(crate) fn deliver_to_observers(
     source: &'static str,
 ) {
     for observer in observers {
-        let delivered =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer.on_event(event)));
-        if let Err(panic) = delivered {
-            let message = panic
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("non-string panic payload");
-            tracing::error!(
-                source,
-                panic = message,
-                "connection observer panicked; the other observers still receive the event"
-            );
-        }
+        deliver_to_observer(observer, event, source);
     }
+}
+
+/// 把一个事件交给单个观察者：它 panic 时记一条 ERROR 后返回，panic 不沿调用方上抛。
+pub(crate) fn deliver_to_observer(
+    observer: &ArcObserver,
+    event: &ConnectionEvent,
+    source: &'static str,
+) {
+    let delivered =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer.on_event(event)));
+    if let Err(panic) = delivered {
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        tracing::error!(
+            source,
+            panic = message,
+            "connection observer panicked; the other observers still receive the event"
+        );
+    }
+}
+
+/// 传输 `add_observer` 的共用部分：连接未关闭时先告诉新观察者 Connected 再挂上它，返回 true，
+/// 调用方随后唤醒等第一个观察者的读任务；已经关闭时只告诉它 Disconnected，返回 false。
+///
+/// 已经关闭的连接不能再报 Connected：否则上层会在一条死连接上发 CONNECT 并干等 CONNECT_ACK。
+/// 挂上与读任务的「先标记关闭、再取走观察者」配对：持锁时仍未关闭，读任务之后一定会通知到它；
+/// 已经关闭，就由这里补一次 Disconnected。
+///
+/// 这几次直接回调新观察者与读循环一样隔离 panic（见 [`deliver_to_observer`]）。原先直接回调，
+/// 观察者处理 Connected 时 panic 会沿 `add_observer` 上抛：它没挂上、读任务也没被唤醒，已到的帧
+/// 与之后的断开都没人收。
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "websocket", feature = "quic", feature = "tcp")
+))]
+pub(crate) fn attach_observer(
+    observers: &Mutex<Vec<ArcObserver>>,
+    is_closed: &std::sync::atomic::AtomicBool,
+    observer: ArcObserver,
+    closed_reason: &str,
+    source: &'static str,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let closed = || ConnectionEvent::Disconnected(closed_reason.to_string());
+    if is_closed.load(Ordering::SeqCst) {
+        deliver_to_observer(&observer, &closed(), source);
+        return false;
+    }
+    deliver_to_observer(&observer, &ConnectionEvent::Connected, source);
+    let registered = match observers.lock() {
+        Ok(mut observers) if !is_closed.load(Ordering::SeqCst) => {
+            observers.push(Arc::clone(&observer));
+            true
+        }
+        _ => false,
+    };
+    if !registered {
+        deliver_to_observer(&observer, &closed(), source);
+    }
+    registered
 }
 
 /// 传输读循环、重连任务上报一个事件：按快照在锁外逐个回调，观察者 panic 被隔离（见
@@ -386,5 +437,94 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "websocket", feature = "quic", feature = "tcp")
+    ))]
+    mod attach {
+        use super::*;
+
+        /// 处理 Connected 或 Disconnected 时 panic、其余事件照常记数的观察者。
+        struct PanicOnConnectionChange {
+            others: Arc<AtomicUsize>,
+        }
+
+        impl ConnectionObserver for PanicOnConnectionChange {
+            fn on_event(&self, event: &ConnectionEvent) {
+                if event.is_connected() || event.is_disconnected() {
+                    panic!("observer bug while handling a connection change");
+                }
+                self.others.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// 传输 `add_observer` 直接回调新观察者 Connected：它 panic 时 panic 不沿
+        /// `add_observer` 上抛，它照样挂上、之后的帧照常收到，后挂的观察者照常收到
+        /// Connected。原先 panic 上抛，观察者没挂上，读任务也不被唤醒。
+        #[test]
+        fn attach_isolates_a_panic_on_connected() {
+            let observers = Mutex::new(Vec::<ArcObserver>::new());
+            let is_closed = std::sync::atomic::AtomicBool::new(false);
+            let others = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
+
+            assert!(attach_observer(
+                &observers,
+                &is_closed,
+                Arc::new(PanicOnConnectionChange {
+                    others: Arc::clone(&others),
+                }),
+                "closed",
+                "test attach",
+            ));
+            assert!(attach_observer(
+                &observers,
+                &is_closed,
+                Arc::new(CountingObserver {
+                    calls: Arc::clone(&calls),
+                    drops: Arc::new(AtomicUsize::new(0)),
+                }),
+                "closed",
+                "test attach",
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "Connected for the second");
+            assert_eq!(observers.lock().unwrap().len(), 2);
+
+            let snapshot = observer_snapshot(&observers);
+            deliver_to_observers(
+                &snapshot,
+                &ConnectionEvent::Message(b"frame".to_vec()),
+                "test attach",
+            );
+            assert_eq!(
+                others.load(Ordering::SeqCst),
+                1,
+                "the first still gets frames"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        /// 连接已经关闭（挂之前或挂的那一刻）：只补一次 Disconnected，观察者在这里 panic
+        /// 同样不上抛，也不挂上。
+        #[test]
+        fn attach_isolates_a_panic_on_disconnected_once_closed() {
+            let observers = Mutex::new(Vec::<ArcObserver>::new());
+            let is_closed = std::sync::atomic::AtomicBool::new(true);
+            let others = Arc::new(AtomicUsize::new(0));
+
+            assert!(!attach_observer(
+                &observers,
+                &is_closed,
+                Arc::new(PanicOnConnectionChange {
+                    others: Arc::clone(&others),
+                }),
+                "closed",
+                "test attach",
+            ));
+            assert!(observers.lock().unwrap().is_empty());
+            assert_eq!(others.load(Ordering::SeqCst), 0);
+        }
     }
 }

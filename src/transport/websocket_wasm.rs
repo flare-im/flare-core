@@ -13,7 +13,8 @@ use crate::common::platform::{MonotonicInstant, monotonic_now, timeout, yield_to
 use crate::common::error::{FlareError, Result};
 use crate::transport::connection::Connection;
 use crate::transport::events::{
-    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    ArcObserver, ConnectionEvent, deliver_to_observer,
+    notify_observers as notify_connection_observers,
     notify_observers_and_clear as notify_connection_observers_and_clear,
 };
 
@@ -196,7 +197,12 @@ impl WebSocketTransport {
 #[async_trait]
 impl Connection for WebSocketTransport {
     fn add_observer(&mut self, observer: ArcObserver) {
-        observer.on_event(&ConnectionEvent::Connected);
+        // 与原生传输一样隔离新观察者处理 Connected 时的 panic（见 `deliver_to_observer`）。
+        deliver_to_observer(
+            &observer,
+            &ConnectionEvent::Connected,
+            "wasm websocket add_observer",
+        );
         if let Ok(mut observers) = self.observers.lock() {
             observers.push(observer);
         }

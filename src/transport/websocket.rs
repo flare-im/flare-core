@@ -2,7 +2,7 @@ use crate::common::error::{FlareError, Result};
 use crate::common::protocol::{Reliability, frame_with_system_command, pong};
 use crate::transport::connection::Connection;
 use crate::transport::events::{
-    ArcObserver, ConnectionEvent, notify_observers as notify_connection_observers,
+    ArcObserver, ConnectionEvent, attach_observer, notify_observers as notify_connection_observers,
     notify_observers_and_clear as notify_connection_observers_and_clear,
 };
 use async_trait::async_trait;
@@ -415,29 +415,16 @@ impl WebSocketTransport {
 #[async_trait]
 impl Connection for WebSocketTransport {
     fn add_observer(&mut self, observer: ArcObserver) {
-        // 已经关闭的连接不能再报 Connected：否则上层会在一条死连接上发 CONNECT 并干等 CONNECT_ACK。
-        if self.is_closed.load(Ordering::SeqCst) {
-            observer.on_event(&ConnectionEvent::Disconnected(
-                CONNECTION_CLOSED_REASON.to_string(),
-            ));
-            return;
-        }
-        observer.on_event(&ConnectionEvent::Connected);
-        // 与读任务的「先标记关闭、再取走观察者」配对：持锁时仍未关闭，读任务之后一定会通知到它；
-        // 已经关闭，就由这里补一次 Disconnected。
-        let registered = match self.observers.lock() {
-            Ok(mut observers) if !self.is_closed.load(Ordering::SeqCst) => {
-                observers.push(Arc::clone(&observer));
-                true
-            }
-            _ => false,
-        };
-        if registered {
+        // 已经关闭的连接只报 Disconnected，否则先报 Connected 再挂上；
+        // 两种回调都隔离观察者 panic（见 `attach_observer`）。
+        if attach_observer(
+            &self.observers,
+            &self.is_closed,
+            observer,
+            CONNECTION_CLOSED_REASON,
+            "websocket add_observer",
+        ) {
             self.reader_gate.notify_one();
-        } else {
-            observer.on_event(&ConnectionEvent::Disconnected(
-                CONNECTION_CLOSED_REASON.to_string(),
-            ));
         }
     }
 
@@ -694,6 +681,43 @@ mod tests {
         client.close().await.expect("client close");
         wait_for("the peer close is still reported", || {
             observer.disconnected()
+        })
+        .await;
+    }
+
+    /// 处理 `add_observer` 补报的 Connected 时 panic、其余事件照常记下的观察者。
+    #[derive(Default)]
+    struct PanicOnConnected {
+        inner: RecordingObserver,
+    }
+
+    impl ConnectionObserver for PanicOnConnected {
+        fn on_event(&self, event: &ConnectionEvent) {
+            if event.is_connected() {
+                panic!("observer bug while handling Connected");
+            }
+            self.inner.on_event(event);
+        }
+    }
+
+    /// 观察者处理 `add_observer` 补报的 Connected 时 panic：panic 不沿 `add_observer` 上抛，它照样
+    /// 挂上、读任务照样被唤醒，挂上之前已到的帧、之后的帧与对端关闭都照常收到。原先 panic 上抛，
+    /// 它没挂上，读任务一直等第一个观察者，这些都没人收。
+    #[tokio::test]
+    async fn an_observer_panicking_on_connected_still_gets_frames() {
+        let (mut server, mut client) = websocket_pair().await;
+        client.send(b"frame-1").await.expect("client send");
+
+        let observer = Arc::new(PanicOnConnected::default());
+        server.add_observer(observer.clone());
+        client.send(b"frame-2").await.expect("client send");
+        wait_for("both frames reach the observer", || {
+            observer.inner.messages() == vec![b"frame-1".to_vec(), b"frame-2".to_vec()]
+        })
+        .await;
+        client.close().await.expect("client close");
+        wait_for("the peer close is still reported", || {
+            observer.inner.disconnected()
         })
         .await;
     }
