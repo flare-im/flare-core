@@ -194,6 +194,10 @@ pub(crate) struct InboundFrameDone {
 }
 
 impl Drop for InboundFrameDone {
+    #[allow(
+        deprecated,
+        reason = "fetch_update is renamed try_update on newer toolchains, and try_update is unstable at the declared MSRV"
+    )]
     fn drop(&mut self) {
         let previous = self
             .in_flight
